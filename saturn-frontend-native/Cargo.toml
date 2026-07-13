@@ -1,0 +1,8 @@
+[package]
+name = "saturn-frontend-native"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+saturn-core = { path = "../saturn-core" }
+minifb = "0.27"

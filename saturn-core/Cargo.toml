@@ -1,0 +1,11 @@
+[package]
+name = "saturn-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+crossbeam = "0.8"
+arc-swap = "1.7"
+chd = "0.2"
+
+
