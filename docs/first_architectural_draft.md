@@ -1,100 +1,100 @@
-# Registro da sessão: arquiteturas de hardware, Saturn e emulação em Rust
+# Session log: hardware architectures, Saturn, and emulation in Rust
 
-Este documento reúne todas as perguntas feitas na sessão, o contexto de cada uma, minhas respostas, e os diagramas gerados — recriados aqui em **Mermaid.js** (estático) no lugar das versões animadas em SVG mostradas no chat.
+This document gathers every question asked during the session, the context behind each one, my answers, and the diagrams that were generated — recreated here in static **Mermaid.js** instead of the animated SVG versions shown in the chat.
 
 ---
 
-## 1. Diagrama da arquitetura x86: programa → CPU → caches → memória/GPU
+## 1. x86 architecture diagram: program → CPU → caches → memory/GPU
 
-**Pergunta:** pedido de um diagrama animado mostrando informações saindo de um programa, passando pela CPU, guardadas em cache L1/L2, e conversando com a memória (via FSB e slots DDR) e com a GPU (via FSB/PCI Express) — uma ilustração da arquitetura x86, barramentos e caches.
+**Question:** a request for an animated diagram showing information leaving a program, passing through the CPU, being stored in L1/L2 cache, and talking to memory (via the FSB and DDR slots) and to the GPU (via FSB/PCI Express) — an illustration of x86 architecture, buses, and caches.
 
-**Resposta:** expliquei o caminho: o programa é executado pelo núcleo (ALU); dados de uso frequente ficam em L1 (pequena, rapidíssima) e L2 (maior); quando não estão em cache, saem pelo Front Side Bus (FSB) até a RAM (via slots DDR) ou até a GPU (via PCI Express). Observei que esse desenho reflete a arquitetura x86 clássica (anos 2000); em CPUs modernas o FSB foi substituído por um controlador de memória integrado e por interconexões diretas (QPI/Infinity Fabric).
+**Answer:** I explained the path: the program runs on the core (ALU); frequently-used data sits in L1 (small, very fast) and L2 (larger); when it's not in cache, it goes out over the Front Side Bus (FSB) to RAM (via DDR slots) or to the GPU (via PCI Express). I noted that this layout reflects the classic x86 architecture (2000s); in modern CPUs the FSB has been replaced by an integrated memory controller and direct interconnects (QPI/Infinity Fabric).
 
 ```mermaid
 graph TD
-    Programa --> Nucleo["Núcleo (ALU)"]
-    Nucleo --> L1["Cache L1"]
-    Nucleo --> L2["Cache L2"]
+    Program --> Core["Core (ALU)"]
+    Core --> L1["L1 Cache"]
+    Core --> L2["L2 Cache"]
     L1 --> L2
-    L2 --> FSB["Barramento frontal (FSB)"]
-    FSB --> RAM["Memória RAM (slots DDR)"]
+    L2 --> FSB["Front Side Bus (FSB)"]
+    FSB --> RAM["RAM Memory (DDR slots)"]
     FSB --> GPU["GPU (via PCI Express)"]
 ```
 
 ---
 
-## 2. Do input do jogo até o frame na tela
+## 2. From game input to the frame on screen
 
-**Pergunta:** "crie algo mais completo, desde o input de um jogo até sair o frame na tela".
+**Question:** "create something more complete, from a game's input all the way to the frame showing up on screen."
 
-**Resposta:** dividi em duas partes. Parte 1 — o comando do jogador vai do periférico ao USB, a CPU processa a lógica do jogo (física, IA, próximo estado) e envia comandos de desenho à GPU via PCI Express. Parte 2 — dentro da GPU, o vertex shader posiciona os vértices, a rasterização converte triângulos em pixels, o pixel shader calcula a cor final; o frame pronto fica no framebuffer (VRAM) e sai por HDMI/DisplayPort até o monitor.
+**Answer:** I split it into two parts. Part 1 — the player's command goes from the peripheral to USB, the CPU processes the game logic (physics, AI, next state) and sends drawing commands to the GPU via PCI Express. Part 2 — inside the GPU, the vertex shader positions the vertices, rasterization converts triangles into pixels, the pixel shader computes the final color; the finished frame sits in the framebuffer (VRAM) and goes out over HDMI/DisplayPort to the monitor.
 
 ```mermaid
 graph TD
-    Periferico["Periférico de entrada"] --> USB["Controlador USB"]
-    USB --> CPU["CPU (lógica do jogo)"]
-    CPU -->|PCI Express| GPU["GPU (recebe a cena)"]
+    Peripheral["Input peripheral"] --> USB["USB controller"]
+    USB --> CPU["CPU (game logic)"]
+    CPU -->|PCI Express| GPU["GPU (receives the scene)"]
 ```
 
 ```mermaid
 graph LR
-    VS["Vertex shader"] --> RZ["Rasterização"] --> PS["Pixel shader"]
+    VS["Vertex shader"] --> RZ["Rasterization"] --> PS["Pixel shader"]
     PS --> FB["Framebuffer (VRAM)"]
-    FB --> OUT["Saída de vídeo (HDMI/DisplayPort)"]
+    FB --> OUT["Video output (HDMI/DisplayPort)"]
     OUT --> MON["Monitor"]
 ```
 
 ---
 
-## 3. Passeio físico pelo hardware (placa-mãe, barramentos e caches CPU vs. GPU)
+## 3. A physical tour of the hardware (motherboard, buses, and CPU vs. GPU caches)
 
-**Pergunta:** pedido para ver o "passeio" no hardware físico — CPU, GPU, memória DDR, disco, periféricos, monitor — com mais detalhes de FSB, caches de GPU e CPU, PCI Express e outros barramentos.
+**Question:** a request to see the "tour" of the physical hardware — CPU, GPU, DDR memory, disk, peripherals, monitor — with more detail on the FSB, GPU and CPU caches, PCI Express, and other buses.
 
-**Resposta:** mostrei o mapa físico de como os componentes se conectam (RAM ↔ CPU via canal DDR; CPU ↔ GPU via PCIe; CPU ↔ Chipset via DMI, sucessor do FSB; Chipset ↔ Disco via SATA/NVMe; Chipset ↔ Periféricos via USB; GPU → Monitor via HDMI/DP). Depois comparei a hierarquia de caches: CPU tem poucos núcleos fortes com L1 minúscula e rapidíssima, L2/L3 compartilhada, e RAM; GPU tem milhares de núcleos simples, cache L1 por bloco de shaders, L2 compartilhada, e VRAM dedicada para texturas.
+**Answer:** I showed the physical map of how the components connect (RAM ↔ CPU via the DDR channel; CPU ↔ GPU via PCIe; CPU ↔ Chipset via DMI, the FSB's successor; Chipset ↔ Disk via SATA/NVMe; Chipset ↔ Peripherals via USB; GPU → Monitor via HDMI/DP). I then compared the cache hierarchies: the CPU has a few powerful cores with a tiny, very fast L1, a shared L2/L3, and RAM; the GPU has thousands of simple cores, an L1 cache per shader block, a shared L2, and dedicated VRAM for textures.
 
 ```mermaid
 graph TD
-    RAM["Memória RAM (DDR)"] <--> CPU
+    RAM["RAM Memory (DDR)"] <--> CPU
     CPU <--> GPU
-    CPU <--> Chipset["Chipset (controlador de E/S)"]
-    Chipset <--> Disco["Armazenamento (SSD/HD)"]
-    Chipset <--> Perif["Periféricos (USB)"]
+    CPU <--> Chipset["Chipset (I/O controller)"]
+    Chipset <--> Storage["Storage (SSD/HD)"]
+    Chipset <--> Perif["Peripherals (USB)"]
     GPU --> Monitor
 ```
 
 ```mermaid
 graph TD
     subgraph CPU_caches["CPU"]
-    NC["Núcleo CPU"] --> L1c["Cache L1"] --> L23["Cache L2/L3"] --> RAMc["Memória RAM"]
+    NC["CPU core"] --> L1c["L1 Cache"] --> L23["L2/L3 Cache"] --> RAMc["RAM Memory"]
     end
     subgraph GPU_caches["GPU"]
-    NG["Núcleo GPU"] --> L1g["Cache L1"] --> L2g["Cache L2"] --> VRAM["VRAM"]
+    NG["GPU core"] --> L1g["L1 Cache"] --> L2g["L2 Cache"] --> VRAM["VRAM"]
     end
 ```
 
 ---
 
-## 4. Arquitetura do Sega Saturn (a partir do relatório enviado)
+## 4. Sega Saturn architecture (based on the submitted report)
 
-**Pergunta:** pedido para desenhar a estrutura de hardware descrita no arquivo `saturn_architecture_report.md`, incluindo DMAs, VLIWs, registradores e buffers.
+**Question:** a request to diagram the hardware structure described in `saturn_architecture_report.md`, including DMAs, VLIWs, registers, and buffers.
 
-**Resposta:** dividi em três diagramas. (1) Topologia geral: a SCU como hub central conectando o bloco CPU (SH-2 mestre/escravo), o bloco de vídeo (VDP1/VDP2), o bloco de som (68000/SCSP) e periféricos (SMPC/CS2). (2) Interior da SCU: três canais de DMA com prioridades diferentes (nível 0 acordado pelo V-Blank para o VDP1, nível 1 por H-Blank/CD-ROM, nível 2 de baixa prioridade) e o DSP VLIW com Program RAM (256 instruções) e Data RAM em 4 blocos (MD0–MD3). (3) Pipeline de CD-ROM: registradores CR1–CR4 e HIRQ, 24 filtros/seletores de setor, buffer de partição (até 200 blocos), porta de dados DTR, e a transferência final via DMA da SCU até a Work RAM.
+**Answer:** I split it into three diagrams. (1) General topology: the SCU as the central hub connecting the CPU block (Master/Slave SH-2), the video block (VDP1/VDP2), the sound block (68000/SCSP), and peripherals (SMPC/CS2). (2) Inside the SCU: three DMA channels with different priorities (level 0 woken by V-Blank for the VDP1, level 1 by H-Blank/CD-ROM, level 2 low priority) and the VLIW DSP with Program RAM (256 instructions) and Data RAM split into 4 blocks (MD0–MD3). (3) CD-ROM pipeline: CR1–CR4 registers and HIRQ, 24 sector filters/selectors, a partition buffer (up to 200 blocks), the DTR data port, and the final transfer via SCU DMA into Work RAM.
 
 ```mermaid
 graph TD
-    subgraph CPUBlock["Bloco CPU"]
-    MSH2["SH-2 mestre"] <--> SSH2["SH-2 escravo"]
+    subgraph CPUBlock["CPU Block"]
+    MSH2["Master SH-2"] <--> SSH2["Slave SH-2"]
     end
     subgraph SCUBlock["SCU"]
     SCUCore["SCU (DMA)"] <--> SCUDSP["SCU DSP (VLIW)"]
     end
-    subgraph VideoBlock["Vídeo"]
+    subgraph VideoBlock["Video"]
     VDP1 --> VDP2
     end
-    subgraph SomBlock["Som"]
-    M68K["CPU de som (68000)"] <--> SCSP
+    subgraph SoundBlock["Sound"]
+    M68K["Sound CPU (68000)"] <--> SCSP
     end
-    subgraph PerifBlock["Periféricos"]
+    subgraph PeriphBlock["Peripherals"]
     SMPC
     CS2["CS2 (CD-ROM)"]
     end
@@ -109,85 +109,85 @@ graph TD
 
 ```mermaid
 graph TD
-    subgraph DMA["Controlador DMA"]
-    D0["DMA nível 0 — V-Blank → VDP1"]
-    D1["DMA nível 1 — H-Blank / CD-ROM"]
-    D2["DMA nível 2 — baixa prioridade"]
+    subgraph DMA["DMA Controller"]
+    D0["DMA level 0 — V-Blank → VDP1"]
+    D1["DMA level 1 — H-Blank / CD-ROM"]
+    D2["DMA level 2 — low priority"]
     end
     subgraph DSP["SCU DSP (VLIW, 14.3 MHz)"]
-    PR["Program RAM (256 instruções)"] <--> DR["Data RAM (MD0–MD3)"]
+    PR["Program RAM (256 instructions)"] <--> DR["Data RAM (MD0–MD3)"]
     end
 ```
 
 ```mermaid
 graph TD
-    CR["CR1–CR4 (comandos/status)"] --> FL["Filtros/seletores (24)"]
-    HIRQ["HIRQ (bitmask de eventos)"] --> FL
-    FL --> BUF["Buffer de partição (até 200 blocos)"]
-    BUF --> DTR["DTR (porta de dados)"]
-    DTR --> DMA["SCU DMA (nível 0 ou 1)"]
+    CR["CR1–CR4 (commands/status)"] --> FL["Filters/selectors (24)"]
+    HIRQ["HIRQ (event bitmask)"] --> FL
+    FL --> BUF["Partition buffer (up to 200 blocks)"]
+    BUF --> DTR["DTR (data port)"]
+    DTR --> DMA["SCU DMA (level 0 or 1)"]
     DMA --> WRAM["Work RAM"]
 ```
 
 ---
 
-## 5. O que o SCU DSP faz e o que é VLIW
+## 5. What the SCU DSP does and what VLIW is
 
-**Pergunta:** explicação sobre a função do SCU DSP e o conceito de VLIW.
+**Question:** an explanation of what the SCU DSP does and the concept of VLIW.
 
-**Resposta:** o SCU DSP é um processador extra dentro da SCU, dedicado a cálculos pesados (transformações 3D, física, listas de desenho) sem ocupar o SH-2 principal — roda a 14.3 MHz, com Program RAM de 256 instruções e Data RAM em 4 blocos, registradores próprios (`AC`, `P`, `RX`, `RY`), e famílias de instruções para ALU, carregamento de constantes e controle (DMA, saltos, loops). VLIW (*Very Long Instruction Word*) significa que uma única instrução é dividida em campos que controlam várias unidades de hardware **simultaneamente**, decidido antecipadamente por quem escreve o código — diferente de uma CPU comum, que executa uma operação por vez.
+**Answer:** the SCU DSP is an extra processor inside the SCU, dedicated to heavy calculations (3D transforms, physics, draw lists) without occupying the main SH-2 — it runs at 14.3 MHz, with a 256-instruction Program RAM and Data RAM split into 4 blocks, its own registers (`AC`, `P`, `RX`, `RY`), and instruction families for ALU operations, constant loading, and control (DMA, jumps, loops). VLIW (*Very Long Instruction Word*) means a single instruction is split into fields that control several hardware units **simultaneously**, decided ahead of time by whoever writes the code — unlike an ordinary CPU, which executes one operation at a time.
 
 ```mermaid
 graph TD
-    subgraph CPUComum["CPU comum — 1 operação por ciclo"]
-    A1["soma"] --> A2["lê memória"] --> A3["multiplica"]
+    subgraph RegularCPU["Ordinary CPU — 1 operation per cycle"]
+    A1["add"] --> A2["read memory"] --> A3["multiply"]
     end
-    subgraph VLIW["SCU DSP — 1 instrução, vários campos simultâneos"]
-    I["Instrução de 32 bits"] --> ALU
-    I --> MUL["Multiplicador"]
-    I --> MEM["Acesso à Data RAM"]
-    I --> JMP["Salto/loop"]
+    subgraph VLIW["SCU DSP — 1 instruction, several simultaneous fields"]
+    I["32-bit instruction"] --> ALU
+    I --> MUL["Multiplier"]
+    I --> MEM["Data RAM access"]
+    I --> JMP["Jump/loop"]
     end
 ```
 
 ---
 
-## 6. Quarto diagrama: troca de framebuffers VDP1/VDP2
+## 6. Fourth diagram: VDP1/VDP2 framebuffer swap
 
-**Pergunta:** solicitação do "quarto diagrama"; ao perguntar qual dos dois mecanismos pendentes o usuário queria (framebuffers ou ring buffer de som), a escolha foi **troca de framebuffers VDP1/VDP2**.
+**Question:** a request for the "fourth diagram"; when asked which of the two remaining mechanisms the user wanted (framebuffers or the sound ring buffer), the choice was **VDP1/VDP2 framebuffer swap**.
 
-**Resposta:** enquanto o VDP1 termina de desenhar num buffer, o VDP2 exibe o outro, já pronto; no V-Blank os papéis se invertem instantaneamente. Isso evita *tearing*, porque a troca só ocorre durante o intervalo em que a tela não está sendo desenhada.
+**Answer:** while the VDP1 finishes drawing into one buffer, the VDP2 displays the other, already-ready one; at V-Blank the roles swap instantly. This avoids *tearing*, because the swap only happens during the interval when the screen isn't being drawn.
 
 ```mermaid
 stateDiagram-v2
-    S1: Buffer A desenhando / Buffer B exibindo
-    S2: Buffer A exibindo / Buffer B desenhando
+    S1: Buffer A drawing / Buffer B displaying
+    S2: Buffer A displaying / Buffer B drawing
     S1 --> S2 : V-Blank
     S2 --> S1 : V-Blank
 ```
 
 ---
 
-## 7. Último diagrama: ring buffer de som (SH-2 → SCSP)
+## 7. Last diagram: sound ring buffer (SH-2 → SCSP)
 
-**Pergunta:** "agora o último diagrama" — o mecanismo restante, o ring buffer de som.
+**Question:** "now the last diagram" — the remaining mechanism, the sound ring buffer.
 
-**Resposta:** o SH-2 escreve comandos de áudio numa fila circular na Sound RAM; o 68000 lê esses comandos em ordem e repassa como ajustes de registrador para o SCSP, que sintetiza o som. A fila circular nunca precisa "acabar" — o ponteiro de escrita dá a volta, desde que não alcance o ponteiro de leitura (buffer cheio). É um desacoplamento clássico entre produtor e consumidor, cada um no seu ritmo.
+**Answer:** the SH-2 writes audio commands into a circular queue in Sound RAM; the 68000 reads these commands in order and passes them on as register adjustments to the SCSP, which synthesizes the sound. The circular queue never needs to "end" — the write pointer wraps around, as long as it doesn't catch up to the read pointer (buffer full). It's a classic producer/consumer decoupling, each running at its own pace.
 
 ```mermaid
 graph TD
-    SH2["SH-2"] -->|escreve comando| Ring["Fila circular (Sound RAM)"]
-    Ring -->|lê em ordem| M68K["CPU de som (68000)"]
-    M68K --> SCSP["SCSP — atualiza canais"]
+    SH2["SH-2"] -->|writes command| Ring["Circular queue (Sound RAM)"]
+    Ring -->|reads in order| M68K["Sound CPU (68000)"]
+    M68K --> SCSP["SCSP — updates channels"]
 ```
 
 ---
 
-## 8. Arquitetura de atores/Mediator em Rust, comparada ao Saturn
+## 8. Actor/Mediator architecture in Rust, compared to the Saturn
 
-**Pergunta:** a partir de um documento sobre atores isolados, Mediator central e buffers de memória compartilhada em Rust, pedido para desenhar como esses componentes (buffers, double buffering, ring buffer de som) poderiam ser implementados em Rust de forma equivalente ao Saturn.
+**Question:** based on a document about isolated actors, a central Mediator, and shared-memory buffers in Rust, a request to diagram how these components (buffers, double buffering, sound ring buffer) could be implemented in Rust in a way equivalent to the Saturn.
 
-**Resposta:** três diagramas — (1) Mediator roteando mensagens leves (`mpsc`/`oneshot`) para workers isolados, todos acessando um buffer compartilhado `Arc<RwLock<T>>` (leitura livre para todos, escrita exclusiva); (2) double buffering com `ArcSwap`, equivalente ao V-Blank do Saturn mas sem precisar de sinal de vídeo — a troca de ponteiro é atômica e não bloqueia leitores; (3) canal `mpsc` limitado funcionando como fila circular entre uma task produtora e uma consumidora, com a diferença de que o backpressure (fila cheia) é resolvido automaticamente pelo runtime do Tokio, em vez de controlado manualmente como no SH-2.
+**Answer:** three diagrams — (1) the Mediator routing lightweight messages (`mpsc`/`oneshot`) to isolated workers, all accessing a shared `Arc<RwLock<T>>` buffer (free reading for everyone, exclusive writing); (2) double buffering with `ArcSwap`, equivalent to the Saturn's V-Blank but without needing a video signal — the pointer swap is atomic and never blocks readers; (3) a bounded `mpsc` channel acting as a circular queue between a producer task and a consumer task, with the difference that backpressure (full queue) is resolved automatically by the Tokio runtime, instead of being manually controlled like on the SH-2.
 
 ```mermaid
 graph TD
@@ -200,42 +200,42 @@ graph TD
 
 ```mermaid
 stateDiagram-v2
-    R1: Buffer A escrevendo / Buffer B lendo
-    R2: Buffer A lendo / Buffer B escrevendo
+    R1: Buffer A writing / Buffer B reading
+    R2: Buffer A reading / Buffer B writing
     R1 --> R2 : ArcSwap::store
     R2 --> R1 : ArcSwap::store
 ```
 
 ```mermaid
 graph TD
-    P["Task produtora — tx.send"] --> C["mpsc::channel (capacidade fixa)"]
-    C --> Co["Task consumidora — rx.recv"]
-    Co --> H["Handler final"]
+    P["Producer task — tx.send"] --> C["mpsc::channel (fixed capacity)"]
+    C --> Co["Consumer task — rx.recv"]
+    Co --> H["Final handler"]
 ```
 
-**Tabela de paralelo (Saturn ↔ Rust)** incluída na resposta original:
+**Parallel table (Saturn ↔ Rust)** included in the original answer:
 
 | Saturn | Rust (Tokio) |
 |---|---|
-| SCU como hub central | Mediator roteando mensagens |
-| Registradores + DMA | `mpsc`/`oneshot` para comandos leves |
-| VRAM compartilhada entre VDP1/VDP2 | `Arc<RwLock<T>>` ou `ArcSwap` |
-| Toggle de framebuffer no V-Blank | Troca atômica de ponteiro (`ArcSwap::store`) |
-| Ring buffer de som (SH-2 → SCSP) | Canal `mpsc` limitado como fila circular |
+| SCU as the central hub | Mediator routing messages |
+| Registers + DMA | `mpsc`/`oneshot` for lightweight commands |
+| VRAM shared between VDP1/VDP2 | `Arc<RwLock<T>>` or `ArcSwap` |
+| Framebuffer toggle at V-Blank | Atomic pointer swap (`ArcSwap::store`) |
+| Sound ring buffer (SH-2 → SCSP) | Bounded `mpsc` channel as a circular queue |
 
 ---
 
-## 9. Subsistemas isolados com buffers dedicados
+## 9. Isolated subsystems with dedicated buffers
 
-**Pergunta:** "sim faça essa segunda visão" — pedido do diagrama de múltiplos `Arc<RwLock<T>>` separados por subsistema (vídeo, som, lógica), análogo às memórias separadas do Saturn (VRAM, Sound RAM, Work RAM).
+**Question:** "yes, do that second view" — a request for a diagram of multiple `Arc<RwLock<T>>` instances separated by subsystem (video, sound, logic), analogous to the Saturn's separate memories (VRAM, Sound RAM, Work RAM).
 
-**Resposta:** cada subsistema (vídeo, som, lógica) tem seu próprio worker e seu próprio buffer isolado, em vez de um único `Arc<RwLock<T>>` compartilhado por tudo — assim uma escrita pesada na VRAM nunca bloqueia uma leitura no Sound RAM, porque os locks são completamente independentes.
+**Answer:** each subsystem (video, sound, logic) has its own worker and its own isolated buffer, instead of a single `Arc<RwLock<T>>` shared by everything — that way a heavy write to VRAM never blocks a read from Sound RAM, because the locks are completely independent.
 
 ```mermaid
 graph TD
-    Mediator --> WV["Worker vídeo"]
-    Mediator --> WS["Worker som"]
-    Mediator --> WL["Worker lógica"]
+    Mediator --> WV["Video worker"]
+    Mediator --> WS["Sound worker"]
+    Mediator --> WL["Logic worker"]
     WV --> VRAM["VRAM: Arc RwLock Frame"]
     WS --> SRAM["Sound RAM: Arc RwLock Queue"]
     WL --> WRAM["Work RAM: Arc RwLock State"]
@@ -243,29 +243,29 @@ graph TD
 
 ---
 
-## 10. Plano de implementação do emulador em Rust — decisão sobre limpeza de buffers
+## 10. Rust emulator implementation plan — decision on buffer clearing
 
-**Pergunta:** pedido do plano completo para o Claude Code executar a construção do emulador do Saturn em Rust, usando a arquitetura discutida, com uma dúvida específica: deixar o jogo controlar a limpeza dos buffers, ou deixar os mecanismos automáticos do Rust decidirem isso.
+**Question:** a request for the complete plan for Claude Code to carry out building the Saturn emulator in Rust, using the architecture discussed, with one specific question: should the game control clearing the buffers, or should Rust's automatic mechanisms decide that.
 
-**Resposta:** expliquei que são duas camadas diferentes — o `Drop`/RAII do Rust cuida só de alocação/desalocação de memória; a limpeza de *conteúdo* de um buffer emulado (ex.: VDP1 limpando o framebuffer, `resetSelector` do CD-ROM) precisa ser disparada exclusivamente pelos sinais que o próprio jogo manda para os registradores emulados, nunca por um mecanismo automático do Rust — porque os jogos dependem do timing exato do hardware real. Cada buffer deve expor métodos explícitos (`clear_on_vdp1_command()`, `reset_selector(id)`), chamados só quando a CPU emulada escreve no registrador correspondente.
+**Answer:** I explained these are two different layers — Rust's `Drop`/RAII only handles memory allocation/deallocation; clearing the *contents* of an emulated buffer (e.g. VDP1 clearing the framebuffer, the CD-ROM's `resetSelector`) must be triggered exclusively by the signals the game itself sends to the emulated registers, never by an automatic Rust mechanism — because games depend on the real hardware's exact timing. Each buffer should expose explicit methods (`clear_on_vdp1_command()`, `reset_selector(id)`), called only when the emulated CPU writes to the corresponding register.
 
-Nessa primeira versão do plano eu também havia sugerido, por questão de precisão de ciclo, que o núcleo de emulação rodasse num laço single-thread — essa sugestão foi revisada no item 11, a pedido do usuário.
+In this first version of the plan I had also suggested, for cycle-accuracy reasons, that the emulation core run in a single-thread loop — that suggestion was revised in item 11, at the user's request.
 
 ---
 
-## 11. Revisão do plano: arquitetura distribuída de verdade nos 4 núcleos
+## 11. Plan revision: a genuinely distributed architecture across the 4 cores
 
-**Pergunta:** o usuário rejeitou a sugestão de laço single-thread, apontando que é exatamente isso que compromete o desempenho do Yabause em handhelds com múltiplos núcleos fracos (ex.: R36S, ARM64 Cortex-A53 quad-core), e pediu que o plano realizasse literalmente a arquitetura distribuída desenhada na sessão, com o "DMA que pausa o barramento" implementado como um processo isolado de verdade.
+**Question:** the user rejected the single-thread loop suggestion, pointing out that this is exactly what hurts Yabause's performance on handhelds with multiple weak cores (e.g. the R36S, a quad-core ARM64 Cortex-A53), and asked that the plan literally carry out the distributed architecture drawn up during the session, with the "DMA that pauses the bus" implemented as a genuinely isolated process.
 
-**Resposta:** reescrevi o plano com cada bloco de hardware como uma thread dedicada, mapeada a um núcleo específico do R36S (Core 0: SH-2 mestre; Core 1: SH-2 escravo; Core 2: SCU + SMPC + CS2; Core 3: vídeo + áudio). O "DMA pausa o barramento" virou um `BusArbiter` real — um lock (`AtomicBool` + `Condvar`) que a SCU controla e que as threads do SH-2 checam e bloqueiam de fato ao tentar acessar o barramento durante uma transferência. Para evitar que os atores corram à frente uns dos outros e dessincronizem o timing, propus sincronização por barreira com folga limitada (*bounded-slack lockstep*): nenhum ator pode avançar mais que N ciclos além do mais atrasado sem passar por um ponto de checagem via canal. Deixei registrado como risco em aberto que multi-threading real reduz o determinismo bit-exato entre execuções (relevante só se save states/replay determinístico forem requisito).
+**Answer:** I rewrote the plan with each hardware block as a dedicated thread, mapped to a specific R36S core (Core 0: Master SH-2; Core 1: Slave SH-2; Core 2: SCU + SMPC + CS2; Core 3: video + audio). "DMA pauses the bus" became a real `BusArbiter` — a lock (`AtomicBool` + `Condvar`) that the SCU controls and that the SH-2 threads check and genuinely block on when trying to access the bus during a transfer. To keep the actors from running ahead of each other and desyncing the timing, I proposed bounded-slack lockstep synchronization: no actor may advance more than N cycles past the slowest one without passing through a checkpoint over a channel. I noted as an open risk that real multi-threading reduces bit-exact determinism across runs (only relevant if save states/deterministic replay are a requirement).
 
 ```mermaid
 graph TD
     subgraph Core0["Core 0"]
-    SH2M["SH-2 mestre"]
+    SH2M["Master SH-2"]
     end
     subgraph Core1["Core 1"]
-    SH2S["SH-2 escravo"]
+    SH2S["Slave SH-2"]
     end
     subgraph Core2["Core 2"]
     SCU["SCU — BusArbiter + DMA + DSP"]
@@ -276,18 +276,18 @@ graph TD
     Video["VDP1/VDP2"]
     Audio["SCSP + 68000"]
     end
-    SH2M -->|checa lock| SCU
-    SH2S -->|checa lock| SCU
+    SH2M -->|checks lock| SCU
+    SH2S -->|checks lock| SCU
     SCU -->|DMA| Video
     SCU -->|DMA/IRQ| Audio
 ```
 
-O plano completo (ambas as versões) foi entregue como arquivo separado: `plano_emulador_saturn_rust.md`.
+The full plan (both versions) was delivered as a separate file: `plano_emulador_saturn_rust.md`.
 
 ---
 
-## 12. Nome de uma lua de Saturno
+## 12. The name of a moon of Saturn
 
-**Pergunta:** pedido de um nome de lua de Saturno.
+**Question:** a request for the name of a moon of Saturn.
 
-**Resposta:** **Titã** — a maior lua de Saturno e a única do sistema solar com atmosfera densa (mais densa que a da Terra, majoritariamente nitrogênio), com lagos de metano líquido na superfície; um dos poucos lugares além da Terra onde já pousou uma sonda (Huygens, 2005). Outras opções mencionadas: Encélado (gêiseres de gelo, oceano subterrâneo), Jápeto (hemisférios com cores muito diferentes) e Mimas (parecida com a Estrela da Morte).
+**Answer:** **Titan** — Saturn's largest moon, and the only one in the solar system with a dense atmosphere (denser than Earth's, mostly nitrogen), with lakes of liquid methane on its surface; one of the few places beyond Earth a probe has ever landed on (Huygens, 2005). Other options mentioned: Enceladus (ice geysers, subsurface ocean), Iapetus (hemispheres with very different colors), and Mimas (which looks like the Death Star).

@@ -29,7 +29,7 @@ hardware — this project's standing rule, unchanged.
 
 Real OS processes were seriously considered — they're what the project's
 original planning notes actually specified (`docs/initial_architecture_idea.md`:
-"processos isolados e não threads"). Two claimed advantages didn't survive
+"isolated processes, not threads"). Two claimed advantages didn't survive
 scrutiny; one real advantage did, and wasn't enough to outweigh the cost:
 
 - **Claimed: processes avoid context-switch cost.** False on Linux —
