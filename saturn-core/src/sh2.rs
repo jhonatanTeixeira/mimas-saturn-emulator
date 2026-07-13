@@ -74,7 +74,7 @@ pub struct Sh2 {
     pub mach: u32,
     pub macl: u32,
     pub arbiter: Arc<BusArbiter>,
-    pub work_ram: Arc<std::sync::RwLock<WorkRam>>,
+    pub work_ram: Arc<WorkRam>,
     /// BIOS ROM contents (512KB on real hardware). Empty until `load_bios()`
     /// is called; reads against the BIOS region return 0 until then so
     /// existing tests that never load a BIOS keep working unchanged.
@@ -95,10 +95,10 @@ pub struct Sh2 {
     ///
     /// **Ordering contract**: writes here must use `Ordering::Release` and
     /// reads must use `Ordering::Acquire`, never `Relaxed`. This is the one
-    /// thing that makes it safe for Core 3 to read Sound RAM (via the
-    /// `Arc<RwLock<WorkRam>>` both cores share) immediately after observing
-    /// this flag flip true: by the time this store executes, every Sound
-    /// RAM write the driver-upload routine made is already behind it in
+    /// thing that makes it safe for Core 3 to read Sound RAM (via
+    /// `WorkRam::sound_ram`'s own lock, which both cores share) immediately
+    /// after observing this flag flip true: by the time this store executes,
+    /// every Sound RAM write the driver-upload routine made is already behind it in
     /// Core 0's own program order, but only `Release`/`Acquire` actually
     /// guarantees Core 3 observes them -- `Relaxed` previously did not,
     /// which is why a wall-clock debounce used to stand in here (see
@@ -205,7 +205,7 @@ fn log_reg_access_once(region: &MemRegion, is_write: bool, val: u8) {
 }
 
 impl Sh2 {
-    pub fn new(is_slave: bool, arbiter: Arc<BusArbiter>, work_ram: Arc<std::sync::RwLock<WorkRam>>) -> Self {
+    pub fn new(is_slave: bool, arbiter: Arc<BusArbiter>, work_ram: Arc<WorkRam>) -> Self {
         Self {
             is_slave,
             core_id: if is_slave { 1 } else { 0 },
@@ -337,40 +337,40 @@ impl Sh2 {
                 }
             }
             MemRegion::LowRam(off) => {
-                let ram = self.work_ram.read().unwrap();
-                ram.low_ram[off & (ram.low_ram.len() - 1)]
+                let ram = self.work_ram.low_ram.read().unwrap();
+                ram[off & (ram.len() - 1)]
             }
             MemRegion::HighRam(off) => {
-                let ram = self.work_ram.read().unwrap();
-                ram.high_ram[off & (ram.high_ram.len() - 1)]
+                let ram = self.work_ram.high_ram.read().unwrap();
+                ram[off & (ram.len() - 1)]
             }
             MemRegion::SoundRam(off) => {
-                let ram = self.work_ram.read().unwrap();
-                ram.sound_ram[off & (ram.sound_ram.len() - 1)]
+                let ram = self.work_ram.sound_ram.read().unwrap();
+                ram[off & (ram.len() - 1)]
             }
             MemRegion::ScspRegs(off) => {
-                let ram = self.work_ram.read().unwrap();
-                ram.scsp_regs[off & (ram.scsp_regs.len() - 1)]
+                let ram = self.work_ram.scsp_regs.read().unwrap();
+                ram[off & (ram.len() - 1)]
             }
             MemRegion::Vdp1Vram(off) => {
-                let ram = self.work_ram.read().unwrap();
-                ram.vdp1_vram[off & (ram.vdp1_vram.len() - 1)]
+                let ram = self.work_ram.vdp1_vram.read().unwrap();
+                ram[off & (ram.len() - 1)]
             }
             MemRegion::Vdp1Framebuffer(off) => {
-                let ram = self.work_ram.read().unwrap();
-                ram.vdp1_framebuffer[off & (ram.vdp1_framebuffer.len() - 1)]
+                let ram = self.work_ram.vdp1_framebuffer.read().unwrap();
+                ram[off & (ram.len() - 1)]
             }
             MemRegion::Vdp1Regs(off) => {
-                let ram = self.work_ram.read().unwrap();
-                ram.vdp1_regs[off & (ram.vdp1_regs.len() - 1)]
+                let ram = self.work_ram.vdp1_regs.read().unwrap();
+                ram[off & (ram.len() - 1)]
             }
             MemRegion::Vdp2Vram(off) => {
-                let ram = self.work_ram.read().unwrap();
-                ram.vdp2_vram[off & (ram.vdp2_vram.len() - 1)]
+                let ram = self.work_ram.vdp2_vram.read().unwrap();
+                ram[off & (ram.len() - 1)]
             }
             MemRegion::Vdp2Cram(off) => {
-                let ram = self.work_ram.read().unwrap();
-                ram.vdp2_cram[off & (ram.vdp2_cram.len() - 1)]
+                let ram = self.work_ram.vdp2_cram.read().unwrap();
+                ram[off & (ram.len() - 1)]
             }
             // TVSTAT (offset 0x004-0x005): real hardware status register,
             // never written by the CPU -- its VBLANK bit is a live signal
@@ -385,20 +385,20 @@ impl Sh2 {
                 if off == 0x004 { (tvstat >> 8) as u8 } else { (tvstat & 0xFF) as u8 }
             }
             MemRegion::Vdp2Regs(off) => {
-                let ram = self.work_ram.read().unwrap();
-                ram.vdp2_regs[off & (ram.vdp2_regs.len() - 1)]
+                let ram = self.work_ram.vdp2_regs.read().unwrap();
+                ram[off & (ram.len() - 1)]
             }
             MemRegion::ScuRegs(off) => {
-                let ram = self.work_ram.read().unwrap();
-                ram.scu_regs[off & (ram.scu_regs.len() - 1)]
+                let ram = self.work_ram.scu_regs.read().unwrap();
+                ram[off & (ram.len() - 1)]
             }
             MemRegion::Cs2Regs(off) => {
-                let ram = self.work_ram.read().unwrap();
-                ram.cs2_regs[off & (ram.cs2_regs.len() - 1)]
+                let ram = self.work_ram.cs2_regs.read().unwrap();
+                ram[off & (ram.len() - 1)]
             }
             MemRegion::BackupRam(off) => {
-                let ram = self.work_ram.read().unwrap();
-                ram.backup_ram[off & (ram.backup_ram.len() - 1)]
+                let ram = self.work_ram.backup_ram.read().unwrap();
+                ram[off & (ram.len() - 1)]
             }
             // SF (offset 0x63): the busy/idle Status Flag. Real hardware
             // sets it to 1 when a command is written to COMREG and clears
@@ -418,8 +418,8 @@ impl Sh2 {
             // matching real hardware's plain register-file behavior for
             // those.
             MemRegion::Smpc(off) => {
-                let ram = self.work_ram.read().unwrap();
-                ram.smpc_regs[off & (ram.smpc_regs.len() - 1)]
+                let ram = self.work_ram.smpc_regs.read().unwrap();
+                ram[off & (ram.len() - 1)]
             }
             MemRegion::Unmapped => 0,
         }
@@ -433,72 +433,72 @@ impl Sh2 {
         }
         match region {
             MemRegion::LowRam(off) => {
-                let mut ram = self.work_ram.write().unwrap();
-                let mask = ram.low_ram.len() - 1;
-                ram.low_ram[off & mask] = val;
+                let mut ram = self.work_ram.low_ram.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = val;
             }
             MemRegion::HighRam(off) => {
                 if self.core_id == 0 && (off == 0x0408a4 || off == 0x0408a5) {
                     eprintln!("[PROBE] write to counter byte off={:#x} val={:#04X} from pc={:#010X}", off, val, self.pc);
                 }
-                let mut ram = self.work_ram.write().unwrap();
-                let mask = ram.high_ram.len() - 1;
-                ram.high_ram[off & mask] = val;
+                let mut ram = self.work_ram.high_ram.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = val;
             }
             MemRegion::SoundRam(off) => {
-                let mut ram = self.work_ram.write().unwrap();
-                let mask = ram.sound_ram.len() - 1;
-                ram.sound_ram[off & mask] = val;
+                let mut ram = self.work_ram.sound_ram.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = val;
             }
             MemRegion::ScspRegs(off) => {
-                let mut ram = self.work_ram.write().unwrap();
-                let mask = ram.scsp_regs.len() - 1;
-                ram.scsp_regs[off & mask] = val;
+                let mut ram = self.work_ram.scsp_regs.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = val;
             }
             MemRegion::Vdp1Vram(off) => {
-                let mut ram = self.work_ram.write().unwrap();
-                let mask = ram.vdp1_vram.len() - 1;
-                ram.vdp1_vram[off & mask] = val;
+                let mut ram = self.work_ram.vdp1_vram.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = val;
             }
             MemRegion::Vdp1Framebuffer(off) => {
-                let mut ram = self.work_ram.write().unwrap();
-                let mask = ram.vdp1_framebuffer.len() - 1;
-                ram.vdp1_framebuffer[off & mask] = val;
+                let mut ram = self.work_ram.vdp1_framebuffer.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = val;
             }
             MemRegion::Vdp1Regs(off) => {
-                let mut ram = self.work_ram.write().unwrap();
-                let mask = ram.vdp1_regs.len() - 1;
-                ram.vdp1_regs[off & mask] = val;
+                let mut ram = self.work_ram.vdp1_regs.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = val;
             }
             MemRegion::Vdp2Vram(off) => {
-                let mut ram = self.work_ram.write().unwrap();
-                let mask = ram.vdp2_vram.len() - 1;
-                ram.vdp2_vram[off & mask] = val;
+                let mut ram = self.work_ram.vdp2_vram.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = val;
             }
             MemRegion::Vdp2Cram(off) => {
-                let mut ram = self.work_ram.write().unwrap();
-                let mask = ram.vdp2_cram.len() - 1;
-                ram.vdp2_cram[off & mask] = val;
+                let mut ram = self.work_ram.vdp2_cram.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = val;
             }
             MemRegion::Vdp2Regs(off) => {
-                let mut ram = self.work_ram.write().unwrap();
-                let mask = ram.vdp2_regs.len() - 1;
-                ram.vdp2_regs[off & mask] = val;
+                let mut ram = self.work_ram.vdp2_regs.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = val;
             }
             MemRegion::ScuRegs(off) => {
-                let mut ram = self.work_ram.write().unwrap();
-                let mask = ram.scu_regs.len() - 1;
-                ram.scu_regs[off & mask] = val;
+                let mut ram = self.work_ram.scu_regs.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = val;
             }
             MemRegion::Cs2Regs(off) => {
-                let mut ram = self.work_ram.write().unwrap();
-                let mask = ram.cs2_regs.len() - 1;
-                ram.cs2_regs[off & mask] = val;
+                let mut ram = self.work_ram.cs2_regs.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = val;
             }
             MemRegion::BackupRam(off) => {
-                let mut ram = self.work_ram.write().unwrap();
-                let mask = ram.backup_ram.len() - 1;
-                ram.backup_ram[off & mask] = val;
+                let mut ram = self.work_ram.backup_ram.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = val;
             }
             // SMPC: a real, persisted register file (IREG/OREG/SR/PDR/DDR/
             // IOSEL/EXLE) -- see `MemRegion::Smpc` on the read side. A write
@@ -507,9 +507,9 @@ impl Sh2 {
             // instant COMREG is written.
             MemRegion::Smpc(off) => {
                 {
-                    let mut ram = self.work_ram.write().unwrap();
-                    let mask = ram.smpc_regs.len() - 1;
-                    ram.smpc_regs[off & mask] = val;
+                    let mut ram = self.work_ram.smpc_regs.write().unwrap();
+                    let mask = ram.len() - 1;
+                    ram[off & mask] = val;
                 }
                 if off == SMPC_COMREG_OFFSET {
                     self.smpc_execute_command(val);
@@ -682,8 +682,8 @@ impl Sh2 {
         if command != SMPC_CMD_INTBACK {
             return;
         }
-        let mut ram = self.work_ram.write().unwrap();
-        let ireg1 = ram.smpc_regs[SMPC_IREG1_OFFSET];
+        let mut ram = self.work_ram.smpc_regs.write().unwrap();
+        let ireg1 = ram[SMPC_IREG1_OFFSET];
         let wants_peripheral = (ireg1 & 0x8) != 0;
 
         // Real `SmpcINTBACKStatus()`: system status + RTC + cartridge/
@@ -692,15 +692,15 @@ impl Sh2 {
         // response is); region defaults to Japan (1), the same fallback
         // Yabause itself uses when no CD is present to autodetect from
         // (`SmpcRecheckRegion`).
-        ram.smpc_regs[SMPC_OREG_BASE_OFFSET] = 0x80; // bit7: normal startup, resd=0
+        ram[SMPC_OREG_BASE_OFFSET] = 0x80; // bit7: normal startup, resd=0
         for i in 1..=7 {
-            ram.smpc_regs[SMPC_OREG_BASE_OFFSET + i * 2] = 0;
+            ram[SMPC_OREG_BASE_OFFSET + i * 2] = 0;
         }
-        ram.smpc_regs[SMPC_OREG_BASE_OFFSET + 8 * 2] = 0; // cartridge
-        ram.smpc_regs[SMPC_OREG_BASE_OFFSET + 9 * 2] = 1; // region: Japan fallback
-        ram.smpc_regs[SMPC_OREG_BASE_OFFSET + 10 * 2] = 0x34; // dotsel/mshnmi/sysres/sndres = 0
-        ram.smpc_regs[SMPC_OREG_BASE_OFFSET + 11 * 2] = 0; // cdres = 0
-        ram.smpc_regs[SMPC_SR_OFFSET] = 0x4F | ((wants_peripheral as u8) << 5);
+        ram[SMPC_OREG_BASE_OFFSET + 8 * 2] = 0; // cartridge
+        ram[SMPC_OREG_BASE_OFFSET + 9 * 2] = 1; // region: Japan fallback
+        ram[SMPC_OREG_BASE_OFFSET + 10 * 2] = 0x34; // dotsel/mshnmi/sysres/sndres = 0
+        ram[SMPC_OREG_BASE_OFFSET + 11 * 2] = 0; // cdres = 0
+        ram[SMPC_SR_OFFSET] = 0x4F | ((wants_peripheral as u8) << 5);
         drop(ram);
 
         // Real hardware fires the System Manager interrupt when the command
@@ -989,6 +989,22 @@ impl Sh2 {
             0x4018 => { self.registers[n] <<= 8; return; } // SHLL8
             0x4019 => { self.registers[n] >>= 8; return; } // SHLR8
             0x401B => { // TAS.B @Rn
+                // KNOWN GAP, not fixed by the per-field WorkRam lock split:
+                // this is a separate read_byte then write_byte -- two
+                // independent lock acquisitions with a real gap between
+                // them, not a real hardware-style atomic bus cycle. Real
+                // dual-CPU Saturn software's whole reason to use TAS.B is a
+                // spinlock over shared Low/High Work RAM between the Master
+                // and Slave SH-2 -- exactly the scenario this gap breaks.
+                // Dormant today only because Core 1 (Slave SH-2) never
+                // runs (parked, see `SaturnSystem::start`); splitting the
+                // old monolithic WorkRam lock removes incidental over-
+                // serialization between cores, which makes two concurrent
+                // TAS.B's on the same byte MORE likely to actually race the
+                // moment SSHON activates Core 1, not equally dormant. Needs
+                // a real compare-and-swap-style fix (or one write-lock
+                // spanning both the read and the write) before or alongside
+                // SSHON -- see `TECH_DEBT.md`.
                 let a = self.registers[n];
                 let val = self.read_byte(a);
                 self.set_t(val == 0);
@@ -1301,11 +1317,10 @@ fn sign_extend12(d: u32) -> i32 {
 mod opcode_tests {
     use super::*;
     use crate::bus_arbiter::BusArbiter;
-    use std::sync::RwLock;
 
     fn make_cpu() -> Sh2 {
         let arbiter = Arc::new(BusArbiter::new());
-        let ram = Arc::new(RwLock::new(WorkRam::new()));
+        let ram = Arc::new(WorkRam::new());
         Sh2::new(false, arbiter, ram)
     }
 

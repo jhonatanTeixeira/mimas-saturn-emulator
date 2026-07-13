@@ -26,6 +26,12 @@ currently active.
   approach from what was first proposed. Steps 3 (`WorkRam` split) and 4
   (CPU clock throttle) remain planned, deliberately deferred to a future
   session.
+- **2026-07-13**: Suggested-order-of-attack step 3 is done: `WorkRam`'s one
+  monolithic `RwLock` is split into a separate `RwLock` per field, all 14
+  in one pass (not staged, unlike this section's original migration notes —
+  see below for why). Confirmed *not* to move the M68K wall either (same
+  real-BIOS re-verification as the step-2 entry above). See `history.md`
+  Chapter 8. Step 4 (CPU clock throttle) remains planned.
 
 ## The five principles
 
@@ -63,11 +69,16 @@ currently active.
 
 ### Current state
 
-`Arc<RwLock<WorkRam>>` is one monolithic lock covering every memory
+**The monolithic-lock part is done (2026-07-13, see Progress above,
+`history.md` Chapter 8)** — `WorkRam` now has a separate `RwLock` per
+field instead of one `Arc<RwLock<WorkRam>>` covering everything. What
+follows describes the *old* state for context.
+
+`Arc<RwLock<WorkRam>>` used to be one monolithic lock covering every memory
 region (Low/High Work RAM, Sound RAM, SCSP/VDP1/VDP2/SCU registers,
-backup RAM). Every byte-level access from any core takes this same lock,
+backup RAM). Every byte-level access from any core took this same lock,
 regardless of region — a VDP2 CRAM write and an SH-2 Work RAM read
-contend on an identical lock despite having nothing to do with each
+contended on an identical lock despite having nothing to do with each
 other. Cross-component *events* (as opposed to raw memory visibility) are
 modeled as bare `Arc<AtomicBool>` flags (`m68k_control`, `sound_req_irq`,
 `smpc_irq_pending`), checked by polling once per loop iteration on the
@@ -87,7 +98,29 @@ signal.
   hardware (Sound RAM, SCSP registers) need cross-component shared access
   at all; most of Saturn's memory is exclusive to one component on real
   hardware and shouldn't share a lock with anything else in this
-  implementation either.
+  implementation either. **Done** (2026-07-13, see Progress above) —
+  shipped as one `RwLock` per field (all 14), not grouped by hardware
+  component and not the "single-owner + handoff" alternative: no call site
+  held two *different* fields under one guard, so grouping would have
+  saved nothing, and nothing yet consumes 11 of the 14 fields at all (no
+  handoff protocol to design against). Two call sites needed more than a
+  mechanical substitution — `M68k::write_byte`'s `scsp_regs` branch (must
+  hold one lock across the register store *and* the immediately-following
+  MCIEB/MCIPD interrupt check) and `vdp::render_backdrop` (must hold one
+  `vdp2_regs` lock across both its TVMD and BKTAL reads, since it no
+  longer rides on a caller-held whole-`WorkRam` lock) — both preserved
+  exactly. See `history.md` Chapter 8.
+
+  **New follow-up surfaced by this split, not fixed here**: `TAS.B @Rn`
+  (`sh2.rs`, the SH-2 opcode real dual-CPU spinlock code over shared Low/
+  High Work RAM would use) does a read-then-write with a real gap between
+  the two lock acquisitions — no atomic test-and-set. Dormant today only
+  because Core 1 never runs; removing the old monolithic lock's incidental
+  over-serialization between cores makes this gap *more* likely to
+  actually race the moment SSHON activates Core 1, not equally dormant.
+  Flagged loudly at the `TAS.B` match arm itself — needs a real CAS-style
+  fix (or one write-lock spanning both operations) before or alongside
+  SSHON, see item 2's Core 1 entry above.
 - Replace the SNDON debounce with a real signal: the SH-2's own driver-
   upload routine sets an explicit "upload complete" indicator as its last
   write (in the shared region itself, or via a dedicated `Condvar`+
@@ -122,6 +155,17 @@ genuinely-shared regions (Sound RAM, SCSP registers) alongside whatever
 `Condvar`/channel work is needed for their associated events, since
 they're coupled anyway (the MCIPD/MCIEB handshake already touches SCSP
 registers *and* needs a real signal).
+
+**Shipped as one pass instead of staged (2026-07-13)**: by the time this
+landed, the prerequisite this note was guarding against — real signals for
+`sound_ram`/`scsp_regs`'s associated events — was already done (item 1's
+SNDON fix above; `sound_req_irq` was already a legitimate bare flag, never
+broken). With that dependency already satisfied, splitting all 14 fields
+uniformly was simpler to reason about than carrying two different access
+patterns (some fields locked, some still behind the old monolithic lock)
+through a multi-session migration. No call site anywhere held two
+*different* fields under one guard (verified against every access site
+before starting), so there was no hidden cost to doing it all at once.
 
 ## 2. Event-driven, not fixed-four, thread orchestration
 
@@ -294,8 +338,10 @@ design decisions required)
    see Progress above) — directly relevant to the active boot investigation,
    and the second concrete validation of the same pattern under real
    contention (two threads, real timing pressure, not a toy case).
-3. Split `WorkRam` region by region, starting with the non-cross-
-   component regions (see item 1's migration notes).
+3. ~~Split `WorkRam` region by region, starting with the non-cross-
+   component regions (see item 1's migration notes).~~ — **Done**
+   (2026-07-13, see Progress above) — shipped as one pass covering all 14
+   fields rather than staged, see item 1's migration notes for why.
 4. Design and implement the CPU clock throttle — do this before any
    serious performance comparison work (item 2's "real threads vs.
    cooperative scheduler" open question), since it's a prerequisite for

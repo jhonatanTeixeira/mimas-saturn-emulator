@@ -18,7 +18,6 @@
 //! wall, decode the exact missing opcode, add it, keep going -- see
 //! `mimas/CLAUDE.md`.
 use std::sync::Arc;
-use std::sync::RwLock;
 use crate::shared_buffers::WorkRam;
 
 // Status Register bits (standard 68000 layout).
@@ -50,7 +49,7 @@ pub struct M68k {
     pub sr: u16,
     pub pc: u32,
     pub running: bool,
-    work_ram: Arc<RwLock<WorkRam>>,
+    work_ram: Arc<WorkRam>,
     /// Set when a real MCIPD write both requests and is enabled (via
     /// MCIEB) for a given interrupt source -- see `check_main_interrupt`.
     /// `None` when nothing has wired the SH-2 side up to observe this
@@ -59,7 +58,7 @@ pub struct M68k {
 }
 
 impl M68k {
-    pub fn new(work_ram: Arc<RwLock<WorkRam>>) -> Self {
+    pub fn new(work_ram: Arc<WorkRam>) -> Self {
         Self { d: [0; 8], a: [0; 8], sr: 0, pc: 0, running: false, work_ram, sound_req_irq: None }
     }
 
@@ -94,27 +93,36 @@ impl M68k {
     /// writes/polls shared bytes here, not in SH-2-exclusive Work RAM (the
     /// M68K has no access to that at all on real hardware).
     fn read_byte(&self, addr: u32) -> u8 {
-        let ram = self.work_ram.read().unwrap();
         if addr < 0x0008_0000 {
-            ram.sound_ram[(addr as usize) & (ram.sound_ram.len() - 1)]
+            let ram = self.work_ram.sound_ram.read().unwrap();
+            ram[(addr as usize) & (ram.len() - 1)]
         } else if addr >= 0x0010_0000 {
             let off = (addr - 0x0010_0000) as usize;
-            ram.scsp_regs[off & (ram.scsp_regs.len() - 1)]
+            let ram = self.work_ram.scsp_regs.read().unwrap();
+            ram[off & (ram.len() - 1)]
         } else {
             0
         }
     }
 
     fn write_byte(&mut self, addr: u32, val: u8) {
-        let mut ram = self.work_ram.write().unwrap();
         if addr < 0x0008_0000 {
-            let mask = ram.sound_ram.len() - 1;
-            ram.sound_ram[(addr as usize) & mask] = val;
+            let mut ram = self.work_ram.sound_ram.write().unwrap();
+            let mask = ram.len() - 1;
+            ram[(addr as usize) & mask] = val;
         } else if addr >= 0x0010_0000 {
             let off = (addr - 0x0010_0000) as usize;
-            let mask = ram.scsp_regs.len() - 1;
+            // One held write-guard spans the register store AND the
+            // MCIEB/MCIPD read-back below -- both must observe the exact
+            // same instant, or a concurrent SH-2 write to MCIEB in the gap
+            // between them could change whether *this* write should have
+            // fired the interrupt (see `WorkRam`'s per-field-lock doc
+            // comment: this is exactly the "acquire once, hold across
+            // related operations" pattern the split is safe to keep here).
+            let mut ram = self.work_ram.scsp_regs.write().unwrap();
+            let mask = ram.len() - 1;
             let off = off & mask;
-            ram.scsp_regs[off] = val;
+            ram[off] = val;
             // MCIPD write: real hardware ORs the written bits into the
             // pending-interrupt register, then fires the real Sound
             // Request interrupt (SCU vector 0x46, level 9) only for bits
@@ -122,12 +130,12 @@ impl M68k {
             // real, working SCSP implementation (`scsp.c`).
             if off == SCSP_MCIPD_OFFSET || off == SCSP_MCIPD_OFFSET + 1 {
                 let mcieb = u16::from_be_bytes([
-                    ram.scsp_regs[SCSP_MCIEB_OFFSET],
-                    ram.scsp_regs[SCSP_MCIEB_OFFSET + 1],
+                    ram[SCSP_MCIEB_OFFSET],
+                    ram[SCSP_MCIEB_OFFSET + 1],
                 ]);
                 let mcipd = u16::from_be_bytes([
-                    ram.scsp_regs[SCSP_MCIPD_OFFSET],
-                    ram.scsp_regs[SCSP_MCIPD_OFFSET + 1],
+                    ram[SCSP_MCIPD_OFFSET],
+                    ram[SCSP_MCIPD_OFFSET + 1],
                 ]);
                 if mcieb & mcipd != 0 {
                     if let Some(ref flag) = self.sound_req_irq {
@@ -394,8 +402,8 @@ impl M68k {
                     opcode, pc, self.d, self.a
                 );
                 if n == 0 {
-                    let ram = self.work_ram.read().unwrap();
-                    std::fs::write("/tmp/claude-1000/sound_ram_dump.bin", &ram.sound_ram[..])
+                    let ram = self.work_ram.sound_ram.read().unwrap();
+                    std::fs::write("/tmp/claude-1000/sound_ram_dump.bin", &ram[..])
                         .expect("failed to write sound ram dump");
                     drop(ram);
                     eprintln!("[M68K] dumped full sound_ram (512KB) to /tmp/claude-1000/sound_ram_dump.bin");
@@ -1048,10 +1056,10 @@ fn size_mask(size: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, RwLock};
+    use std::sync::Arc;
 
     fn make_cpu() -> M68k {
-        M68k::new(Arc::new(RwLock::new(WorkRam::new())))
+        M68k::new(Arc::new(WorkRam::new()))
     }
 
     #[test]
@@ -1153,7 +1161,7 @@ mod tests {
         // `c68k_byte_read`/`c68k_byte_write` (`scsp.c`). This is the actual
         // SH-2<->M68K communication path a boot sound-driver handshake
         // would use; the M68K has no access to SH-2 Work RAM at all.
-        let work_ram = Arc::new(RwLock::new(WorkRam::new()));
+        let work_ram = Arc::new(WorkRam::new());
         let mut cpu = M68k::new(work_ram.clone());
         cpu.reset();
         cpu.d[0] = 0x42;
@@ -1161,8 +1169,8 @@ mod tests {
         cpu.pc = 0x100;
         cpu.write_word(0x100, 0x1080); // MOVE.B D0,(A0)
         cpu.step();
-        let ram = work_ram.read().unwrap();
-        assert_eq!(ram.scsp_regs[0x10], 0x42, "M68K write at 0x100010 must land in the shared scsp_regs[0x10], the same array the SH-2 side reads/writes");
+        let ram = work_ram.scsp_regs.read().unwrap();
+        assert_eq!(ram[0x10], 0x42, "M68K write at 0x100010 must land in the shared scsp_regs[0x10], the same array the SH-2 side reads/writes");
     }
 
     #[test]
@@ -1173,7 +1181,7 @@ mod tests {
         // SH-2's Sound Request interrupt if that same bit is set in MCIEB
         // (offset 0x2A) -- the SH-2's own "which sound events do I care
         // about" mask, set up before the driver handshake begins.
-        let work_ram = Arc::new(RwLock::new(WorkRam::new()));
+        let work_ram = Arc::new(WorkRam::new());
         let mut cpu = M68k::new(work_ram.clone());
         let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         cpu.sound_req_irq = Some(flag.clone());

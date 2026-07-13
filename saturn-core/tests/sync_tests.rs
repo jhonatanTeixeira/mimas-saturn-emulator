@@ -1,4 +1,4 @@
-use std::sync::{mpsc, Arc, RwLock};
+use std::sync::{mpsc, Arc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -103,7 +103,7 @@ fn test_lockstep_sync_graceful_shutdown() {
 fn test_bus_arbiter_blocking() {
     let arbiter = Arc::new(BusArbiter::new());
     let sync = Arc::new(LockStepSync::new(4, 10));
-    let work_ram = Arc::new(RwLock::new(WorkRam::default()));
+    let work_ram = Arc::new(WorkRam::default());
 
     // Lock the bus for DMA
     arbiter.lock_for_dma();

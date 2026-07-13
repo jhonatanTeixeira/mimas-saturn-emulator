@@ -1,3 +1,5 @@
+use std::sync::RwLock;
+
 /// Backing storage for every Saturn physical memory region the SH-2 memory
 /// map (`sh2::translate`) understands, beyond BIOS ROM and the SMPC special
 /// case. Region boundaries and sizes are cross-checked against Yabause's
@@ -11,35 +13,44 @@
 /// satisfy the extremely common "write a value, read it back to verify"
 /// pattern real hardware-bringup code uses everywhere, without pretending
 /// to emulate hardware behavior this project hasn't implemented yet.
+///
+/// Each field is its own `RwLock` (see `TECH_DEBT.md` item 1 /
+/// `docs/final_architecture_draft.md`'s "Memory layout" -- this used to be
+/// one `RwLock<WorkRam>` covering everything, which meant e.g. a VDP2 CRAM
+/// write and an SH-2 Work RAM read contended on an identical lock despite
+/// having nothing to do with each other). No call site needs more than one
+/// of these locks at once today (verified against every access site before
+/// this split landed) -- but if a future one ever does, acquire them in the
+/// order the fields are declared below, to avoid a lock-ordering deadlock.
 pub struct WorkRam {
-    pub low_ram: Box<[u8; 0x100000]>,  // 1MB Low Work RAM (0x00200000-0x002FFFFF)
-    pub high_ram: Box<[u8; 0x100000]>, // 1MB High Work RAM (0x06000000-0x060FFFFF)
+    pub low_ram: RwLock<Box<[u8; 0x100000]>>,  // 1MB Low Work RAM (0x00200000-0x002FFFFF)
+    pub high_ram: RwLock<Box<[u8; 0x100000]>>, // 1MB High Work RAM (0x06000000-0x060FFFFF)
     /// SCSP Sound RAM, real size 512KB (0x05A00000-0x05AFFFFF).
-    pub sound_ram: Box<[u8; 0x80000]>,
+    pub sound_ram: RwLock<Box<[u8; 0x80000]>>,
     /// SCSP register block, separate from Sound RAM on real hardware
     /// (0x05B00000-0x05BFFFFF).
-    pub scsp_regs: Box<[u8; 0x1000]>,
+    pub scsp_regs: RwLock<Box<[u8; 0x1000]>>,
     /// VDP1 VRAM, real size 512KB (0x05C00000-0x05C7FFFF).
-    pub vdp1_vram: Box<[u8; 0x80000]>,
+    pub vdp1_vram: RwLock<Box<[u8; 0x80000]>>,
     /// VDP1 framebuffer (double-buffered on real hardware; modeled here as
     /// one flat window), 512KB (0x05C80000-0x05CFFFFF).
-    pub vdp1_framebuffer: Box<[u8; 0x80000]>,
+    pub vdp1_framebuffer: RwLock<Box<[u8; 0x80000]>>,
     /// VDP1 registers (0x05D00000-0x05D7FFFF).
-    pub vdp1_regs: Box<[u8; 0x1000]>,
+    pub vdp1_regs: RwLock<Box<[u8; 0x1000]>>,
     /// VDP2 VRAM, real size 512KB (0x05E00000-0x05E7FFFF).
-    pub vdp2_vram: Box<[u8; 0x80000]>,
+    pub vdp2_vram: RwLock<Box<[u8; 0x80000]>>,
     /// VDP2 color RAM / palette, real size 4KB (0x05F00000-0x05F00FFF).
-    pub vdp2_cram: Box<[u8; 0x1000]>,
+    pub vdp2_cram: RwLock<Box<[u8; 0x1000]>>,
     /// VDP2 registers (0x05F80000-0x05FBFFFF).
-    pub vdp2_regs: Box<[u8; 0x1000]>,
+    pub vdp2_regs: RwLock<Box<[u8; 0x1000]>>,
     /// SCU registers (0x05FE0000-0x05FEFFFF).
-    pub scu_regs: Box<[u8; 0x1000]>,
+    pub scu_regs: RwLock<Box<[u8; 0x1000]>>,
     /// CS2 / CD-ROM block registers (0x05800000-0x058FFFFF). The real CD
     /// command protocol lives in `Cdrom` (CR1-4/HIRQ/DTR); this is a plain
     /// memory stub until that's wired into the CPU's address space.
-    pub cs2_regs: Box<[u8; 0x1000]>,
+    pub cs2_regs: RwLock<Box<[u8; 0x1000]>>,
     /// Internal backup RAM, real size 32KB (0x00180000-0x001FFFFF).
-    pub backup_ram: Box<[u8; 0x8000]>,
+    pub backup_ram: RwLock<Box<[u8; 0x8000]>>,
     /// SMPC register file, real 0x80-byte window (0x00100000-0x0017FFFF,
     /// mirrored -- see `Sh2::translate`'s `& 0x7F`). Real registers live
     /// only at odd byte offsets (IREG0-6 at 0x01-0x0D, COMREG at 0x1F,
@@ -47,37 +58,37 @@ pub struct WorkRam {
     /// DDR1/2 at 0x79/0x7B, IOSEL at 0x7D, EXLE at 0x7F) -- cross-checked
     /// against Yabause's `SmpcReadByte`'s `SmpcRegsT[addr >> 1]` indexing
     /// and its register-offset `switch` in `smpc.c`.
-    pub smpc_regs: Box<[u8; 0x80]>,
+    pub smpc_regs: RwLock<Box<[u8; 0x80]>>,
 }
 
 impl WorkRam {
     pub fn new() -> Self {
         Self {
-            low_ram: vec![0; 0x100000].into_boxed_slice().try_into().unwrap(),
-            high_ram: vec![0; 0x100000].into_boxed_slice().try_into().unwrap(),
-            sound_ram: vec![0; 0x80000].into_boxed_slice().try_into().unwrap(),
-            scsp_regs: vec![0; 0x1000].into_boxed_slice().try_into().unwrap(),
-            vdp1_vram: vec![0; 0x80000].into_boxed_slice().try_into().unwrap(),
-            vdp1_framebuffer: vec![0; 0x80000].into_boxed_slice().try_into().unwrap(),
-            vdp1_regs: vec![0; 0x1000].into_boxed_slice().try_into().unwrap(),
-            vdp2_vram: vec![0; 0x80000].into_boxed_slice().try_into().unwrap(),
-            vdp2_cram: vec![0; 0x1000].into_boxed_slice().try_into().unwrap(),
-            vdp2_regs: vec![0; 0x1000].into_boxed_slice().try_into().unwrap(),
-            scu_regs: vec![0; 0x1000].into_boxed_slice().try_into().unwrap(),
-            cs2_regs: vec![0; 0x1000].into_boxed_slice().try_into().unwrap(),
-            backup_ram: vec![0; 0x8000].into_boxed_slice().try_into().unwrap(),
-            smpc_regs: vec![0; 0x80].into_boxed_slice().try_into().unwrap(),
+            low_ram: RwLock::new(vec![0; 0x100000].into_boxed_slice().try_into().unwrap()),
+            high_ram: RwLock::new(vec![0; 0x100000].into_boxed_slice().try_into().unwrap()),
+            sound_ram: RwLock::new(vec![0; 0x80000].into_boxed_slice().try_into().unwrap()),
+            scsp_regs: RwLock::new(vec![0; 0x1000].into_boxed_slice().try_into().unwrap()),
+            vdp1_vram: RwLock::new(vec![0; 0x80000].into_boxed_slice().try_into().unwrap()),
+            vdp1_framebuffer: RwLock::new(vec![0; 0x80000].into_boxed_slice().try_into().unwrap()),
+            vdp1_regs: RwLock::new(vec![0; 0x1000].into_boxed_slice().try_into().unwrap()),
+            vdp2_vram: RwLock::new(vec![0; 0x80000].into_boxed_slice().try_into().unwrap()),
+            vdp2_cram: RwLock::new(vec![0; 0x1000].into_boxed_slice().try_into().unwrap()),
+            vdp2_regs: RwLock::new(vec![0; 0x1000].into_boxed_slice().try_into().unwrap()),
+            scu_regs: RwLock::new(vec![0; 0x1000].into_boxed_slice().try_into().unwrap()),
+            cs2_regs: RwLock::new(vec![0; 0x1000].into_boxed_slice().try_into().unwrap()),
+            backup_ram: RwLock::new(vec![0; 0x8000].into_boxed_slice().try_into().unwrap()),
+            smpc_regs: RwLock::new(vec![0; 0x80].into_boxed_slice().try_into().unwrap()),
         }
     }
 
     /// Explicit clear of low work RAM (must be called via register write commands, never automatically on Drop)
     pub fn clear_low_ram(&mut self) {
-        self.low_ram.fill(0);
+        self.low_ram.get_mut().unwrap().fill(0);
     }
 
     /// Explicit clear of high work RAM
     pub fn clear_high_ram(&mut self) {
-        self.high_ram.fill(0);
+        self.high_ram.get_mut().unwrap().fill(0);
     }
 }
 

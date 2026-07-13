@@ -4,7 +4,7 @@ mod tests {
         BusArbiter, Cdrom, LockStepSync, Scsp, Scu, Sh2, Smpc, Vdp, WorkRam, Vram,
         DoubleBufferedFramebuffer, SoundRingBuffer
     };
-    use std::sync::{Arc, RwLock};
+    use std::sync::Arc;
     use std::process::Command;
     use std::path::Path;
     use std::fs::File;
@@ -51,7 +51,7 @@ mod tests {
     #[test]
     fn test_tier1_f1_core_initialization() {
         let arbiter = Arc::new(BusArbiter::new());
-        let ram = Arc::new(RwLock::new(WorkRam::new()));
+        let ram = Arc::new(WorkRam::new());
         let mut master = Sh2::new(false, arbiter.clone(), ram.clone());
         let mut slave = Sh2::new(true, arbiter, ram);
         assert!(!master.is_slave);
@@ -161,7 +161,7 @@ mod tests {
     #[test]
     fn test_tier1_f3_sh2_registers() {
         let arbiter = Arc::new(BusArbiter::new());
-        let ram = Arc::new(RwLock::new(WorkRam::new()));
+        let ram = Arc::new(WorkRam::new());
         let cpu = Sh2::new(false, arbiter, ram);
         assert_eq!(cpu.pc, 0);
         assert_eq!(cpu.registers[0], 0);
@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn test_tier1_f3_sh2_pc_increment() {
         let arbiter = Arc::new(BusArbiter::new());
-        let ram = Arc::new(RwLock::new(WorkRam::new()));
+        let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram);
         cpu.pc = 0x06000000;
         cpu.step();
@@ -181,14 +181,14 @@ mod tests {
     #[test]
     fn test_tier1_f3_sh2_read_word() {
         let arbiter = Arc::new(BusArbiter::new());
-        let ram = Arc::new(RwLock::new(WorkRam::new()));
+        let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram.clone());
         
         // Write 0xABCD to high RAM offset 0
         {
-            let mut r = ram.write().unwrap();
-            r.high_ram[0] = 0xAB;
-            r.high_ram[1] = 0xCD;
+            let mut r = ram.high_ram.write().unwrap();
+            r[0] = 0xAB;
+            r[1] = 0xCD;
         }
         
         let word = cpu.read_word(0x06000000);
@@ -199,7 +199,7 @@ mod tests {
     fn test_tier1_f3_sh2_write_word() {
         // Assert we can write memory and read it back
         let arbiter = Arc::new(BusArbiter::new());
-        let ram = Arc::new(RwLock::new(WorkRam::new()));
+        let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram.clone());
         
         // CPU write word to memory (stub: we need to test write_word contract)
@@ -212,13 +212,13 @@ mod tests {
     #[test]
     fn test_tier1_f3_sh2_nop_execution() {
         let arbiter = Arc::new(BusArbiter::new());
-        let ram = Arc::new(RwLock::new(WorkRam::new()));
+        let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram.clone());
         {
-            let mut r = ram.write().unwrap();
+            let mut r = ram.high_ram.write().unwrap();
             // 0x0009 is NOP in SH-2
-            r.high_ram[0] = 0x00;
-            r.high_ram[1] = 0x09;
+            r[0] = 0x00;
+            r[1] = 0x09;
         }
         cpu.pc = 0x06000000;
         cpu.step();
@@ -269,7 +269,7 @@ mod tests {
         let mut ram = WorkRam::new();
         ram.clear_low_ram();
         // Verify clear worked
-        assert_eq!(ram.low_ram[0], 0);
+        assert_eq!(ram.low_ram.read().unwrap()[0], 0);
     }
 
     // --- Feature 5: CD-ROM (CS2) & CHD Streaming ---
@@ -491,7 +491,7 @@ mod tests {
     #[test]
     fn test_tier2_f2_dma_lock_during_read() {
         let arbiter = Arc::new(BusArbiter::new());
-        let ram = Arc::new(RwLock::new(WorkRam::new()));
+        let ram = Arc::new(WorkRam::new());
         let cpu = Sh2::new(false, arbiter.clone(), ram);
         
         arbiter.lock_for_dma();
@@ -522,13 +522,13 @@ mod tests {
     #[test]
     fn test_tier2_f3_sh2_illegal_instruction() {
         let arbiter = Arc::new(BusArbiter::new());
-        let ram = Arc::new(RwLock::new(WorkRam::new()));
+        let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram.clone());
         {
-            let mut r = ram.write().unwrap();
+            let mut r = ram.high_ram.write().unwrap();
             // 0xFFFF is illegal instruction in SH-2
-            r.high_ram[0] = 0xFF;
-            r.high_ram[1] = 0xFF;
+            r[0] = 0xFF;
+            r[1] = 0xFF;
         }
         cpu.pc = 0x06000000;
         cpu.step();
@@ -538,7 +538,7 @@ mod tests {
     #[test]
     fn test_tier2_f3_sh2_unaligned_memory_access() {
         let arbiter = Arc::new(BusArbiter::new());
-        let ram = Arc::new(RwLock::new(WorkRam::new()));
+        let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram);
         // Word read from odd address (unaligned)
         let _ = cpu.read_word(0x06000001);
@@ -548,7 +548,7 @@ mod tests {
     #[test]
     fn test_tier2_f3_sh2_out_of_bounds_address() {
         let arbiter = Arc::new(BusArbiter::new());
-        let ram = Arc::new(RwLock::new(WorkRam::new()));
+        let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram);
         // Memory map only maps 0x06000000 to high ram size. Access far beyond.
         let word = cpu.read_word(0x0E000000);
@@ -558,7 +558,7 @@ mod tests {
     #[test]
     fn test_tier2_f3_sh2_max_pc_overflow() {
         let arbiter = Arc::new(BusArbiter::new());
-        let ram = Arc::new(RwLock::new(WorkRam::new()));
+        let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram);
         cpu.pc = 0xFFFFFFFF;
         // Step should wrap PC to 0 or throw memory exception
@@ -569,7 +569,7 @@ mod tests {
     #[test]
     fn test_tier2_f3_sh2_gbr_vbr_boundaries() {
         let arbiter = Arc::new(BusArbiter::new());
-        let ram = Arc::new(RwLock::new(WorkRam::new()));
+        let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram);
         cpu.gbr = 0xFFFFFFFF;
         cpu.vbr = 0xFFFFFFFF;
@@ -610,7 +610,7 @@ mod tests {
     #[test]
     fn test_tier2_f4_peripheral_dma_concurrency() {
         let arbiter = Arc::new(BusArbiter::new());
-        let ram = Arc::new(RwLock::new(WorkRam::new()));
+        let ram = Arc::new(WorkRam::new());
         let _cpu = Sh2::new(false, arbiter.clone(), ram);
         arbiter.lock_for_dma();
         assert!(arbiter.is_locked());
@@ -717,7 +717,7 @@ mod tests {
     fn test_tier3_combination_f1_f3_lockstep_cpu_stepping() {
         let sync = LockStepSync::new(4, 1000);
         let arbiter = Arc::new(BusArbiter::new());
-        let ram = Arc::new(RwLock::new(WorkRam::new()));
+        let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram);
         
         assert_eq!(cpu.cycles, 0);
@@ -733,7 +733,7 @@ mod tests {
     #[test]
     fn test_tier3_combination_f2_f3_bus_arbiter_blocks_cpu() {
         let arbiter = Arc::new(BusArbiter::new());
-        let ram = Arc::new(RwLock::new(WorkRam::new()));
+        let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter.clone(), ram);
         
         arbiter.lock_for_dma();
@@ -762,7 +762,7 @@ mod tests {
     #[test]
     fn test_tier3_combination_f3_f4_sh2_smpc_peripheral_read() {
         let arbiter = Arc::new(BusArbiter::new());
-        let ram = Arc::new(RwLock::new(WorkRam::new()));
+        let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram);
         // SMPC lives at physical 0x00100000 onwards (see
         // saturn_architecture_report.md); 0x06000000 is actually the start
@@ -782,7 +782,7 @@ mod tests {
     #[test]
     fn test_tier3_combination_f3_f5_sh2_cdrom_command_execution() {
         let arbiter = Arc::new(BusArbiter::new());
-        let ram = Arc::new(RwLock::new(WorkRam::new()));
+        let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram);
         
         // CPU writes to CD-ROM command registers to boot/spin disc
@@ -794,7 +794,7 @@ mod tests {
     #[test]
     fn test_tier3_combination_f1_f2_f3_multi_core_dma_contention() {
         let arbiter = Arc::new(BusArbiter::new());
-        let ram = Arc::new(RwLock::new(WorkRam::new()));
+        let ram = Arc::new(WorkRam::new());
         let mut master = Sh2::new(false, arbiter.clone(), ram.clone());
         let mut slave = Sh2::new(true, arbiter.clone(), ram);
         

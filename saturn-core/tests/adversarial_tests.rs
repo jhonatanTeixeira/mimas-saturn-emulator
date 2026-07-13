@@ -170,7 +170,7 @@ fn test_drift_bounds_hold_exactly() {
 fn test_drift_limit_bypass_after_dma() {
     let arbiter = Arc::new(BusArbiter::new());
     let sync = Arc::new(LockStepSync::new(3, 10)); // slack limit = 10
-    let work_ram = Arc::new(std::sync::RwLock::new(saturn_core::WorkRam::new()));
+    let work_ram = Arc::new(saturn_core::WorkRam::new());
 
     // Create three CPU threads or simulate their steps
     // Let's use the actual Sh2 structs!
@@ -369,7 +369,7 @@ fn test_panic_deadlock_vulnerability() {
 fn test_sndon_signal_publishes_sound_ram_writes_across_threads() {
     assert_completes_within(Duration::from_secs(10), || {
         let arbiter = Arc::new(BusArbiter::new());
-        let work_ram = Arc::new(std::sync::RwLock::new(saturn_core::WorkRam::new()));
+        let work_ram = Arc::new(saturn_core::WorkRam::new());
         let flag = Arc::new(AtomicBool::new(false));
 
         let mut writer_cpu = Sh2::new(false, arbiter.clone(), work_ram.clone());
@@ -406,7 +406,7 @@ fn test_sndon_signal_publishes_sound_ram_writes_across_threads() {
             let mut confirmed = 0u8;
             while confirmed < ITERATIONS {
                 if reader_flag.load(Ordering::Acquire) {
-                    let observed = reader_work_ram.read().unwrap().sound_ram[0];
+                    let observed = reader_work_ram.sound_ram.read().unwrap()[0];
                     if last_seen_value != Some(observed) {
                         assert_eq!(
                             observed, confirmed,

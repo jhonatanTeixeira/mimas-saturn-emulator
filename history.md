@@ -425,6 +425,100 @@ before starting, not folded into this pass.
 
 ---
 
+## Chapter 8 — Splitting `WorkRam`'s monolithic lock
+
+`TECH_DEBT.md`'s suggested order of attack's third item: `WorkRam`'s single
+`Arc<RwLock<WorkRam>>` — one lock covering all 14 real-hardware memory
+regions (Low/High Work RAM, Sound RAM, SCSP registers, VDP1/VDP2 VRAM/
+framebuffer/CRAM/registers, SCU registers, CS2 registers, backup RAM, SMPC
+registers) — split into one `RwLock` per field. Bigger blast radius than
+Chapter 7's two fixes (roughly 50 call sites across 6 files, versus a
+handful), so this chapter's process leaned harder on verification before
+writing any code: a full access-map pass first, then an independent design
+review of the proposed split, both folded into the plan before touching a
+single file.
+
+**What the access map found.** Grepped every one of the 14 field names
+against every file that could plausibly touch them, cross-referenced
+against which thread each access runs on. Only 3 fields turned out to be
+touched by more than one component *today*: `sound_ram` and `scsp_regs`
+(Core 0's `Sh2` and Core 3's `M68k` — the real dual-ported SH-2⇄M68K sound
+path) and `vdp2_regs` (Core 0's `Sh2` and Core 3's render loop, every
+frame). The other 11 are Core-0-only right now, but only because Core 1
+(Slave SH-2) is parked (Chapter 7) — real dual-SH2 Saturn software shares
+Low/High Work RAM via `TAS.B`-guarded spinlocks between Master and Slave,
+so "single-owner" here is a snapshot of Core 1 being parked, not a
+permanent guarantee. No call site anywhere held one lock guard across two
+*different* fields, which meant the split itself was mechanically clean —
+but the access map surfaced one real, pre-existing gap along the way:
+`TAS.B @Rn` does a separate `read_byte` then `write_byte`, two independent
+lock acquisitions with a real gap between them, not an atomic test-and-set.
+Dormant only because Core 1 never runs.
+
+**What the design review changed.** The first draft proposed grouping
+fields by hardware component (e.g. all of VDP1's three regions under one
+lock). The review's counter: no site holds two fields under one guard
+today, so grouping saves nothing internally, and `docs/final_architecture_draft.md`'s
+own topology roadmaps every one of the "11 single-owner" fields toward
+genuinely cross-thread once SCU/SMPC/CS2/VDP1+VDP2 get their own threads —
+per-field isn't a hedge for Core 1 specifically, it's the right long-term
+shape regardless. (VDP1+VDP2 staying one *thread* forever, per that same
+doc, is a thread-topology decision independent of lock topology — a thread
+never contends with itself.) The review also caught two call sites that a
+blind mechanical substitution would have silently broken: `M68k::write_byte`'s
+`scsp_regs` branch holds one guard across both the register store and the
+immediately-following MCIEB/MCIPD interrupt check (splitting the lock
+without preserving that would let a concurrent SH-2 write to MCIEB land in
+the gap, changing whether *this* write should have fired the interrupt);
+and `vdp::render_backdrop`, which reads `vdp2_regs` twice (TVMD, then
+BKTAL) and was previously safe only because its caller already held one
+whole-`WorkRam` lock for the entire call — with no outer lock to ride on
+post-split, it needed to acquire `vdp2_regs`'s own lock itself, once, held
+across both reads.
+
+**What shipped.** Every field of `WorkRam` became `RwLock<Box<[u8; N]>>`
+(kept the existing `Box` inside the new lock, preserving the heap-first
+construction technique the code already used to avoid ever materializing a
+1MB array on the stack); the outer struct no longer needs its own lock, so
+`Arc<RwLock<WorkRam>>` became plain `Arc<WorkRam>` everywhere, keeping
+`Sh2::new()`'s 3-argument signature intact per `CLAUDE.md`'s non-negotiable
+— only what the argument points to changed. `M68k::write_byte`/`read_byte`
+reordered to decode the address before acquiring a lock (previously the
+reverse), with the `scsp_regs` branch's single held guard preserved exactly
+as the review required. `render_backdrop` now acquires `vdp2_regs.read()`
+itself, once. All 14 fields landed in one pass rather than staged region by
+region (the original migration notes' suggested order) — by the time this
+work started, the prerequisite that note was protecting (real signals for
+`sound_ram`/`scsp_regs`'s associated events) was already satisfied by
+Chapter 7's SNDON fix, so there was no remaining reason to carry two
+different access patterns through a multi-session migration.
+
+**The `TAS.B` gap got a comment, not a fix.** Real dual-CPU Saturn
+software's whole reason to use `TAS.B` is a spinlock over shared Work RAM
+between Master and Slave SH-2 — exactly the scenario the read-then-write
+gap breaks. Fixing it needs a real compare-and-swap-style primitive or one
+write-lock spanning both operations, a separate, non-trivial change. Left
+deliberately unfixed, but flagged loudly directly on the `TAS.B` match arm
+in `sh2.rs` (not just in this file): removing the old monolithic lock's
+incidental over-serialization between cores makes two concurrent `TAS.B`s
+on the same byte *more* likely to actually race the moment Core 1
+activates, not equally dormant — this needs to land before or alongside
+SSHON, not as a someday-maybe.
+
+**Verification.** Full workspace suite stayed at 129 passed / 0 failed
+(the same count as after Chapter 7), the cross-thread stress tests
+(`test_sndon_signal_publishes_sound_ram_writes_across_threads`, the parking
+tests) were re-run repeatedly rather than trusted on one green pass, and
+the same real-BIOS trace from Chapter 7 (`Sega Saturn BIOS (USA).bin`,
+`MIMAS_DEBUG_M68K=1`, 200-second window) was re-run to confirm the M68K
+wall's exact signature — `D7=0xFFFF, A0=0` at the clear-loop entry, the
+same `0xFFFC`/`0xFF00` derailment, PC reaching the same `~0x06011900`
+territory — is still byte-for-byte unchanged. This split, like the SNDON
+fix before it, is architecture work orthogonal to that investigation, and
+now has the evidence to back that claim twice.
+
+---
+
 ## Working principles that held up across all of the above
 
 - **Never trust a self-consistent test.** Every real bug found this way

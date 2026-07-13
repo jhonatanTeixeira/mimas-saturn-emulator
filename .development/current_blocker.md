@@ -76,6 +76,11 @@ derails partway through the driver's very first real action.
   clear-loop entry, derails to `0x3232` reading `0xFFFC` then a run of
   `0xFF00` "Line F" opcodes, PC reaches the same `~0x06011900` territory.
   This wall is confirmed orthogonal to that architectural fix.
+  **Re-verified again 2026-07-13** after splitting `WorkRam`'s monolithic
+  lock into one lock per region (`TECH_DEBT.md` item 1, `history.md`
+  Chapter 8): identical signature once more, same BIOS, same addresses,
+  same register values. Two architectural fixes in a row have now left
+  this wall byte-for-byte untouched, as both were expected to.
 - **Not obviously a Sound RAM address-mapping bug** — the same region the
   SH-2 writes into (0x05A00000/0x25A00000) is what the M68K reads at its
   own address 0, confirmed against Yabause's `M68K->SetFetch(0, 0x80000,

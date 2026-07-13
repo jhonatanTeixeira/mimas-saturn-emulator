@@ -26,7 +26,7 @@ use std::thread::{self, JoinHandle};
 
 pub struct SaturnSystem {
     pub arbiter: Arc<BusArbiter>,
-    pub work_ram: Arc<RwLock<WorkRam>>,
+    pub work_ram: Arc<WorkRam>,
     pub vram: Arc<RwLock<Vram>>,
     pub sync: Arc<LockStepSync>,
     pub shutdown: Arc<AtomicBool>,
@@ -62,7 +62,7 @@ impl SaturnSystem {
 
     pub fn with_slack(slack_limit: u64) -> Self {
         let arbiter = Arc::new(BusArbiter::new());
-        let work_ram = Arc::new(RwLock::new(WorkRam::new()));
+        let work_ram = Arc::new(WorkRam::new());
         let vram = Arc::new(RwLock::new(Vram::new()));
         let sync = Arc::new(LockStepSync::new(4, slack_limit));
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -222,11 +222,11 @@ impl SaturnSystem {
                 if should_run && !was_running {
                     m68k.reset();
                     if std::env::var("MIMAS_DEBUG_M68K").is_ok() {
-                        let ram = work_ram_c3.read().unwrap();
+                        let ram = work_ram_c3.sound_ram.read().unwrap();
                         eprintln!(
                             "[M68K] reset: SP={:#010X} PC={:#010X} first16={:02X?}",
                             m68k.a[7], m68k.pc,
-                            &ram.sound_ram[0..16]
+                            &ram[0..16]
                         );
                     }
                 } else if !should_run && was_running {
@@ -246,14 +246,16 @@ impl SaturnSystem {
                 }
                 let now = std::time::Instant::now();
                 if now >= next_frame_due {
-                    let frame = {
-                        let ram = work_ram_c3.read().unwrap();
-                        crate::vdp::render_backdrop(&ram)
-                    };
+                    let frame = crate::vdp::render_backdrop(&work_ram_c3);
                     if std::env::var("MIMAS_DEBUG_VDP2").is_ok() {
-                        let ram = work_ram_c3.read().unwrap();
-                        let tvmd = u16::from_be_bytes([ram.vdp2_regs[0], ram.vdp2_regs[1]]);
-                        let bktal = u16::from_be_bytes([ram.vdp2_regs[0xAE], ram.vdp2_regs[0xAF]]);
+                        // One held guard for both register pairs below --
+                        // `vdp2_regs` is its own lock now, and a Core 0
+                        // write landing between two separate acquisitions
+                        // here would log a torn TVMD/BKTAL pair.
+                        let regs = work_ram_c3.vdp2_regs.read().unwrap();
+                        let tvmd = u16::from_be_bytes([regs[0], regs[1]]);
+                        let bktal = u16::from_be_bytes([regs[0xAE], regs[0xAF]]);
+                        drop(regs);
                         if last_logged != Some((tvmd, bktal)) {
                             let px = frame.pixels.first().copied().unwrap_or(0);
                             eprintln!("[DEBUG VDP2] TVMD={:#06X} BKTAL={:#06X} pixel0={:#08X} res={}x{}",

@@ -28,8 +28,9 @@ milestone they roll up into.
 - [x] Real M68K↔SCSP register address decode (Sound RAM < 0x080000,
       SCSP registers ≥ 0x100000, both dual-ported with the SH-2's own
       view of the same physical registers)
-- [x] Real SNDON/SNDOFF (M68K reset/halt) wired to Core 3, with a
-      debounce on the reset edge
+- [x] Real SNDON/SNDOFF (M68K reset/halt) wired to Core 3, via a real
+      `Ordering::Release`/`Acquire` signal (the wall-clock debounce this
+      used to need is gone, see `TECH_DEBT.md` Progress notes)
 - [x] Real SCSP→SH-2 "Sound Request" interrupt (MCIPD/MCIEB → SCU vector
       0x46, level 9)
 - [x] VDP2 backdrop-only rendering pipeline (`vdp.rs`), real window
@@ -48,6 +49,10 @@ milestone they roll up into.
       Chapter 7). This is *only* the spin fix, not the features below —
       both cores still have no real work; they're parked, ready to be
       reactivated via `set_thread_active(id, true)` once that work lands.
+- [x] `WorkRam`'s monolithic lock split into one `RwLock` per field (see
+      `TECH_DEBT.md` Progress notes, `history.md` Chapter 8) — a VDP2
+      register write and an SH-2 Work RAM read no longer contend on the
+      same lock.
 
 ## In progress
 
@@ -73,7 +78,10 @@ milestone they roll up into.
       once a trace shows it. Core 1 is already parked
       (`LockStepSync::park_while_inactive`) with `bios`/`reset()` wiring in
       place in `SaturnSystem::start()` — SSHON's handler just needs to call
-      `sync.set_thread_active(1, true)` to bring it up.
+      `sync.set_thread_active(1, true)` to bring it up. Do this alongside
+      (not after) fixing `TAS.B`'s read-then-write race gap (flagged at
+      the opcode's match arm in `sh2.rs`, see `TECH_DEBT.md` item 1) —
+      real dual-CPU spinlock code over shared Work RAM needs both.
 - [ ] CD-ROM wired into the CPU address space / SMPC CD command protocol
       — see `ROADMAP.md` M7. Out of scope for the current "BIOS logo,
       no CD" goal.

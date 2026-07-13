@@ -105,7 +105,13 @@ fn rgb555_to_xrgb8888(color: u16) -> u32 {
 /// register writes reach the screen before the much larger NBG tile
 /// decoding pipeline (pattern names, character data, CRAM lookup) exists.
 pub fn render_backdrop(ram: &WorkRam) -> Framebuffer {
-    let tvmd = read_reg_word(&ram.vdp2_regs[..], REG_TVMD);
+    // One held read-guard spans both register reads below (TVMD, then
+    // BKTAL): `vdp2_regs` is its own lock now (see `shared_buffers.rs`),
+    // and this function no longer rides on a caller-held whole-`WorkRam`
+    // lock the way it used to -- acquiring twice here would let a
+    // concurrent SH-2 write land between the two reads.
+    let regs = ram.vdp2_regs.read().unwrap();
+    let tvmd = read_reg_word(&regs[..], REG_TVMD);
     let (width, height) = resolution_from_tvmd(tvmd);
     let disp_enabled = tvmd & 0x8000 != 0;
 
@@ -115,7 +121,8 @@ pub fn render_backdrop(ram: &WorkRam) -> Framebuffer {
         // before" -- avoid stale-frame confusion while DISP is being set up.
         return frame;
     }
-    let backdrop = read_reg_word(&ram.vdp2_regs[..], REG_BKTAL);
+    let backdrop = read_reg_word(&regs[..], REG_BKTAL);
+    drop(regs);
     frame.fill(rgb555_to_xrgb8888(backdrop));
     frame
 }
@@ -144,12 +151,15 @@ mod tests {
     fn render_backdrop_reads_real_registers() {
         let mut ram = WorkRam::new();
         // TVMD: DISP on, 320x224 (all zero apart from the DISP bit)
-        ram.vdp2_regs[REG_TVMD] = 0x80;
-        ram.vdp2_regs[REG_TVMD + 1] = 0x00;
-        // BKTAL: pure blue (bits 10-14)
-        let blue = 0x1F << 10;
-        ram.vdp2_regs[REG_BKTAL] = (blue >> 8) as u8;
-        ram.vdp2_regs[REG_BKTAL + 1] = (blue & 0xFF) as u8;
+        {
+            let regs = ram.vdp2_regs.get_mut().unwrap();
+            regs[REG_TVMD] = 0x80;
+            regs[REG_TVMD + 1] = 0x00;
+            // BKTAL: pure blue (bits 10-14)
+            let blue = 0x1F << 10;
+            regs[REG_BKTAL] = (blue >> 8) as u8;
+            regs[REG_BKTAL + 1] = (blue & 0xFF) as u8;
+        }
 
         let frame = render_backdrop(&ram);
         assert_eq!((frame.width, frame.height), (320, 224));
