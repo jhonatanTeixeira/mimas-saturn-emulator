@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 saturn-core = { path = "../saturn-core" }
 minifb = "0.27"
+png = "0.18"

@@ -519,6 +519,479 @@ now has the evidence to back that claim twice.
 
 ---
 
+## Chapter 9 — A real CPU clock throttle, closing out `TECH_DEBT.md`'s suggested order of attack
+
+The last item: `LockStepSync` bounds *relative* drift between cores in
+abstract cycle-count terms, but nothing paced execution against a real
+wall-clock target — every interpreter ran as fast as the host CPU allowed.
+Only VBLANK timing and VDP2 frame publishing were paced against real time.
+This matters because real BIOS/game code sometimes uses raw cycle-count
+delay loops instead of hardware timers, and running those unthrottled is a
+real, if so-far-unconfirmed, risk.
+
+**Confirmed with the user before writing any code**: the default stays
+unthrottled. Every existing verification workflow (`CLAUDE.md`'s loop,
+`MIMAS_BOOT_WATCH_SECS`, the real-BIOS traces this project has leaned on
+repeatedly) keeps running exactly as fast as it always has. Real speed —
+or any multiplier — is an explicit, live-adjustable opt-in, not a new
+default. This was a genuine judgment call with real trade-offs (hardware
+fidelity by default vs. not risking the active BIOS-boot investigation's
+ergonomics), not something to decide unilaterally.
+
+**Real clock rates, cross-checked against Yabause's source, not
+remembered.** This project's standing rule (never trust an assumed
+hardware number) applies just as much to a clock rate as to an opcode's
+semantics. Two numbers, pulled directly from the actual constants Yabause
+computes cycle-stepping from, not rounded restatements:
+
+- **SH-2 (Master = Slave)**: NTSC 352-dot/28MHz mode —
+  `(39_375_000.0 / 11.0) * 8.0` = 28,636,363.636... Hz — from
+  `YabauseChangeTiming()` (`yabause/src/yabause.c:165-167`), gated by
+  `CLKTYPE_28MHZ`, the mode real hardware boots into. Mimas doesn't
+  implement the SMPC CKCHG352/CKCHG320 commands that would switch modes at
+  runtime, so this is a fixed constant for now — documented as such rather
+  than quietly pretending it's the only possible rate.
+- **M68000 (SCSP sound CPU)**: 11,289,600 Hz (`44100.0 * 256.0`), same for
+  NTSC/PAL — from `scsp2.c:128-129`'s `SCSP_CLOCK_FREQ` (explicitly
+  commented "11.2896 MHz" in Yabause's own source), corroborated
+  independently at three more sites in `yabause.c`.
+
+`m68k.rs` doesn't track per-instruction cycle cost at all — unlike `Sh2`,
+which already flatly charges 2 cycles/instruction regardless of real
+opcode timing, an existing, long-accepted simplification. Building a real
+per-opcode M68K cycle table is a separate, much bigger undertaking than a
+throttle. The throttle charges a flat nominal 8 cycles/instruction for
+M68K instead — a commonly-cited rough average for 68000 code — which is
+the same simplification tier already accepted for the SH-2, just extended
+to a second CPU, and said out loud rather than dressed up as precise.
+
+**The mechanism**: `saturn-core/src/throttle.rs`'s `ClockThrottle` —
+accumulate real cycles silently, and once a batch's worth has built up
+(targeting ~1ms of emulated time, large enough that OS sleep-precision
+error is negligible relative to it), pace against a shared, live-mutable
+`ThrottleSpeed` (`Unthrottled` or `Multiplier(f64)`). The pacing math
+mirrors `docs/final_architecture_draft.md`'s own pseudocode exactly:
+`next_batch_due` accumulates a fixed ideal duration each batch rather than
+resetting to `now + duration`, so a transient slow batch (a scheduler
+hiccup) gets made up by running flat-out for a few subsequent batches
+instead of permanently losing that time, while a *persistent* inability to
+keep up degrades to a permanent no-op — exactly the documented "running
+behind real-time... consider this observable" behavior, not a lie about
+elapsed time.
+
+`Sh2` gained one new optional field (`speed`, mirroring the existing
+`m68k_control`/`sound_req_irq`/`pc_reporter` wiring pattern exactly) —
+`None` by default, so every one of the ~70 existing opcode tests that
+builds a bare `Sh2` stays exactly as fast as before this existed, zero risk
+to the existing test suite. `M68k` itself needed no change at all — its
+throttle lives entirely in Core 3's closure in `lib.rs`, calling
+`.advance()` once after each `m68k.step()`, right where the old fixed
+"200 steps per iteration" magic constant used to be the only pacing
+concept in that loop. `SaturnSystem` gained `speed`/`set_speed`/`get_speed`
+— one shared knob for the whole system, not independent per-component
+sliders, matching how a real Saturn's own clock derivation works (there's
+no separate "sound chip speed" control on real hardware either). A
+`--speed` CLI flag on `saturn-frontend-native` exposes it for manual
+testing; `saturn-frontend-libretro` was left untouched, still just stub
+functions with nothing to wire yet.
+
+**A real bug the test suite caught before it shipped.** The first attempt
+at a `SaturnSystem`-level test (set an extremely small multiplier, sample
+`cpu0_pc` twice a few milliseconds apart, expect identical values) failed
+outright — not because the throttle was wrong, but because the test's own
+timing assumptions were: this interpreter's per-instruction overhead
+(a real syscall in `thread::yield_now()`, lock contention in `sync_core()`,
+on *every single instruction*) turned out to be substantial enough that a
+14,318-instruction batch took tens of milliseconds to execute even
+unthrottled, invalidating the test's assumption that the initial burst
+would complete near-instantly. Chasing a robust, non-flaky version of that
+specific assertion led somewhere more useful: reasoning through it surfaced
+that an extreme multiplier's *ideal* per-batch sleep duration is
+unbounded (here: roughly 1000 seconds), and `thread::sleep` cannot be
+interrupted once entered — meaning a pathological speed setting, with no
+further fix, could make `SaturnSystem::shutdown()` hang for however long
+the in-flight sleep happened to be. `ClockThrottle` now caps any single
+sleep at 50ms regardless of the ideal duration (for any realistic
+multiplier this never binds; it only matters at the pathological extreme).
+The `SaturnSystem`-level test was rewritten around confirming *this*
+property end-to-end (shutdown stays prompt even with an extreme
+multiplier configured) instead of the original, fragile progress-rate
+comparison — a more valuable and more robust test than the one first
+attempted, found by taking a failure seriously instead of just loosening
+a bound until it passed.
+
+**Verification.** Full workspace suite: 129 → 136 passed (5 new
+`ClockThrottle` unit tests using a synthetic, decoupled `clock_hz` for
+precise, non-flaky timing assertions; 2 new `SaturnSystem`-level tests),
+0 failed, re-run five times clean. Real-BIOS trace with the default
+(unthrottled) configuration confirmed, a third time now, the exact same
+M68K wall signature as Chapters 7 and 8 — this work is what it claims to
+be, orthogonal to that investigation.
+
+This closes out `TECH_DEBT.md`'s suggested order of attack, items 1
+through 4. Item 5 (revisit threads-vs-cooperative-scheduling with real
+measurements) is now finally unblocked — this throttle is exactly the
+prerequisite it was waiting on for a real, comparable performance number.
+Item 6 (headless BIOS-boot integration tests), added to the document after
+this chapter's work began, is the one item left that hasn't been
+started.
+
+---
+
+## Chapter 10 — A real, measured spurious-wakeup bug in the parking mechanism
+
+`TECH_DEBT.md`'s item 5 ("revisit threads-vs-cooperative-scheduling with
+actual measurements") got substantially reframed before any measuring
+started. The abstract R36S-vs-desktop question in the doc turned out not
+to be the live question at all: the user's own prior work on this repo's
+*other* Saturn emulator (the Yabause/YabaSanshiro fork, `yabause/`) had
+already run the real experiment. That project achieved something no other
+Saturn emulator has — sample-accurate audio/video sync, real lip-sync in
+Magic Knight Rayearth's dialogue — by eliminating its async SCSP thread in
+favor of cycle-driven single-thread execution (see `yabause`'s own commit
+`f96ebfbe`, "Eliminate SCSP audio thread: cycle-driven single-thread sync
+fixes audio-sync crackle for good"). On PC: 60fps at 35% CPU. On the actual
+R36S target: only 40fps, with the Mali GPU at ~10% and 3 of 4 CPU cores
+sitting almost idle — perfect correctness, but capped by one core's serial
+throughput, wasting the rest of the silicon. That's not a hypothetical
+concern this project's own docs were citing secondhand; it's the direct
+reason Mimas exists at all. So "threads vs. cooperative" isn't genuinely
+open the way `TECH_DEBT.md` framed it — multi-threading is the whole point,
+*because* single-threading already proved it caps performance on weak
+hardware. The real question is whether Mimas's own multi-threaded
+implementation is achieving genuine parallelism or quietly serializing
+itself the same way single-threading does, just less honestly.
+
+**A crucial detail from the same conversation, worth recording precisely**:
+audio crackle in that cycle-driven design isn't a bug to chase — it's the
+direct, expected symptom of insufficient throughput. A tightly-coupled
+audio/video pipeline with no independent buffer has no slack to absorb a
+frame taking too long; it starves the audio backend instead of quietly
+dropping a frame. That means the fix for crackle in this architecture is
+always "have enough parallel throughput headroom," never "add audio-side
+smoothing" (which would just reintroduce the A/V drift the tight coupling
+was built to eliminate). This directly validates how `ClockThrottle`
+(Chapter 9) already behaves: falling behind real-time is left observable,
+never quietly absorbed.
+
+**The measurement.** No `perf` in this environment, no real R36S, but
+`/proc/<pid>/task/*/stat` gives real per-thread `utime`/`stime`, and that's
+enough to answer the concrete question: is Mimas's existing 4-thread
+architecture actually running components in parallel? First measurement,
+over an 8-second window on a real BIOS boot: all four core threads showed
+substantial, roughly comparable CPU consumption (`~65-96%` of a core
+each) — including the two that are supposed to be parked doing nothing
+(Slave SH-2, the SCU DSP slot). That's wrong on its face: a genuinely
+parked thread blocked on a `Condvar` should cost essentially zero CPU.
+
+**Finding the cause required identifying which thread was which first** —
+gdb attach was blocked by this environment's `ptrace_scope` hardening (a
+security setting, correctly left alone rather than worked around), so the
+four core-spawning threads in `SaturnSystem::start()` got real OS-visible
+names (`sh2-master`, `sh2-slave`, `scu-dsp`, `vdp-scsp-m68k`, via
+`thread::Builder::name`) — a small, permanent improvement in its own
+right, not just a throwaway diagnostic. That confirmed it precisely:
+`sh2-slave` and `scu-dsp`, the two parked cores, were each burning around
+65% of a core, while `sh2-master` and `vdp-scsp-m68k` (the two with real
+work) sat near 100%.
+
+**Root cause, once named threads made it traceable**: `LockStepSync` used
+a single `Condvar` for two entirely different purposes — `sync_core`'s
+drift-bound waiters (legitimately notified on *every* call, up to once per
+emulated instruction from an active core) and `park_while_inactive`'s
+waiters (which should only ever wake on a real reactivation or shutdown).
+Sharing one condvar meant every parked core got spuriously woken by every
+other active core's routine `sync_core` call — millions of times a
+second — each time re-contending for the very same mutex the genuinely
+busy cores needed for their own synchronization. Parking was logically
+correct the whole time (Chapter 7's tests for "blocks then wakes on
+reactivation," "wakes on shutdown," and "doesn't force active cores to
+wait on drift" all still pass, because they check logical behavior, not
+CPU consumption) — it just never actually achieved the zero-CPU idle state
+its own doc comment claimed, in any real multi-thread run. Unit tests
+proved the *logic*; only a running-system measurement could have caught
+that the *mechanism* wasn't free.
+
+**The fix**: a second, dedicated `park_condvar` on `LockStepSync`, sharing
+the same underlying `Mutex<SyncState>` (a well-established, safe pattern —
+multiple condvars over one mutex, each covering a different wait
+condition) but notified only by `set_thread_active`'s reactivation branch
+and `request_shutdown`. `sync_core`'s existing high-frequency notifications
+never touch it. Full workspace suite stayed green throughout (136 passed,
+0 failed) — this was purely a wakeup-efficiency fix, no logic changed.
+
+**Re-measured after the fix, same 8-second window**: `sh2-slave` and
+`scu-dsp` both at genuinely 0 ticks — real zero CPU, for the first time.
+`sh2-master` and `vdp-scsp-m68k` each still near 100% of their own core,
+now uncontended. The system was previously burning roughly 2.5 cores'
+worth of CPU to do the work of 2; after the fix, it spends almost exactly
+2 cores' worth on 2 cores' worth of real work — matching what this
+project's whole reason for existing is asking for.
+
+**An unexpected, second-order result, flagged rather than chased**: the
+same real-BIOS re-verification run that confirmed the M68K wall's
+signature is still byte-for-byte unchanged (same `D7=0xFFFF, A0=0`
+clear-loop entry, same `0xFFFC`/`0xFF00` derailment — this fix, like the
+last three, is orthogonal to that bug) also showed Core 0's PC reaching
+`0x0601360A` by the end of the 200-second window — past the `~0x06011900`
+plateau every single prior trace this session (Chapters 7, 8, 9, and the
+pre-fix measurement earlier in this one) got stuck oscillating in for
+thousands of samples. With the mutex contention gone, Core 0 simply
+executes more real instructions in the same wall-clock budget, and reached
+further as a direct consequence. Whether that plateau was a bounded loop
+that just needed more throughput to finish, or something more meaningful
+for the active M68K investigation, is unresolved and deliberately not
+chased here — it's `.development/current_blocker.md`'s territory, with its
+own methodology (`CLAUDE.md`'s loop), not something to wander into
+sideways under a performance task. Recorded here precisely so whoever
+picks up that investigation next isn't surprised by a trace that goes
+further than the document currently describes.
+
+---
+
+## Chapter 11 — The flagged side finding resolves: a missing VBLANK-OUT interrupt, and a new wall behind it
+
+Chapter 10 ended with a loose thread, deliberately not pulled at the time:
+after the spurious-wakeup fix, a real-BIOS run reached PC `0x0601360A` —
+past the `~0x06011900` plateau every prior trace had gotten stuck
+oscillating in — with the M68K sound-driver corruption bug's signature
+confirmed unchanged in the same run. Unclear at the time whether that
+plateau was a genuine wall or just a bounded loop that needed more
+real throughput than earlier, contention-heavy runs could deliver.
+
+Picking that thread back up (`.development/current_blocker.md`'s explicit
+instruction to re-run the boot-watch loop first) showed a *third* behavior
+across runs: a fresh 300-second trace settled into a tight oscillation at
+`0x060108ba`-`0x060108c2`, not `0x0601360A`. Three different "final" PCs
+across three sessions (the original `~0x06011900`, Chapter 10's
+`0x0601360A`, this session's `0x060108ba`) was itself a signal: black-box
+PC sampling at a fixed wall-clock cutoff isn't a reliable way to find "the
+wall" once the system is fast enough that timing variance moves the
+sampling window's endpoint around inside a long-but-not-permanently-stuck
+sequence. The fix was to stop trusting "wherever PC happens to be when the
+timer runs out" and instead look for a *genuinely tight, sustained*
+oscillation — `0x060108ba`-`0x060108c2` (an 8-byte span, thousands of
+consecutive hits) qualified in a way the others hadn't been confirmed to.
+
+**Tracing it, following `CLAUDE.md`'s loop exactly.** A one-shot probe
+dumped all 1MB of High RAM the instant Core 0's PC first reached
+`0x060108ba`, decoded offline with `tools/sh2dis.py`. The loop itself:
+
+```text
+0x060108b6: MOV.L @(0x2e,PC),R4   ; R4 = [0x06010970] (a pointer)
+0x060108b8: MOV.W @R4,R4          ; R4 = *(u16*)R4  -- snapshot, taken once
+0x060108ba: EXTS.W R4,R2          ; <- loop entry
+0x060108bc: MOV.L @(0x2c,PC),R3   ; R3 = [0x06010970] (same pointer, reread)
+0x060108be: MOV.W @R3,R3          ; R3 = *(u16*)R3  -- current value
+0x060108c0: CMP/EQ R3,R2
+0x060108c2: BT 0x060108ba          ; loop while unchanged from the snapshot
+```
+
+The pointer at `0x06010970` resolved to `0x060408a4` — High RAM offset
+`0x0408a4`, the exact "counter byte" a *previous* session's throwaway probe
+had already been watching writes to (see the stale probe in
+`raw_write_byte`'s `HighRam` arm, predating this session). So: "wait for
+this counter to change from whatever it was on entry." Searching the full
+1MB dump for every literal-pool reference to `0x060408a4` found five call
+sites; four were read-only, one (`0x06010384`-`0x0601038c`) did a genuine
+`ADD #1` + store-back — the real increment. That function *also* wrote
+VDP1's FBCR register (offset `0x2`) based on two other RAM flags,
+cross-checked against Yabause's `vdp1.cpp:474` (`Vdp1WriteWord`, `case
+0x2`, sets `Vdp1Regs->FBCR`).
+
+**The dead end that made the next step necessary**: no `BSR`/`JSR`
+anywhere in the entire 1MB dump targeted that function's address. It had
+to be reached some other way — an interrupt vector, most likely, given
+Mimas's own doc comment on `vblank_pending` already noted a near-identical
+pattern from an earlier wall ("a RAM counter that only a real VBLANK
+interrupt handler... ever increments"). But which interrupt? A second
+probe, added alongside the first, captured `self.sr`'s interrupt mask,
+`self.vbr`, all three pending-interrupt flags, and a running count of how
+many times VBLANK-IN had actually been *serviced* (not just raised) —
+right at the same stuck PC. Result: `imask=0` (nothing masked),
+`vblank_serviced_count=13594`. VBLANK-IN had fired and been serviced over
+thirteen thousand times with zero effect on the counter — definitively
+ruling it out. That measurement, not a guess, is what justified spending
+the next step resolving the BIOS's *own* interrupt dispatch table instead
+of continuing to assume VBLANK-IN was somehow involved.
+
+**Resolving the real handler.** With `vbr=0x06000000` confirmed, the
+vector table (`VBR + vector*4`) for every SCU interrupt (0x40-0x4D) was
+read directly out of the same dump. All fourteen pointed at a dense block
+of near-identical trampolines (push a raw vector number into R0, branch to
+one shared dispatcher) — a classic "save the vector, jump to common
+handler" pattern, not one stub per interrupt. That shared dispatcher
+(`0x060008f4`) used the pushed vector number to index *two* parallel
+tables: one producing an SR interrupt-mask value to apply while the
+handler runs, the other the real handler function pointer, then `JSR`'d
+into it. Resolving both tables for every vector 0x40-0x4D showed thirteen
+of them pointing at one shared no-op stub — except vector `0x41`, which
+pointed exactly at the counter-incrementing/FBCR-writing function traced
+above. `0x41` is **VBLANK-OUT**, not VBLANK-IN (`0x40`) — a real, separate
+interrupt Mimas had never implemented. Cross-checked against Yabause's
+`scu.c::ScuSendVBlankOUT` (`SendInterrupt(0x41, 0xE, ...)` — level `0xE`,
+one below VBLANK-IN's `0xF`) and `vdp2.cpp::Vdp2VBlankOUT` (clears
+TVSTAT's VBLANK bit and fires this interrupt in the same step, once per
+frame at the transition from blanking back into active display) before
+writing a line of Rust.
+
+**The fix**, following the exact shape of the existing VBLANK-IN
+machinery rather than inventing a new pattern: `VBLANK_OUT_LEVEL`/
+`VBLANK_OUT_VECTOR` constants; a `vblank_out_pending`/
+`next_vblank_out_due` field pair; `request_vblank_out_interrupt()`; a new
+priority slot in `service_pending_interrupt()` (VBLANK-IN 15 > VBLANK-OUT
+14 > Sound Request 9 > SMPC 8); and, in `run_loop()`, scheduling
+`next_vblank_out_due` to `VBLANK_DURATION` after each VBLANK-IN edge —
+deliberately derived from the *same* `now` sample that advances
+`next_vblank_due`, so it stays in exact lockstep with `tvstat_word()`'s
+already-existing period-start-plus-duration edge instead of running an
+independently drifting timer that could disagree with what TVSTAT itself
+reports. Four new tests mirror the existing VBLANK-IN ones exactly
+(masked-stays-pending, enters-and-returns) plus a new priority-ordering
+test (VBLANK-IN preempts VBLANK-OUT when both are pending simultaneously).
+All three throwaway probes (the pre-existing counter-byte write log, the
+new High RAM dump, the interrupt-state dump) were removed once the wall
+was diagnosed, per `CLAUDE.md`'s own discipline.
+
+**Confirmed against the real BIOS**: Core 0's PC moved from the
+`0x060108ba` oscillation to a genuinely different tight loop at
+`0x06013264`-`0x06013268`, now mixed with regular visits to the interrupt
+dispatcher trampoline itself (`0x060008f4`) — real interrupt delivery
+happening, not just a different address inside the same stall. The M68K
+corruption signature was re-verified byte-for-byte unchanged in this same
+run: the fourth architectural/bugfix change in a row to leave it
+untouched, and the first time it's been possible to say with real evidence
+(rather than assumption) that it isn't gating *this* particular wait — the
+wall that cleared here was never downstream of the M68K's own progress.
+
+**The new wall, found the identical way.** Dumping High RAM again at the
+new stuck PC (`0x06013264`) showed:
+
+```text
+0x06013264: MOV.L @R1,R0   ; R0 = *(u32*)0x25FE0080  <- loop entry
+0x06013266: TST R0,R2      ; R2 = 0x00010000 (mask)
+0x06013268: BF 0x06013264   ; loop while (R0 & R2) != 0
+```
+
+`0x25FE0080` strips to SCU register offset `0x80` — the DSP Program
+Control Port (`scu.c`, `case 0x80`), and bit 16 of that register (the mask
+being tested) is `EX`, "program execute control bit," per `scu.h`'s
+bitfield layout. Core 0 starts a SCU DSP program and polls waiting for it
+to finish. Core 2, the SCU DSP slot, has been parked with zero DSP
+execution implemented since Chapter 7 — `TASKS.md`'s own "not yet known to
+be required" note about it, written before any wall traced back to it, no
+longer holds. `.development/current_blocker.md` carries the rest (what's
+known, what isn't, and the concrete next step: dump the BIOS's actual DSP
+program before committing to a minimal-unblock vs. full-DSP approach).
+
+**Why this matters beyond the specific fix**: a wall that looked, from
+black-box PC sampling alone, like it could plausibly be downstream of an
+already-known bug (the M68K corruption) turned out to be something else
+entirely — a missing piece of *interrupt infrastructure* that was assumed
+covered ("VBLANK is done, it's in `TASKS.md`'s Done list") but was only
+half-covered. The lesson isn't "the M68K bug doesn't matter" — it's that
+assuming a known open bug explains a new symptom, instead of tracing the
+new symptom on its own terms, would have wasted an entire session chasing
+the wrong thing. `CLAUDE.md`'s loop — decode exactly what's stuck, don't
+guess — is what caught it.
+
+---
+
+## Chapter 12 — A real SCU DSP interpreter, built from a recovered BIOS program
+
+Chapter 11 ended with a new wall: past the VBLANK-OUT fix, Core 0 sets the
+SCU DSP's Program Control Port `EX` bit and polls forever waiting for it
+to clear. Real hardware clears `EX` when a running DSP program reaches an
+End instruction — Core 2, the SCU DSP's slot in `SaturnSystem`, had been
+permanently parked since Chapter 7's idle-spin fix, with zero DSP
+execution behind it. No register-level patch could fix this; the actual
+component needed to exist.
+
+**Recovering the real program, not guessing at one.** The same High RAM
+dump used to find the wall showed the wait loop's setup code writing three
+words into the DSP's Data RAM (`[0, 0x09694000, 0x000002AB]`) via the Data
+RAM Data Port, immediately before the `EX`-setting write. Searching the
+1MB dump for that register base as a literal found the actual upload
+routine — 32 `MOV.L @R0+,R3` / `MOV.L R3,@(1,R1)` iterations reading a
+literal data block and writing it through the Program RAM Data Port,
+32 words starting at `0x06013280`. That block is the *real* BIOS DSP
+program, byte-for-byte, not a hypothetical one.
+
+**Decoding it against the reference, not the SH-2 manual's cousin.**
+Yabause's `scu.c` DSP block uses a genuinely different instruction format
+from anything else in this codebase: 32-bit VLIW words, top 2 bits
+selecting Operation/Load-Immediate/"Other" (DMA/Jump/Loop/End) groups, an
+ALU op that computes unconditionally every cycle whether or not anything
+captures it, and three helper functions (`readgensrc`/`writed1busdest`/
+`writeloadimdest`) encoding the actual register/Data-RAM addressing modes.
+Decoding all 32 words against this exact bit layout (matched against the
+real struct layout in `scu.h`, not assumed) showed the program uses: plain
+ALU ops (NOP/ADD/SUB), D1-bus stores, conditional and unconditional MVI,
+Z/T0-gated conditional jumps, and two of real hardware's eight DMA
+addressing-mode variants (Yabause's own naming: `dsp_dma03`, reading Main
+RAM into Data RAM/Program RAM; `dsp_dma04`, writing Data RAM out through
+three different bus-width branches depending on target address range) —
+no loop instructions, no DSP-side interrupt request. That's the exact
+scope `saturn-core/src/scu_dsp.rs` implements: the full ALU/Operation/
+Load-Immediate/Jump/Loop/End groups (Program RAM is only 256 words, not a
+large surface to cover completely), but only those 2 of 8 DMA variants —
+the other 6 are a real, explicitly-flagged gap, the same "add opcodes as
+hit" discipline used everywhere else in this project.
+
+**Wiring, not just interpreting.** Real hardware's DSP register ports
+(`0x80` Program Control Port, `0x84` Program RAM Data Port, `0x88`/`0x8C`
+Data RAM Address/Data Port) are 32-bit-only — byte/word access to them is
+undefined on real silicon. Mimas's generic `ScuRegs` storage is a plain
+byte array with no such distinction, so these four ports are intercepted
+one level up, at `Sh2::read_long`/`write_long`, before they'd otherwise
+decompose into four separate `raw_write_byte` calls — the first register
+group in this codebase needing that treatment. The DSP itself lives behind
+`Arc<Mutex<ScuDsp>>`, shared between Core 0 (which only ever touches the
+register ports) and Core 2 (which actually steps it) — a write setting
+`EX` calls `sync.set_thread_active(2, true)`, the exact same reactivation
+call Core 1's (not-yet-implemented) SSHON handling and the M68K's SNDON
+handling already use, not a new pattern invented for this. Core 2's loop
+mirrors Core 0/Core 1's own instruction-execution loops (legitimate,
+"zero-polling"-exempt work, not a wait) while `EX` is set, and re-parks
+via the *same* `park_while_inactive` mechanism the instant the DSP clears
+`EX` on its own — matching real hardware's DSP genuinely stopping cycle
+consumption when its program ends, not just "looking idle."
+
+**Verification, two independent ways.** A new unit test loads the exact
+recovered 32-word program and the exact 3 parameter words into a fresh
+`ScuDsp`, steps it, and asserts `EX` clears within a bounded step count —
+this is the strongest possible signal the interpreter is *correct for the
+program that matters*, independent of anything else in the system. It
+passed on the first real run after implementation. Separately, a real-BIOS
+boot run confirmed the practical effect: Core 0's PC, which previously
+never moved past `0x06013264` no matter how long the boot-watch window
+ran, now visits hundreds of distinct addresses (the interrupt dispatcher,
+several `0x0600xxxx`/`0x0601xxxx` handler bodies, multiple DSP-invocation
+call sites reached from different interrupt paths) before settling at a
+new address, `0x060131A8` — genuinely further, genuinely different code,
+not a repeat of the same stall. The M68K sound-driver corruption bug was
+re-verified byte-for-byte unchanged in this same run: the *third*
+consecutive real fix (after the `WorkRam` split and the VBLANK-OUT
+interrupt) to leave it untouched, reinforcing Chapter 11's conclusion that
+it isn't gating overall boot progress even though it remains a real, open
+bug.
+
+**The new wall, briefly checked but deliberately not chased further this
+session.** `0x060131A8` sits inside a small, bounded-looking counted loop
+(a comparison against `50`, another against two loaded values) that calls
+one subroutine partway through. That subroutine turned out to be a plain
+32-bit software division routine (`DIV0S`/`DIV1`/`ROTCL`, called from many
+unrelated places throughout the BIOS for ordinary arithmetic) — not
+DSP- or hardware-specific, and very unlikely to be the actual cause.
+Given how much ground this session already covered (recovering an entire
+undocumented instruction format, building a new CPU-adjacent component
+from scratch, and re-verifying two prior fixes), root-causing this next
+wall was deliberately left to a fresh session with a fresh High RAM dump
+— `CLAUDE.md`'s "one wall at a time" discipline applies to how much a
+single sitting should chase, not just to which bug gets priority.
+
+---
+
 ## Working principles that held up across all of the above
 
 - **Never trust a self-consistent test.** Every real bug found this way
@@ -536,3 +1009,37 @@ now has the evidence to back that claim twice.
   NBG tiles exist") rather than pretending they're not there. This kept
   the boundary between "faithfully emulated" and "simplified for now"
   legible enough that the M68K wall was findable at all.
+
+`TECH_DEBT.md`'s "suggested order of attack" (Chapters 7-9, plus item 6's
+integration-test work) was itself organized around five distilled
+principles worth keeping even after that file's own removal (its
+actionable plan is now fully executed, so the file itself no longer earns
+its keep — see its own opening line: "an actionable plan, not a
+retrospective"):
+
+1. **`Condvar`-backed signaling for cross-component events, never a
+   polled flag or a timing guess** — a component genuinely waiting on
+   another's action should block at zero CPU and wake at the exact
+   instant of the real signal (the SNDON debounce this replaced, Chapter
+   7, is the canonical example of the anti-pattern).
+2. **Event-driven thread/task orchestration, not a hardcoded core-count
+   mapping** — one schedulable unit per real hardware component, parked
+   until it has real work, not bundled to hit a target core count by
+   hand.
+3. **The game drives the hardware, not the implementation** — every
+   "completes instantly" simplification must be paired with the *real*
+   signal the actual hardware would raise on completion (an interrupt, a
+   status bit the emulated code itself checks), never a wall-clock guess
+   from outside the emulated instruction stream. Both the VBLANK-OUT
+   interrupt (Chapter 11) and the SCU DSP interpreter (Chapter 12) are
+   this principle applied to gaps that turned out to be real, not
+   hypothetical.
+4. **Real CPU clock throttling** (Chapter 9), so timing-sensitive code
+   behaves correctly, doubling as a user-facing speed control.
+5. **Zero polling loops**, except the two categories that are exempt by
+   nature: a CPU core's own instruction-execution loop, and a
+   deterministic wall-clock pacer comparing against a computed target.
+   The subtler violation Chapter 10 found — a `Condvar` shared with an
+   unrelated high-frequency notifier — showed that "blocks on a real
+   `Condvar`" is necessary but not sufficient; what else notifies that
+   same `Condvar`, and how often, matters just as much.

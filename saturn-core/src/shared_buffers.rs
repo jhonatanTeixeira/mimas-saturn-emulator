@@ -14,7 +14,7 @@ use std::sync::RwLock;
 /// pattern real hardware-bringup code uses everywhere, without pretending
 /// to emulate hardware behavior this project hasn't implemented yet.
 ///
-/// Each field is its own `RwLock` (see `TECH_DEBT.md` item 1 /
+/// Each field is its own `RwLock` (see `history.md` Chapter 8 /
 /// `docs/final_architecture_draft.md`'s "Memory layout" -- this used to be
 /// one `RwLock<WorkRam>` covering everything, which meant e.g. a VDP2 CRAM
 /// write and an SH-2 Work RAM read contended on an identical lock despite

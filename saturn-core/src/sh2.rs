@@ -118,6 +118,16 @@ pub struct Sh2 {
     /// running at whatever speed this interpreter manages still receives
     /// VBLANK at roughly the real cadence rather than every single step.
     next_vblank_due: Option<std::time::Instant>,
+    /// Set when VDP2 has raised the VBLANK-OUT interrupt line -- see
+    /// `VBLANK_OUT_LEVEL`'s doc comment for why this exists as its own
+    /// interrupt, separate from `vblank_pending`.
+    pub vblank_out_pending: bool,
+    /// Wall-clock pacing for VBLANK-OUT, scheduled relative to the same
+    /// `now` sample that advances `next_vblank_due` when VBLANK-IN fires
+    /// (`due + VBLANK_DURATION`) -- kept in lockstep with `tvstat_word()`'s
+    /// existing period_start+VBLANK_DURATION edge instead of running an
+    /// independent timer that could drift against TVSTAT's own bit.
+    next_vblank_out_due: Option<std::time::Instant>,
     /// SMPC "System Manager" interrupt (real hardware: SCU vector 0x47,
     /// level 8 -- fired when an SMPC command, e.g. INTBACK, completes). Real
     /// BIOS INTBACK handshakes wait on this specifically, not just SF --
@@ -135,6 +145,21 @@ pub struct Sh2 {
     /// `Option` because it's shared with whatever thread owns the M68K core
     /// (`SaturnSystem` wires it up in `lib.rs`); `None` in plain unit tests.
     pub sound_req_irq: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Real wall-clock CPU throttle control (see `crate::throttle`).
+    /// `None` (the default) means this core's `run_loop()` never paces at
+    /// all -- runs exactly as fast as it does today, so every existing
+    /// unit test that builds a bare `Sh2` stays unaffected. `SaturnSystem`
+    /// wires `Some(...)` in for real, running systems (defaulting to
+    /// `ThrottleSpeed::Unthrottled` there too, until a caller opts into a
+    /// real speed via `SaturnSystem::set_speed`).
+    pub speed: Option<Arc<std::sync::Mutex<crate::throttle::ThrottleSpeed>>>,
+    /// The SCU DSP (Core 2's slot), shared with whatever thread actually
+    /// steps it (`SaturnSystem` wires this up in `lib.rs`). `None` in
+    /// plain unit tests -- SCU DSP register writes then fall through to
+    /// plain byte storage, same as before this existed. See
+    /// `crate::scu_dsp` for why a real DSP interpreter was needed (a boot
+    /// wait loop polling the Program Control Port's `EX` bit).
+    pub scu_dsp: Option<Arc<std::sync::Mutex<crate::scu_dsp::ScuDsp>>>,
 }
 
 // SR bit positions actually used by this subset of the ISA. Layout (T, S,
@@ -157,6 +182,23 @@ const SR_IMASK_SHIFT: u32 = 4;
 /// which is easy to spot against "PC keeps making forward progress."
 const VBLANK_IN_LEVEL: u32 = 15;
 const VBLANK_IN_VECTOR: u32 = 0x40;
+/// VBLANK-OUT: level 0xE, autovector 0x41 -- a separate, lower-priority
+/// interrupt from VBLANK-IN, not a duplicate of it. Confirmed against
+/// `ScuSendVBlankOUT()` (`SendInterrupt(0x41, 0xE, ...)`, `scu.c`) and
+/// `Vdp2VBlankOUT()` (`vdp2.cpp`), which clears TVSTAT's VBLANK bit and
+/// fires this in the same step -- real hardware raises it once per frame at
+/// the transition from vertical blanking back into active display, i.e.
+/// `VBLANK_DURATION` after each VBLANK-IN. Found necessary running the real
+/// BIOS the same way VBLANK-IN was: a boot wait loop (this one at SH-2
+/// `0x060108ba` against `Sega Saturn BIOS (USA).bin`) polls a RAM counter
+/// that only this BIOS's own vector-table-installed VBLANK-OUT handler
+/// (`0x060102aa` in that trace) ever increments -- traced by dumping High
+/// RAM at the stuck PC and disassembling with `tools/sh2dis.py`, then
+/// resolving the BIOS's own two-level interrupt dispatch table (vector
+/// number -> SR-mask table @ handler-table-base, and a parallel real-handler
+/// table) to see which vector's slot actually pointed at that address.
+const VBLANK_OUT_LEVEL: u32 = 14;
+const VBLANK_OUT_VECTOR: u32 = 0x41;
 /// SMPC "System Manager" interrupt: level 8, autovector 0x47 -- confirmed
 /// against `ScuSendSystemManager()` (`SendInterrupt(0x47, 0x8, ...)`) in a
 /// real, working SCU implementation (Yabause `scu.c`), fired whenever an
@@ -229,8 +271,12 @@ impl Sh2 {
             m68k_control: None,
             vblank_pending: false,
             next_vblank_due: None,
+            vblank_out_pending: false,
+            next_vblank_out_due: None,
             smpc_irq_pending: false,
             sound_req_irq: None,
+            speed: None,
+            scu_dsp: None,
         }
     }
 
@@ -438,9 +484,6 @@ impl Sh2 {
                 ram[off & mask] = val;
             }
             MemRegion::HighRam(off) => {
-                if self.core_id == 0 && (off == 0x0408a4 || off == 0x0408a5) {
-                    eprintln!("[PROBE] write to counter byte off={:#x} val={:#04X} from pc={:#010X}", off, val, self.pc);
-                }
                 let mut ram = self.work_ram.high_ram.write().unwrap();
                 let mask = ram.len() - 1;
                 ram[off & mask] = val;
@@ -567,6 +610,11 @@ impl Sh2 {
             self.unaligned_access_flag = true;
         }
         self.bus_wait();
+        if let MemRegion::ScuRegs(off) = self.translate(address) {
+            if let Some(val) = self.read_scu_dsp_port(off) {
+                return val;
+            }
+        }
         let b0 = self.raw_read_byte(address) as u32;
         let b1 = self.raw_read_byte(address.wrapping_add(1)) as u32;
         let b2 = self.raw_read_byte(address.wrapping_add(2)) as u32;
@@ -583,10 +631,52 @@ impl Sh2 {
         if address <= 0x0600_1000 && address + 4 > 0x0600_1000 {
             self.cdrom_command_executed = true;
         }
+        if let MemRegion::ScuRegs(off) = self.translate(address) {
+            if self.write_scu_dsp_port(off, val) {
+                return;
+            }
+        }
         self.raw_write_byte(address, (val >> 24) as u8);
         self.raw_write_byte(address.wrapping_add(1), (val >> 16) as u8);
         self.raw_write_byte(address.wrapping_add(2), (val >> 8) as u8);
         self.raw_write_byte(address.wrapping_add(3), val as u8);
+    }
+
+    /// SCU DSP register ports (offsets 0x80/0x84/0x88/0x8C) are real
+    /// hardware ports, not plain memory -- 32-bit-only on real hardware
+    /// (byte/word access to them is undefined), so they're intercepted
+    /// here at the `read_long`/`write_long` level rather than through the
+    /// generic per-byte `ScuRegs` storage `raw_read_byte`/`raw_write_byte`
+    /// use for every other SCU register. `None`/`false` (falling through
+    /// to plain storage) when no DSP is wired in (e.g. bare unit tests
+    /// built via `make_cpu()`), matching the `Option<Arc<...>>` pattern
+    /// already used for `m68k_control`/`sound_req_irq`.
+    fn read_scu_dsp_port(&self, off: usize) -> Option<u32> {
+        let dsp = self.scu_dsp.as_ref()?;
+        match off {
+            0x80 => Some(dsp.lock().unwrap().read_control_port()),
+            0x8C => Some(dsp.lock().unwrap().read_data_ram_data_port()),
+            _ => None,
+        }
+    }
+
+    fn write_scu_dsp_port(&self, off: usize, val: u32) -> bool {
+        let Some(dsp) = self.scu_dsp.as_ref() else { return false };
+        match off {
+            0x80 => {
+                dsp.lock().unwrap().write_control_port(val);
+                if let Some(ref sync) = self.sync {
+                    if val & 0x0001_0000 != 0 {
+                        sync.set_thread_active(2, true);
+                    }
+                }
+                true
+            }
+            0x84 => { dsp.lock().unwrap().write_program_ram_port(val); true }
+            0x88 => { dsp.lock().unwrap().write_data_ram_addr_port(val); true }
+            0x8C => { dsp.lock().unwrap().write_data_ram_data_port(val); true }
+            _ => false,
+        }
     }
 
     fn t(&self) -> bool {
@@ -639,6 +729,12 @@ impl Sh2 {
     /// as real hardware, a masked interrupt just stays pending.
     pub fn request_vblank_interrupt(&mut self) {
         self.vblank_pending = true;
+    }
+
+    /// Raise VBLANK-OUT -- see `VBLANK_OUT_LEVEL`'s doc comment for why this
+    /// is a real, separate interrupt and not a duplicate of VBLANK-IN.
+    pub fn request_vblank_out_interrupt(&mut self) {
+        self.vblank_out_pending = true;
     }
 
     /// Execute an SMPC command the instant COMREG is written, matching the
@@ -730,11 +826,14 @@ impl Sh2 {
 
     fn service_pending_interrupt(&mut self) {
         // Real hardware picks the highest-priority pending request:
-        // VBLANK-IN (15) > Sound Request (9) > SMPC System Manager (8).
+        // VBLANK-IN (15) > VBLANK-OUT (14) > Sound Request (9) > SMPC
+        // System Manager (8).
         let sound_req_pending = self.sound_req_irq.as_ref()
             .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
         let (level, vector) = if self.vblank_pending {
             (VBLANK_IN_LEVEL, VBLANK_IN_VECTOR)
+        } else if self.vblank_out_pending {
+            (VBLANK_OUT_LEVEL, VBLANK_OUT_VECTOR)
         } else if sound_req_pending {
             (SOUND_REQ_IRQ_LEVEL, SOUND_REQ_IRQ_VECTOR)
         } else if self.smpc_irq_pending {
@@ -748,6 +847,8 @@ impl Sh2 {
         }
         if self.vblank_pending {
             self.vblank_pending = false;
+        } else if self.vblank_out_pending {
+            self.vblank_out_pending = false;
         } else if sound_req_pending {
             if let Some(ref f) = self.sound_req_irq {
                 f.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -1004,7 +1105,7 @@ impl Sh2 {
                 // moment SSHON activates Core 1, not equally dormant. Needs
                 // a real compare-and-swap-style fix (or one write-lock
                 // spanning both the read and the write) before or alongside
-                // SSHON -- see `TECH_DEBT.md`.
+                // SSHON -- see `history.md` Chapter 8.
                 let a = self.registers[n];
                 let val = self.read_byte(a);
                 self.set_t(val == 0);
@@ -1275,6 +1376,11 @@ impl Sh2 {
     pub fn run_loop(&mut self, shutdown: Arc<std::sync::atomic::AtomicBool>) {
         let now = std::time::Instant::now();
         self.next_vblank_due = Some(now + VBLANK_INTERVAL);
+        // Real wall-clock CPU throttle -- `None` (plain unit tests, and
+        // anything that never wires `self.speed` in) means run exactly as
+        // fast as this interpreter manages, same as before this existed.
+        let mut throttle = self.speed.clone()
+            .map(|speed| crate::throttle::ClockThrottle::new(crate::throttle::SH2_CLOCK_HZ, speed));
         while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
             if let Some(ref sync) = self.sync {
                 if sync.is_shutdown() {
@@ -1286,9 +1392,25 @@ impl Sh2 {
                 if now >= due {
                     self.request_vblank_interrupt();
                     self.next_vblank_due = Some(now + VBLANK_INTERVAL);
+                    // VBLANK-OUT fires `VBLANK_DURATION` after this same
+                    // VBLANK-IN edge -- keeps this in lockstep with
+                    // `tvstat_word()`'s period_start+VBLANK_DURATION edge
+                    // rather than running an independently-drifting timer.
+                    self.next_vblank_out_due = Some(now + VBLANK_DURATION);
                 }
             }
+            if let Some(out_due) = self.next_vblank_out_due {
+                let now = std::time::Instant::now();
+                if now >= out_due {
+                    self.request_vblank_out_interrupt();
+                    self.next_vblank_out_due = None;
+                }
+            }
+            let cycles_before = self.cycles;
             self.step();
+            if let Some(ref mut t) = throttle {
+                t.advance(self.cycles.wrapping_sub(cycles_before));
+            }
             if let Some(ref reporter) = self.pc_reporter {
                 reporter.store(self.pc, std::sync::atomic::Ordering::Relaxed);
             }
@@ -1690,6 +1812,67 @@ mod opcode_tests {
         assert_eq!(cpu.pc, 0x0600_0000, "RTE did not return to the interrupted PC");
         assert_eq!(cpu.sr, 0, "RTE did not restore the original SR");
         assert_eq!(cpu.registers[15], 0x0601_1000, "R15 must be back where it started after the push/pop pair");
+    }
+
+    #[test]
+    fn vblank_out_interrupt_masked_stays_pending() {
+        let mut cpu = make_cpu();
+        cpu.sr = 0x0000_00F0; // mask level 15: everything blocked
+        cpu.pc = 0x0600_0000;
+        cpu.write_word(0x0600_0000, 0x0009); // NOP
+        cpu.request_vblank_out_interrupt();
+        cpu.step();
+        assert!(cpu.vblank_out_pending, "a masked interrupt must stay pending, not fire");
+        assert_eq!(cpu.pc, 0x0600_0002, "masked interrupt must not have diverted execution");
+    }
+
+    #[test]
+    fn vblank_out_interrupt_enters_and_returns() {
+        // Regression test for the exact wall found running the real Saturn
+        // BIOS: a boot wait loop at SH-2 0x060108ba polls a RAM counter that
+        // only this BIOS's own VBLANK-OUT handler (installed in its vector
+        // table at slot 0x41, distinct from VBLANK-IN's slot 0x40) ever
+        // increments. Traced by dumping High RAM at the stuck PC and
+        // resolving the BIOS's own interrupt dispatch table -- see
+        // `VBLANK_OUT_LEVEL`'s doc comment.
+        let mut cpu = make_cpu();
+        cpu.sr = 0; // mask level 0: nothing blocked
+        cpu.vbr = 0x0601_0000;
+        cpu.registers[15] = 0x0601_1000;
+        cpu.pc = 0x0600_0000;
+        cpu.write_word(0x0600_0000, 0x0009); // NOP -- never actually fetched; interrupt preempts it
+        // Vector table entry for VBLANK-OUT (vector 0x41) points at the handler.
+        cpu.write_long(cpu.vbr.wrapping_add(VBLANK_OUT_VECTOR * 4), 0x0600_2000);
+        cpu.write_word(0x0600_2000, 0x0009); // NOP
+        cpu.write_word(0x0600_2002, 0x002B); // RTE
+        cpu.write_word(0x0600_2004, 0x0009); // RTE delay slot: NOP
+
+        cpu.request_vblank_out_interrupt();
+        cpu.step();
+        assert_eq!(cpu.pc, 0x0600_2002, "did not jump through the VBR vector table");
+        assert!(!cpu.vblank_out_pending, "pending flag must clear once serviced");
+        assert_eq!((cpu.sr >> SR_IMASK_SHIFT) & 0xF, VBLANK_OUT_LEVEL, "mask must raise to the interrupt's own level while it runs");
+
+        cpu.step(); // RTE (+ delay slot)
+        assert_eq!(cpu.pc, 0x0600_0000, "RTE did not return to the interrupted PC");
+        assert_eq!(cpu.sr, 0, "RTE did not restore the original SR");
+        assert_eq!(cpu.registers[15], 0x0601_1000, "R15 must be back where it started after the push/pop pair");
+    }
+
+    #[test]
+    fn vblank_in_outranks_vblank_out_when_both_pending() {
+        // Real hardware priority: VBLANK-IN (15) > VBLANK-OUT (14) -- confirmed
+        // against `ScuSendVBlankIN`/`ScuSendVBlankOUT` in Yabause `scu.c`.
+        let mut cpu = make_cpu();
+        cpu.sr = 0;
+        cpu.pc = 0x0600_0000;
+        cpu.write_word(0x0600_0000, 0x0009); // NOP
+        cpu.request_vblank_out_interrupt();
+        cpu.request_vblank_interrupt();
+        cpu.step();
+        assert!(!cpu.vblank_pending, "the higher-priority interrupt must be serviced first");
+        assert!(cpu.vblank_out_pending, "the lower-priority interrupt must stay pending behind it");
+        assert_eq!((cpu.sr >> SR_IMASK_SHIFT) & 0xF, VBLANK_IN_LEVEL);
     }
 
     #[test]

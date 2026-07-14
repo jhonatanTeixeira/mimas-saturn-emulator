@@ -15,11 +15,17 @@ Status legend: ✅ done · 🟡 in progress · ⬜ not started
 
 - `BusArbiter` + `LockStepSync`: 4-core lockstep synchronization primitive
   matching the real hardware's distributed-CPU design.
-- `SaturnSystem`: spawns Core 0 (Master SH-2), Core 1 (Slave SH-2, held in
-  reset until real SSHON support exists — see M6), Core 2 (SCU DSP/SMPC/
-  CD-ROM, currently a no-op cycle counter), Core 3 (VDP1/VDP2/SCSP,
-  real VDP2 backdrop rendering + the M68K core as of M3).
+- `SaturnSystem`: spawns Core 0 (Master SH-2), Core 1 (Slave SH-2, parked
+  at zero CPU until real SSHON support exists — see M6), Core 2 (SCU DSP
+  slot, parked until Core 0 sets the DSP's `EX` bit, then runs a real DSP
+  interpreter — see M3), Core 3 (VDP1/VDP2/SCSP, real VDP2 backdrop
+  rendering + the M68K core as of M3).
 - Originally built by a multi-agent swarm; see `history.md` Chapter 0.
+- Orthogonal architecture cleanup (idle-spin fix, a real SNDON signal, the
+  `WorkRam` per-region lock split, a real wall-clock CPU throttle) — see
+  `history.md` Chapters 7-10 and the "five distilled principles" note at
+  the end of that file (previously tracked in a since-retired
+  `TECH_DEBT.md`, whose "suggested order of attack" is now fully shipped).
 
 ## M1 — Real SH-2 CPU interpreter ✅
 
@@ -53,10 +59,18 @@ Status legend: ✅ done · 🟡 in progress · ⬜ not started
   level 8) it triggers on completion.
 - Sound RAM/SCSP register regions wired up as real read/write memory
   (previously unmapped, breaking the BIOS's write-then-verify pattern).
+- VBLANK-OUT interrupt (vector 0x41, level 14) — a real, separate
+  interrupt from VBLANK-IN, not a duplicate of it. Found necessary
+  2026-07-13 the same way VBLANK-IN was: a boot wait loop polled a RAM
+  counter that only this BIOS's own VBLANK-OUT handler (resolved via its
+  own two-level interrupt dispatch table) ever increments. See
+  `history.md`'s latest chapter and `.development/current_blocker.md`.
 
 **Result**: BIOS boot PC reliably reaches well past early hardware-
 detection code into real application-level boot logic (video/audio driver
-setup).
+setup), and as of the SCU DSP fix (see M3), past that into a large amount
+of further real code before hitting the next, not-yet-root-caused wall
+(`.development/current_blocker.md`).
 
 ## M3 — SCSP M68000 sound CPU 🟡
 
@@ -70,15 +84,35 @@ setup).
   (dual-ported with the SH-2's 0x05B00000 view) — confirmed against
   Yabause's `c68k_byte_read`/`c68k_byte_write`.
 - Real SNDON/SNDOFF (`M68KStart`/`M68KStop` equivalent): resets/halts the
-  M68K core, with a debounce on the reset edge for the SH-2-upload race
-  (see `history.md` Chapter 4).
+  M68K core, via a real `Ordering::Release`/`Acquire` signal (an earlier
+  debounce-based version of this had a real cross-thread visibility gap,
+  see `history.md` Chapters 4 and 7).
 - Real SCSP→SH-2 "Sound Request" interrupt (MCIPD/MCIEB → SCU vector
   0x46, level 9) — confirmed this alone moves the BIOS wall further.
-- 🟡 **Open**: the M68K core derails partway through the real uploaded
-  driver's first memory-clear loop (self-modifying-code interaction, not
-  a decode bug — see `CLAUDE.md`'s "Current wall" for the full trace and
-  the concrete next diagnostic step). Once this clears, re-run the boot
-  loop (`CLAUDE.md`'s methodology) to find the next wall.
+- 🟡 **Open, but no longer confirmed to be the active gate**: the M68K
+  core still derails partway through the real uploaded driver's first
+  memory-clear loop (self-modifying-code interaction, not a decode bug —
+  see `.development/current_blocker.md`'s history for the full trace and
+  the concrete next diagnostic step, still valid). The 2026-07-13
+  VBLANK-OUT fix (see M2) moved Core 0's PC well past the plateau this bug
+  was originally found alongside, with the M68K's own corruption signature
+  confirmed byte-for-byte unchanged in the same run — so whatever gates
+  the *current* wall (SCU DSP, see below) isn't this bug. Still a real gap
+  worth fixing eventually; just not proven to be blocking anything right
+  now.
+- ✅ **SCU DSP interpreter** (2026-07-13, `saturn-core/src/scu_dsp.rs`):
+  past the VBLANK-OUT fix, Core 0 was found waiting on the SCU DSP Program
+  Control Port's `EX` (execute) bit forever, since Core 2 (the SCU DSP
+  slot) had zero DSP execution implemented. Fixed with a real interpreter
+  (full ALU/Operation/Load-Immediate/Jump/Loop/End groups, 2 of 8 real DMA
+  addressing-mode variants — the ones the real, recovered BIOS DSP program
+  actually uses) cross-checked against Yabause's `scu.c`, wired to Core 2
+  via `Arc<Mutex<ScuDsp>>` and reactivated by `EX` the same way SSHON/SNDON
+  reactivate Core 1/the M68K. Verified both by a unit test running the
+  exact captured real program to completion and by a real-BIOS run
+  reaching hundreds of new addresses past the old wall. See `history.md`'s
+  latest chapter and `.development/current_blocker.md` for the new wall
+  found immediately past this one (not yet root-caused).
 
 ## M4 — VDP2 tile rendering ⬜
 
@@ -102,6 +136,13 @@ setup).
 - May or may not be needed for the BIOS logo specifically (real Saturn
   BIOS splash may be VDP2-only) — defer investigating until M4 shows
   whether VDP1 is actually touched during the relevant boot phase.
+
+**Concrete "done" signal for M4+M5 together**: `mimas/milestone-tests/`
+(not a workspace member — needs a real BIOS + a one-time ~600MB CLIP model
+download, see `.development/TASKS.md`) checks, via CLIP image-embedding
+cosine similarity against a real screenshot of the Saturn BIOS's CD Player
+screen, whether a headless boot run's rendered frame visually matches it.
+Implemented but not yet run — there's nothing for it to pass today.
 
 ## M6 — Slave SH-2 (Core 1) boot ⬜
 
@@ -133,6 +174,6 @@ setup).
 3. Check this file's milestone statuses — anything 🟡 is the most likely
    next place to spend effort; anything ⬜ is likely blocked on a 🟡 above
    it unless noted otherwise.
-4. `cargo test --workspace` must stay green (125 tests as of this
-   writing: 71 E2E + saturn-core's unit tests + 7 adversarial + 4 sync)
+4. `cargo test --workspace` must stay green (150 tests as of this
+   writing: 71 E2E + 62 saturn-core unit + 8 adversarial + 9 sync)
    after every change.

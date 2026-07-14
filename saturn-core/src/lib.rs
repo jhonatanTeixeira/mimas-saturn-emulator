@@ -4,10 +4,12 @@ pub mod sh2;
 pub mod sync;
 pub mod cdrom;
 pub mod scu;
+pub mod scu_dsp;
 pub mod smpc;
 pub mod vdp;
 pub mod scsp;
 pub mod m68k;
+pub mod throttle;
 
 pub use bus_arbiter::BusArbiter;
 pub use shared_buffers::{WorkRam, Vram, Framebuffer, DoubleBufferedFramebuffer};
@@ -15,12 +17,14 @@ pub use sh2::Sh2;
 pub use sync::{LockStepSync, PanicGuard};
 pub use cdrom::Cdrom;
 pub use scu::Scu;
+pub use scu_dsp::ScuDsp;
 pub use smpc::Smpc;
 pub use vdp::Vdp;
 pub use scsp::{Scsp, SoundRingBuffer};
 pub use m68k::M68k;
+pub use throttle::{ClockThrottle, ThrottleSpeed};
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread::{self, JoinHandle};
 
@@ -53,6 +57,19 @@ pub struct SaturnSystem {
     /// register. Core 3's `M68k` sets this (see `M68k::write_byte`); Core
     /// 0's `Sh2` (via `Sh2::sound_req_irq`) observes and services it.
     pub sound_req_irq: Arc<std::sync::atomic::AtomicBool>,
+    /// How fast every throttled core (both SH-2s, the M68K) paces itself
+    /// against real Saturn hardware clock rates -- see `throttle.rs`.
+    /// Defaults to `ThrottleSpeed::Unthrottled` (today's existing
+    /// as-fast-as-the-host-allows behavior; every existing verification
+    /// workflow keeps working unchanged). Live-adjustable via `set_speed`
+    /// while the system is running, the same way any emulator's speed
+    /// slider works.
+    pub speed: Arc<Mutex<ThrottleSpeed>>,
+    /// The SCU DSP (Core 2's slot). Core 0 writes/reads its register ports
+    /// (via `Sh2::scu_dsp`); Core 2 actually steps it while `EX` is set.
+    /// See `crate::scu_dsp` for why a real DSP interpreter was needed (a
+    /// boot wait loop polling the Program Control Port's `EX` bit).
+    pub scu_dsp: Arc<Mutex<ScuDsp>>,
 }
 
 impl SaturnSystem {
@@ -79,6 +96,8 @@ impl SaturnSystem {
             vdp2_frame: Arc::new(arc_swap::ArcSwap::new(Arc::new(vdp::Framebuffer::new(320, 224)))),
             m68k_control: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sound_req_irq: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            speed: Arc::new(Mutex::new(ThrottleSpeed::Unthrottled)),
+            scu_dsp: Arc::new(Mutex::new(ScuDsp::new())),
         }
     }
 
@@ -86,6 +105,16 @@ impl SaturnSystem {
     /// boot code (from the reset vector) instead of a scaffold no-op loop.
     pub fn load_bios(&mut self, data: Vec<u8>) {
         self.bios = Arc::new(data);
+    }
+
+    /// Change how fast every throttled core paces itself, live -- safe to
+    /// call before or after `start()`. See `speed`'s field doc comment.
+    pub fn set_speed(&self, speed: ThrottleSpeed) {
+        *self.speed.lock().unwrap() = speed;
+    }
+
+    pub fn get_speed(&self) -> ThrottleSpeed {
+        *self.speed.lock().unwrap()
     }
 
     pub fn start(&mut self) {
@@ -103,7 +132,9 @@ impl SaturnSystem {
         let cpu0_pc = self.cpu0_pc.clone();
         let m68k_control_c0 = self.m68k_control.clone();
         let sound_req_irq_c0 = self.sound_req_irq.clone();
-        let handle_c0 = thread::spawn(move || {
+        let speed_c0 = self.speed.clone();
+        let scu_dsp_c0 = self.scu_dsp.clone();
+        let handle_c0 = thread::Builder::new().name("sh2-master".into()).spawn(move || {
             let _guard = PanicGuard::new(sync_c0.clone(), arbiter_c0.clone());
             let mut cpu = Sh2::new(false, arbiter_c0, work_ram_c0);
             cpu.sync = Some(sync_c0);
@@ -113,8 +144,10 @@ impl SaturnSystem {
             cpu.pc_reporter = Some(cpu0_pc);
             cpu.m68k_control = Some(m68k_control_c0);
             cpu.sound_req_irq = Some(sound_req_irq_c0);
+            cpu.speed = Some(speed_c0);
+            cpu.scu_dsp = Some(scu_dsp_c0);
             cpu.run_loop(shutdown_c0);
-        });
+        }).expect("failed to spawn Core 0 (Master SH-2) thread");
         self.handles.push(handle_c0);
 
         // Spawn Core 1: Slave SH-2. Real hardware keeps this core halted
@@ -131,7 +164,8 @@ impl SaturnSystem {
         let work_ram_c1 = work_ram.clone();
         let sync_c1 = sync.clone();
         let bios_c1 = self.bios.clone();
-        let handle_c1 = thread::spawn(move || {
+        let speed_c1 = self.speed.clone();
+        let handle_c1 = thread::Builder::new().name("sh2-slave".into()).spawn(move || {
             let _guard = PanicGuard::new(sync_c1.clone(), arbiter_c1.clone());
             sync_c1.set_thread_active(1, false);
             if !sync_c1.park_while_inactive(1) {
@@ -142,26 +176,44 @@ impl SaturnSystem {
             cpu.core_id = 1;
             cpu.set_bios_arc(bios_c1);
             cpu.reset();
+            cpu.speed = Some(speed_c1);
             cpu.run_loop(shutdown_c1);
-        });
+        }).expect("failed to spawn Core 1 (Slave SH-2) thread");
         self.handles.push(handle_c1);
 
-        // Spawn Core 2: SCU DSP slot. Nothing targets it yet -- SMPC command
-        // processing runs inline inside `Sh2` wherever a core touches its
-        // registers, and CD-ROM isn't wired into the CPU address space at
-        // all (see `.development/TASKS.md`); real per-component threads for
-        // those are separate future work (see
-        // `docs/final_architecture_draft.md`'s topology table). Parks at
-        // zero CPU instead of spinning a cycle counter with no real effect;
-        // a future real DSP implementation wakes this core with
-        // `sync.set_thread_active(2, true)`.
+        // Spawn Core 2: SCU DSP slot. Parks at zero CPU (matching real
+        // hardware: the DSP only consumes cycles while a program is
+        // actually running) until Core 0 writes the Program Control
+        // Port's `EX` bit (see `Sh2::write_scu_dsp_port`, which calls
+        // `set_thread_active(2, true)` on that exact write) -- the same
+        // reactivation shape as Core 1's SSHON wiring. Re-parks the moment
+        // the DSP program reaches an End instruction and clears `EX`
+        // itself (real hardware: the DSP genuinely stops consuming cycles
+        // then, not just "looks idle").
         let sync_c2 = sync.clone();
         let arbiter_c2 = arbiter.clone();
-        let handle_c2 = thread::spawn(move || {
+        let work_ram_c2 = work_ram.clone();
+        let scu_dsp_c2 = self.scu_dsp.clone();
+        let handle_c2 = thread::Builder::new().name("scu-dsp".into()).spawn(move || {
             let _guard = PanicGuard::new(sync_c2.clone(), arbiter_c2);
             sync_c2.set_thread_active(2, false);
-            sync_c2.park_while_inactive(2);
-        });
+            let mut cycles = 0u64;
+            loop {
+                if !sync_c2.park_while_inactive(2) {
+                    return; // shutdown fired before this core was ever reactivated
+                }
+                while scu_dsp_c2.lock().unwrap().is_executing() {
+                    if sync_c2.is_shutdown() {
+                        return;
+                    }
+                    scu_dsp_c2.lock().unwrap().step(&work_ram_c2);
+                    cycles = cycles.wrapping_add(2);
+                    sync_c2.sync_core(2, cycles);
+                    thread::yield_now();
+                }
+                sync_c2.set_thread_active(2, false);
+            }
+        }).expect("failed to spawn Core 2 (SCU DSP) thread");
         self.handles.push(handle_c2);
 
         // Spawn Core 3: VDP1 / VDP2 / SCSP
@@ -172,7 +224,8 @@ impl SaturnSystem {
         let vdp2_frame = self.vdp2_frame.clone();
         let m68k_control_c3 = self.m68k_control.clone();
         let sound_req_irq_c3 = self.sound_req_irq.clone();
-        let handle_c3 = thread::spawn(move || {
+        let speed_c3 = self.speed.clone();
+        let handle_c3 = thread::Builder::new().name("vdp-scsp-m68k".into()).spawn(move || {
             let _guard = PanicGuard::new(sync_c3.clone(), arbiter_c3);
             let mut cycles = 0u64;
             // Real VDP2 output is genuinely paced by the video clock, not
@@ -190,6 +243,15 @@ impl SaturnSystem {
             // exactly once per SNDON, not every loop iteration.
             let mut m68k = m68k::M68k::new(work_ram_c3.clone());
             m68k.sound_req_irq = Some(sound_req_irq_c3);
+            // Real wall-clock M68K throttle (see `crate::throttle`). `M68k`
+            // itself doesn't track cycles at all (no per-opcode timing
+            // model, unlike `Sh2`'s flat +2/instruction) -- charges a flat
+            // nominal cycle cost per `step()` call instead, the same
+            // simplification tier already accepted for the SH-2.
+            let mut m68k_throttle = crate::throttle::ClockThrottle::new(
+                crate::throttle::M68K_CLOCK_HZ,
+                speed_c3,
+            );
             let mut was_running = false;
             // Real hardware issues SNDON only after the SH-2 has finished
             // uploading the sound driver into Sound RAM. Core 0 executes
@@ -234,14 +296,17 @@ impl SaturnSystem {
                 }
                 was_running = should_run;
                 if should_run {
-                    // Bounded per-iteration step count: this thread also
-                    // paces VDP2 frames and yields every loop, so this isn't
-                    // real 68000 clock-accurate timing, just enough real
-                    // execution progress per wall-clock tick to let the
-                    // uploaded sound driver actually run instead of stalling
-                    // forever behind an unimplemented CPU.
+                    // Bounded per-iteration step count, same as before --
+                    // this thread also paces VDP2 frames and yields every
+                    // loop. Real clock-accurate pacing now comes from
+                    // `m68k_throttle.advance()` below, not from this count;
+                    // 200 just keeps this outer loop's own cadence
+                    // reasonable (comparable to before), independent of
+                    // whatever the throttle's internal batch size works
+                    // out to.
                     for _ in 0..200 {
                         m68k.step();
+                        m68k_throttle.advance(crate::throttle::M68K_NOMINAL_CYCLES_PER_INSTRUCTION);
                     }
                 }
                 let now = std::time::Instant::now();
@@ -271,7 +336,7 @@ impl SaturnSystem {
                 sync_c3.sync_core(3, cycles);
                 thread::yield_now();
             }
-        });
+        }).expect("failed to spawn Core 3 (VDP1/VDP2/SCSP/M68K) thread");
         self.handles.push(handle_c3);
     }
 

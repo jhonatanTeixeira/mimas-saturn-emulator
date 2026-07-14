@@ -1,4 +1,4 @@
-# Current blocker: M68K sound driver self-corrupts before finishing setup
+# Current blocker: new stall past the SCU DSP fix, not yet root-caused
 
 **Goal this unblocks**: BIOS boot progress toward rendering the Saturn logo
 in `mimas_window`. This is the single thing standing between "BIOS reaches
@@ -6,149 +6,107 @@ new territory" and "BIOS reaches VDP2 setup and we see something on
 screen" as of this writing — though there may be further walls after it,
 undiscovered because this one hasn't cleared yet.
 
-## Where things stand
+## Where things stand (2026-07-13)
 
-A real M68000 interpreter (`saturn-core/src/m68k.rs`) now runs the actual
-sound driver the BIOS uploads into Sound RAM, triggered by real SMPC
-SNDON, with the real SCSP→SH-2 "Sound Request" interrupt (MCIPD/MCIEB →
-SCU vector 0x46, level 9) implemented and wired up. **This already moved
-the boot wall**: Core 0's PC now reaches new territory around `0x06011900`
-(re-diagnose by address each session — BIOS revisions/timing shift this),
-past the earlier `0x060108xx` loop it used to get stuck in.
+The previous wall described in this file (Core 0 stuck polling the SCU
+DSP's Program Control Port `EX` bit forever, at `0x06013264`-`0x06013268`)
+is **fixed** — a real SCU DSP interpreter now exists (`saturn-core/src/
+scu_dsp.rs`) and Core 2 (previously permanently parked) actually executes
+DSP programs.
 
-The M68K core itself, however, does not run the driver to completion. It
-derails partway through the driver's very first real action.
+**Why this needed a whole new component, not just a register fix**: `EX`
+only clears when a *running DSP program* reaches an End instruction — Core
+2 had zero DSP execution before this, so nothing could ever clear it
+regardless of what the register plumbing looked like. The real, uploaded
+32-word BIOS DSP program was recovered by dumping High RAM at the stuck PC
+and following the wait loop's literal-pool pointer back through the
+program's setup code (three Data RAM parameter words, `[0, 0x09694000,
+0x000002AB]`, written via the Data RAM Data Port right before the trigger)
+to the actual `0x06013280`-`0x060132FC` program bytes. Decoding it against
+Yabause's exact bit layout (`scu.c`'s DSP exec block, `readgensrc`/
+`writed1busdest`/`writeloadimdest`, `dsp_dma01`-`dsp_dma08`) showed it uses:
+plain ALU ops (NOP/ADD/SUB), D1-bus stores, conditional and unconditional
+MVI, conditional JMP (Z/T0-gated), and two DMA addressing-mode variants
+(main-RAM-read and main-RAM-write directions) — no loop instructions, no
+DSP-side interrupt request.
 
-## The specific failure, traced
+**What's implemented**: the full ALU/Operation/Load-Immediate/Jump/Loop/End
+instruction groups (faithful to Yabause's exact bit math, not just the
+opcodes the real program happens to use), plus 2 of real hardware's 8 DMA
+addressing-mode variants — the 2 the real program actually exercises. The
+other 6 are a known, explicitly-flagged gap (see `scu_dsp.rs`'s module doc
+comment) — add them the same way as everything else in this project: hit
+them, decode, cross-check Yabause, implement, test. Register ports (offsets
+`0x80`/`0x84`/`0x88`/`0x8C`) are intercepted at `Sh2::read_long`/
+`write_long` (real hardware: 32-bit-only ports, not per-byte storage like
+plain SCU registers) and shared with Core 2 via `Arc<Mutex<ScuDsp>>`; a
+write setting `EX` calls `sync.set_thread_active(2, true)` to wake Core 2,
+mirroring the existing SSHON/Core-1 and SNDON/M68K reactivation shape. Core
+2 re-parks the instant the DSP program clears `EX` on its own (real
+hardware: the DSP genuinely stops consuming cycles then).
 
-1. On reset (real M68000 semantics: SSP from Sound RAM address 0, PC from
-   address 4), the driver's PC starts at `0x1000`. Sound RAM from `0x1000`
-   to `0x322D` is entirely zero bytes at that point — no real code there
-   yet, decoded as a long run of harmless `ORI.B #0,D0` no-ops by the
-   interpreter until it reaches real code at `0x322E`.
-2. Real code at `0x322E`: `MOVE.L D0,(A0)+` (2 bytes) then `DBRA D7,-4`
-   (4 bytes) — a textbook "clear N longwords starting at A0" loop.
-   Observed register state at first entry: `D0=0`, `A0=0`, `D7=0xFFFF`.
-   `D7=0xFFFF` is the standard 68000 idiom for "loop 65536 times" (DBcc
-   decrements then exits only on wrapping to `0xFFFF`).
-3. Each iteration writes a zeroed 32-bit longword to `(A0)` then
-   increments `A0` by 4. Because `MOVE.L` writes 4 *consecutive* bytes,
-   and the loop's own 6 bytes of code sit inside the address range being
-   swept (starting from 0), iteration ~3211 writes to `A0=0x322C..0x322F`
-   — which includes the loop's own `MOVE.L` opcode at `0x322E-0x322F`.
-   That opcode is now `0x0000`. The interpreter re-fetches at `0x322E`,
-   decodes `0x0000` as another (harmless) `ORI.B #0,D0`, consuming what
-   used to be the `DBRA`'s displacement operand as a fresh instruction,
-   and PC ends up at `0x3232` — the middle of what used to be a valid
-   instruction stream, now garbage. From here it reads `0xFFFC`/`0xFF00`-
-   pattern words as unimplemented "Line F" opcodes and makes no further
-   real progress.
-4. Right after this (still-intact) loop, at `0x3234-0x323B`: a second,
-   near-identical setup — `MOVEA.L A5,A0` (A5 holds `0x100000`, the SCSP
-   register base), `MOVEQ #0,D0`, `MOVE.W #$FF,D7` — feeding a *second*
-   instance of the same 2-instruction clear loop at `0x323C`. This
-   confirms the pattern is a **reusable helper**, called with different
-   parameters for different regions (Sound RAM vs. SCSP registers, it
-   looks like) — not a one-off. The first call's parameters (clear 256KB
-   starting at address 0, using code positioned only ~12KB in) are the
-   ones that don't fit.
+**Verification**: a new unit test (`scu_dsp::tests::
+real_bios_dsp_program_runs_to_completion`) loads the exact captured
+program + parameter words and confirms it reaches its End instruction in
+bounded steps — this is the strongest signal the interpreter is correct
+for the program that matters, independent of the full real-BIOS run.
+Confirmed against the real BIOS too: Core 0's PC, which previously never
+moved past `0x06013264` no matter how long the boot-watch window, now
+races through a large amount of new code (the interrupt dispatcher
+trampoline, `0x0601xxxx`/`0x0600xxxx` handler bodies, `0x06013144`-
+`0x060131a8`-ish DSP-invocation call sites reached from multiple different
+interrupt paths) before settling at a *new* address (see below).
 
-## What's been ruled out
+## The new stall
 
-- **Not a decode bug in `DBcc` or `MOVE`.** Both were checked
-  instruction-by-instruction against Musashi's real implementation
-  (`yabause/src/musashi/m68kopdm.c`'s `m68k_op_dbf_16`, and `MOVE`'s
-  field-layout math) and match exactly, including the branch-target
-  formula's `PC - 2 + disp` and the post-decrement `!= 0xFFFF` exit
-  check.
-- **Not a debounce/timing race.** Added a 2ms debounce before Core 3
-  resets the M68K on the SNDON edge (theory: the SH-2's own upload
-  routine might still be running when Core 3 observes the flag, given
-  they're on independent OS threads with no barrier beyond the flag).
-  The Sound RAM image captured at reset time was byte-for-byte identical
-  with and without the debounce — ruling this out. Whatever's in Sound
-  RAM at SNDON time is already final by the time the SH-2 executes the
-  `COMREG=0x06` write; it isn't still arriving.
-  **Re-verified 2026-07-12** after replacing the debounce entirely with a
-  real `Ordering::Release`/`Acquire` signal (`TECH_DEBT.md` item 1,
-  `history.md` Chapter 7): identical signature against a real BIOS
-  (`Sega Saturn BIOS (USA).bin`) — `D7=0xFFFF, A0=0` at the first
-  clear-loop entry, derails to `0x3232` reading `0xFFFC` then a run of
-  `0xFF00` "Line F" opcodes, PC reaches the same `~0x06011900` territory.
-  This wall is confirmed orthogonal to that architectural fix.
-  **Re-verified again 2026-07-13** after splitting `WorkRam`'s monolithic
-  lock into one lock per region (`TECH_DEBT.md` item 1, `history.md`
-  Chapter 8): identical signature once more, same BIOS, same addresses,
-  same register values. Two architectural fixes in a row have now left
-  this wall byte-for-byte untouched, as both were expected to.
-- **Not obviously a Sound RAM address-mapping bug** — the same region the
-  SH-2 writes into (0x05A00000/0x25A00000) is what the M68K reads at its
-  own address 0, confirmed against Yabause's `M68K->SetFetch(0, 0x80000,
-  SoundRam)`.
+A real-BIOS run (`MIMAS_BOOT_WATCH_SECS=280`) now stops early via the
+boot-watch loop's "unchanged for 500ms" early-exit, settled at
+`0x060131A8`, having reached that point after visiting hundreds of
+distinct addresses (real forward progress, not a repeat of the old wall).
+`0x060131A8`'s surrounding code (from the same High RAM dump used for the
+DSP investigation, still valid since only execution reached further, not
+different code) is a bounded-looking `for`-style loop — a counter compared
+against `50` at `0x060131e2`, another comparison against values loaded
+from `0x060131fc`/`0x060131fe`, and a call (`JSR`, literal at `0x06013228`
+→ `0x06013344`) partway through. **`0x06013344` turned out to be a plain
+software 32-bit division routine** (a `DIV0S`/`DIV1`/`ROTCL` sequence,
+called from many unrelated places throughout the BIOS for ordinary
+arithmetic) — not DSP- or hardware-specific, so it's very unlikely to be
+the actual cause; the real blocker is more likely something the *outer*
+loop or its own caller depends on.
 
-## Leading hypothesis (untested)
+**Not yet investigated**: this needs the same work loop as every prior
+wall (`CLAUDE.md`) — a fresh High RAM dump at the exact stuck PC (the one
+used for this write-up predates the DSP fix reaching this far, so re-dump
+before trusting exact byte contents), decode what register/counter it's
+actually waiting on, and cross-check against Yabause before touching
+anything. Given how many different call sites funnel through the
+`0x06013144`-`0x060131e2` region (interrupt-driven, per the DSP
+investigation), a reasonable first hypothesis is that this loop is
+iterating over some per-item BIOS bookkeeping (device list, DMA queue,
+etc.) and is blocked on a count/flag from a different unimplemented
+register — but this is a guess, not yet traced, and should be treated as
+such.
 
-The `D7=0xFFFF, A0=0` combination for the *first* clear-loop call is
-wrong — either:
+## Still open, but not confirmed to be a gate right now
 
-(a) the SH-2's own upload routine writes an *incomplete* driver image
-(the real driver's setup code that should load a much smaller D7 value
-before this loop runs is missing, and what's left over from a previous
-memory state or a partial write happens to look like `0xFFFF`/`0` by
-coincidence), or
-
-(b) the SH-2's upload is complete and correct, and `D7=0xFFFF, A0=0`
-really is what the real BIOS driver's first pass does — meaning either
-real hardware also wouldn't get past this in the state we're feeding it
-(unlikely for a real, shipped BIOS), or there's a *third* piece of state
-this loop depends on that isn't `D7`/`A0` alone (e.g. a real M68000
-subtlety in instruction prefetch timing that makes the corrupted fetch a
-non-issue on real silicon, which a simple interpreter without a prefetch
-queue wouldn't replicate) — this second branch of (b) is speculative and
-the least likely explanation given how deliberately positioned the
-"second clear-loop instance" pattern looks.
-
-(a) is more likely given everything traced so far, and is directly
-testable.
-
-## Next concrete step
-
-Don't infer the SH-2's intended Sound RAM writes from static post-hoc
-dumps anymore — instrument the write path directly and read off the real
-sequence:
-
-1. In `Sh2::raw_write_byte`'s `MemRegion::SoundRam` arm (same pattern
-   already used successfully for the High RAM counter probe — see
-   `CLAUDE.md`'s reusable-diagnostics section), add a temporary probe that
-   logs every write into Sound RAM from Core 0, with the writing PC, from
-   shortly before the traced `SNDON`-adjacent code
-   (`0x06010870`-`0x0601089c`) through to the SNDON `COMREG` write itself.
-2. Run against the real BIOS, capture the full write sequence in order.
-3. Reconstruct what the *intended* Sound RAM image at address `0x1000`
-   onward should look like, and compare against what's actually observed
-   at M68K reset time (same technique as the existing
-   `sound_ram_dump.bin`/`MIMAS_DEBUG_M68K=1` tooling in `m68k.rs`).
-4. If the intended and observed images differ: the SH-2-side write logic
-   (or something it depends on, e.g. a source address it reads from BIOS
-   ROM) has a bug — decode it the normal way (cross-check Yabause, fix,
-   test, reverify).
-5. If they're identical: hypothesis (a) is wrong, and this needs a fresh
-   look at hypothesis (b) or a new one — at that point, consider whether
-   continuing this specific investigation is worth it versus documenting
-   it clearly and moving attention to M4 (VDP2 tile rendering) in
-   parallel, since the BIOS logo may not strictly require sound to be
-   working first (untested assumption — the current boot path happens to
-   route through SNDON, but that doesn't prove video setup is gated on
-   sound completing).
+The M68K sound-driver self-corruption bug (uploaded driver's first
+`MOVE.L D0,(A0)+`/`DBRA D7,-4` clear loop overwrites its own code,
+`D7=0xFFFF, A0=0`) is **still unfixed**. It was re-verified byte-for-byte
+unchanged through both the VBLANK-OUT fix and the SCU DSP fix, across
+multiple real-BIOS runs — two independent, unrelated walls have now
+cleared without it, so it doesn't look like it's gating overall boot
+progress, but it's a real bug and will need fixing eventually (likely
+before audio can work at all).
 
 ## Useful commands for whoever picks this up
 
 ```bash
-# Rebuild with M68K debug instrumentation
+# Rebuild
 cargo build -p saturn-frontend-native --release --bin saturn-frontend-native
 
-# Run against the real BIOS with M68K tracing enabled
-MIMAS_DEBUG_M68K=1 MIMAS_BOOT_WATCH_SECS=200 \
+# Run against the real BIOS, watching Core 0's PC
+MIMAS_BOOT_WATCH_SECS=280 \
   ./target/release/saturn-frontend-native --bios <path-to-real-bios.bin>
 
 # Disassemble a captured RAM dump offline (SH-2 side)

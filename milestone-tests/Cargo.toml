@@ -1,0 +1,26 @@
+[package]
+name = "milestone-tests"
+version = "0.1.0"
+edition = "2021"
+
+# Empty workspace table: this makes the crate its own workspace root
+# instead of being auto-swept into the parent mimas/ workspace just by
+# sitting inside its directory tree (Cargo's default behavior otherwise).
+[workspace]
+
+# Deliberately NOT a member of the root workspace (see ../Cargo.toml) --
+# this crate needs a real, user-supplied Saturn BIOS (MIMAS_BIOS_PATH) and
+# downloads a ~600MB CLIP model from Hugging Face Hub on first run, both
+# real regressions to `cargo test --workspace`'s "fast, deterministic, no
+# network" property if pulled into the main workspace graph. Run this
+# crate's tests explicitly: `cd milestone-tests && cargo test`.
+
+[dependencies]
+saturn-core = { path = "../saturn-core" }
+candle-core = "0.11"
+candle-nn = "0.11"
+candle-transformers = "0.11"
+# NOT "1.0" -- hf-hub 1.0 replaced the sync API (Repo::with_revision,
+# api.repo().get()) this crate uses; 0.5 is the last version with it.
+hf-hub = "0.5"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }

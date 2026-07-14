@@ -2,7 +2,7 @@ use std::sync::{mpsc, Arc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
-use saturn_core::{BusArbiter, LockStepSync, SaturnSystem, Sh2, WorkRam};
+use saturn_core::{BusArbiter, LockStepSync, SaturnSystem, Sh2, ThrottleSpeed, WorkRam};
 
 /// Run `f` on its own thread and wait up to `timeout` for it to finish,
 /// propagating a panic from inside `f` verbatim (so a real assertion
@@ -269,6 +269,47 @@ fn test_saturn_system_startup_shutdown() {
         assert_ne!(pc_before, pc_after, "Core 0 made no forward progress -- possibly stalled behind a parked core");
 
         // Shutdown and join threads
+        system.shutdown();
+    });
+}
+
+#[test]
+fn test_saturn_system_defaults_to_unthrottled() {
+    // Regression guard on the default itself: `history.md` Chapter 9 adds a
+    // real wall-clock CPU throttle, but confirmed with the user that
+    // `SaturnSystem::new()`/`with_slack()` must keep defaulting to
+    // unthrottled -- zero behavior change for the active BIOS-boot
+    // investigation and every existing verification workflow. Real speed
+    // (or any multiplier) is opt-in via `set_speed`.
+    let system = SaturnSystem::with_slack(10);
+    assert_eq!(system.get_speed(), ThrottleSpeed::Unthrottled);
+}
+
+#[test]
+fn test_extreme_speed_multiplier_does_not_hang_shutdown() {
+    // `ClockThrottle`'s actual pacing math is already covered thoroughly
+    // in `throttle.rs`'s own unit tests, using a synthetic `clock_hz`
+    // decoupled from real SH-2 instruction execution -- precise, non-flaky
+    // timing assertions aren't reliable at this level, since this
+    // interpreter's own per-instruction overhead (a syscall in
+    // `thread::yield_now()`, lock contention in `sync_core()`, on every
+    // single instruction) turns out to already be substantial enough that
+    // comparing real progress rates here is environment-dependent, not a
+    // property of the throttle itself.
+    //
+    // What *is* unique and worth covering at this level: an extreme
+    // multiplier's ideal per-batch sleep would be roughly a full second
+    // here (real SH-2 speed's ~1ms/~14,318-instruction batch, paced at
+    // 0.00001x) -- without `throttle.rs`'s `MAX_SINGLE_SLEEP` cap, a
+    // `shutdown()` landing mid-sleep could block for that whole duration,
+    // since `thread::sleep` can't be interrupted early. Confirm the real,
+    // full `SaturnSystem::shutdown()` path (not just the isolated
+    // `ClockThrottle` unit) stays prompt even with a pathological setting.
+    assert_completes_within(Duration::from_secs(5), || {
+        let mut system = SaturnSystem::with_slack(10);
+        system.set_speed(ThrottleSpeed::Multiplier(0.00001));
+        system.start();
+        thread::sleep(Duration::from_millis(100));
         system.shutdown();
     });
 }

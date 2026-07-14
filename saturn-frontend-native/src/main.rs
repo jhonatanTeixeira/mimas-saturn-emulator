@@ -4,13 +4,39 @@ use std::process;
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant};
-use saturn_core::{SaturnSystem, Cdrom};
+use saturn_core::{SaturnSystem, Cdrom, ThrottleSpeed};
+
+/// Write the current VDP2 frame out as a real PNG -- the point is to be
+/// able to actually *look* at what BIOS boot has rendered so far (e.g.
+/// confirming the real Saturn CD/music player screen shows up), not just
+/// infer it from register traces. `vdp::Framebuffer`'s pixels are already
+/// `0x00RRGGBB` (see its own doc comment, matches `minifb`'s format
+/// directly), so this is a plain, lossless RGB8 conversion, no palette or
+/// color-space work needed.
+fn write_framedump(frame: &saturn_core::vdp::Framebuffer, path: &str) -> Result<(), String> {
+    let mut rgb = Vec::with_capacity(frame.pixels.len() * 3);
+    for &p in &frame.pixels {
+        rgb.push(((p >> 16) & 0xFF) as u8);
+        rgb.push(((p >> 8) & 0xFF) as u8);
+        rgb.push((p & 0xFF) as u8);
+    }
+    let file = std::fs::File::create(path).map_err(|e| format!("failed to create {}: {}", path, e))?;
+    let w = std::io::BufWriter::new(file);
+    let mut encoder = png::Encoder::new(w, frame.width as u32, frame.height as u32);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().map_err(|e| format!("failed to write PNG header for {}: {}", path, e))?;
+    writer.write_image_data(&rgb).map_err(|e| format!("failed to write PNG data for {}: {}", path, e))?;
+    Ok(())
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
     let mut bios_path = None;
     let mut chd_path = None;
+    let mut speed_multiplier: Option<f64> = None;
+    let mut framedump_path: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -30,6 +56,30 @@ fn main() {
                     i += 2;
                 } else {
                     eprintln!("Error: Missing value for --chd");
+                    process::exit(1);
+                }
+            }
+            "--speed" | "-s" => {
+                if i + 1 < args.len() {
+                    match args[i + 1].parse::<f64>() {
+                        Ok(mult) => speed_multiplier = Some(mult),
+                        Err(_) => {
+                            eprintln!("Error: --speed requires a number (e.g. 1.0 for real speed), got '{}'", args[i + 1]);
+                            process::exit(1);
+                        }
+                    }
+                    i += 2;
+                } else {
+                    eprintln!("Error: Missing value for --speed");
+                    process::exit(1);
+                }
+            }
+            "--framedump" => {
+                if i + 1 < args.len() {
+                    framedump_path = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("Error: Missing value for --framedump");
                     process::exit(1);
                 }
             }
@@ -83,6 +133,13 @@ fn main() {
     // (physical 0x00000000/0x00000004) instead of sitting at PC=0 with
     // nothing mapped there.
     let mut system = SaturnSystem::new();
+    // Defaults to unthrottled (run as fast as the host allows) unless
+    // --speed is given -- see `saturn_core::throttle` for the real Saturn
+    // clock rates a multiplier of 1.0 paces against.
+    if let Some(mult) = speed_multiplier {
+        system.set_speed(ThrottleSpeed::Multiplier(mult));
+        println!("CPU speed: {}x real hardware clock rate", mult);
+    }
     system.load_bios(bios_bytes);
     system.start();
 
@@ -139,10 +196,21 @@ fn main() {
         println!("Core 0 executed real BIOS instructions: PC moved from {:#010X} to {:#010X}.", start_pc, last_pc);
     }
 
-    // Rendering (VDP1/VDP2) and audio streaming (SCSP) are not wired up yet
-    // -- these remain explicit placeholders, not a claim of real output.
-    println!("Rendering frame... (VDP1/VDP2 not yet implemented)");
+    // VDP2 backdrop rendering is real (see `vdp::render_backdrop`, run by
+    // Core 3 every ~16.6ms) -- NBG tile/bitmap layers and VDP1 sprites
+    // aren't implemented yet, so this is real output, just an incomplete
+    // picture until those land. SCSP audio synthesis genuinely doesn't
+    // exist yet -- that placeholder stays honest.
+    let frame = system.vdp2_frame.load();
+    println!("Current VDP2 frame: {}x{}", frame.width, frame.height);
     println!("Streaming audio sample... (SCSP not yet implemented)");
+
+    if let Some(ref path) = framedump_path {
+        match write_framedump(&frame, path) {
+            Ok(()) => println!("Frame dumped to: {}", path),
+            Err(e) => eprintln!("Error: {}", e),
+        }
+    }
 
     // Shutdown system gracefully
     system.shutdown();

@@ -1,3 +1,6 @@
 /target
+# milestone-tests is its own workspace root (see its Cargo.toml), so it
+# gets an independent build dir, not the root one above.
+/milestone-tests/target
 **/*.rs.bk
 *.pdb

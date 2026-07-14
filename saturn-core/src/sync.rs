@@ -4,7 +4,21 @@ pub struct LockStepSync {
     num_threads: usize,
     slack_limit: u64,
     state: Mutex<SyncState>,
+    /// Drift-sync waiters (`sync_core`). Notified on *every* call, up to
+    /// once per emulated instruction from an active core -- deliberately
+    /// separate from `park_condvar` below, which must stay quiet except on
+    /// a genuine reactivation/shutdown. Sharing one condvar between both
+    /// purposes was tried first and measured as a real bug: a parked core
+    /// (see `park_while_inactive`) got spuriously woken on every single
+    /// `sync_core` call from every active core, re-contending for this same
+    /// mutex millions of times a second for nothing -- parking never
+    /// actually reached zero CPU in a running system. See `history.md`.
     condvar: Condvar,
+    /// `park_while_inactive` waiters only. Notified solely by
+    /// `set_thread_active`'s reactivation branch and `request_shutdown` --
+    /// nothing else touches it, so a parked core is only ever woken for a
+    /// real reason.
+    park_condvar: Condvar,
 }
 
 struct SyncState {
@@ -27,6 +41,7 @@ impl LockStepSync {
                 shutdown: false,
             }),
             condvar: Condvar::new(),
+            park_condvar: Condvar::new(),
         }
     }
 
@@ -104,6 +119,10 @@ impl LockStepSync {
             state.active[core_id] = true;
             // Notify threads in case we changed state
             self.condvar.notify_all();
+            // Also wake any `park_while_inactive` waiter for this exact
+            // reactivation -- see `park_condvar`'s doc comment for why this
+            // is a separate condvar from the one just above.
+            self.park_condvar.notify_all();
         }
         state.cycles[core_id]
     }
@@ -126,7 +145,7 @@ impl LockStepSync {
             panic!("Invalid core ID: {}", core_id);
         }
         while !state.active[core_id] && !state.shutdown {
-            state = self.condvar.wait(state).unwrap();
+            state = self.park_condvar.wait(state).unwrap();
         }
         !state.shutdown
     }
@@ -135,6 +154,7 @@ impl LockStepSync {
         let mut state = self.state.lock().unwrap();
         state.shutdown = true;
         self.condvar.notify_all();
+        self.park_condvar.notify_all();
     }
 
     pub fn is_shutdown(&self) -> bool {
