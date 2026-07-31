@@ -24,7 +24,7 @@ use std::sync::RwLock;
 /// order the fields are declared below, to avoid a lock-ordering deadlock.
 pub struct WorkRam {
     pub low_ram: RwLock<Box<[u8; 0x100000]>>,  // 1MB Low Work RAM (0x00200000-0x002FFFFF)
-    pub high_ram: RwLock<Box<[u8; 0x100000]>>, // 1MB High Work RAM (0x06000000-0x060FFFFF)
+    pub high_ram: [RwLock<Box<[u8; 0x10000]>>; 32], // 32 stripes of 64KB = 2MB High Work RAM (0x06000000-0x061FFFFF)
     /// SCSP Sound RAM, real size 512KB (0x05A00000-0x05AFFFFF).
     pub sound_ram: RwLock<Box<[u8; 0x80000]>>,
     /// SCSP register block, separate from Sound RAM on real hardware
@@ -63,9 +63,12 @@ pub struct WorkRam {
 
 impl WorkRam {
     pub fn new() -> Self {
+        let high_ram: [RwLock<Box<[u8; 0x10000]>>; 32] = std::array::from_fn(|_| {
+            RwLock::new(vec![0; 0x10000].into_boxed_slice().try_into().unwrap())
+        });
         Self {
             low_ram: RwLock::new(vec![0; 0x100000].into_boxed_slice().try_into().unwrap()),
-            high_ram: RwLock::new(vec![0; 0x100000].into_boxed_slice().try_into().unwrap()),
+            high_ram,
             sound_ram: RwLock::new(vec![0; 0x80000].into_boxed_slice().try_into().unwrap()),
             scsp_regs: RwLock::new(vec![0; 0x1000].into_boxed_slice().try_into().unwrap()),
             vdp1_vram: RwLock::new(vec![0; 0x80000].into_boxed_slice().try_into().unwrap()),
@@ -88,7 +91,43 @@ impl WorkRam {
 
     /// Explicit clear of high work RAM
     pub fn clear_high_ram(&mut self) {
-        self.high_ram.get_mut().unwrap().fill(0);
+        for stripe in self.high_ram.iter_mut() {
+            stripe.get_mut().unwrap().fill(0);
+        }
+    }
+
+    pub fn read_high_ram_byte(&self, off: usize) -> u8 {
+        crate::telemetry::record_wram_read();
+        let stripe = (off >> 16) & 31;
+        let index = off & 0xFFFF;
+        self.high_ram[stripe].read().unwrap()[index]
+    }
+
+    pub fn write_high_ram_byte(&self, off: usize, val: u8) {
+        crate::telemetry::record_wram_write();
+        let stripe = (off >> 16) & 31;
+        let index = off & 0xFFFF;
+        self.high_ram[stripe].write().unwrap()[index] = val;
+    }
+
+    pub fn read_high_ram_long(&self, off: usize) -> u32 {
+        let b0 = self.read_high_ram_byte(off) as u32;
+        let b1 = self.read_high_ram_byte(off + 1) as u32;
+        let b2 = self.read_high_ram_byte(off + 2) as u32;
+        let b3 = self.read_high_ram_byte(off + 3) as u32;
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+    }
+
+    pub fn write_high_ram_long(&self, off: usize, val: u32) {
+        self.write_high_ram_byte(off, (val >> 24) as u8);
+        self.write_high_ram_byte(off + 1, (val >> 16) as u8);
+        self.write_high_ram_byte(off + 2, (val >> 8) as u8);
+        self.write_high_ram_byte(off + 3, val as u8);
+    }
+
+    pub fn write_high_ram_word(&self, off: usize, val: u16) {
+        self.write_high_ram_byte(off, (val >> 8) as u8);
+        self.write_high_ram_byte(off + 1, val as u8);
     }
 }
 

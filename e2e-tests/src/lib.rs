@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use saturn_core::{
-        BusArbiter, Cdrom, LockStepSync, Scsp, Scu, Sh2, Smpc, Vdp, WorkRam, Vram,
+        BusArbiter, Cdrom, LockStepSync, SaturnSystem, Scsp, Scu, Sh2, Vdp, WorkRam, Vram,
         DoubleBufferedFramebuffer, SoundRingBuffer
     };
     use std::sync::Arc;
@@ -186,9 +186,8 @@ mod tests {
         
         // Write 0xABCD to high RAM offset 0
         {
-            let mut r = ram.high_ram.write().unwrap();
-            r[0] = 0xAB;
-            r[1] = 0xCD;
+            ram.write_high_ram_byte(0, 0xAB);
+            ram.write_high_ram_byte(1, 0xCD);
         }
         
         let word = cpu.read_word(0x06000000);
@@ -215,10 +214,8 @@ mod tests {
         let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram.clone());
         {
-            let mut r = ram.high_ram.write().unwrap();
-            // 0x0009 is NOP in SH-2
-            r[0] = 0x00;
-            r[1] = 0x09;
+            ram.write_high_ram_byte(0, 0x00);
+            ram.write_high_ram_byte(1, 0x09);
         }
         cpu.pc = 0x06000000;
         cpu.step();
@@ -235,7 +232,14 @@ mod tests {
 
     #[test]
     fn test_tier1_f4_smpc_initialization() {
-        let _smpc = Smpc::new();
+        // Real SMPC: SaturnSystem owns a live Smpc handle (see
+        // docs/implementation-plans/smpc-peripheral.md Phase 0), register
+        // storage in WorkRam::smpc_regs starts all-zero (SmpcReset zeroes
+        // all 64 real registers), not the old stub's fictional 0x55 status.
+        let system = SaturnSystem::new();
+        let _smpc = system.smpc.lock().unwrap();
+        let regs = system.work_ram.smpc_regs.read().unwrap();
+        assert!(regs.iter().all(|&b| b == 0), "fresh SMPC register file must be all-zero");
     }
 
     #[test]
@@ -525,10 +529,8 @@ mod tests {
         let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram.clone());
         {
-            let mut r = ram.high_ram.write().unwrap();
-            // 0xFFFF is illegal instruction in SH-2
-            r[0] = 0xFF;
-            r[1] = 0xFF;
+            ram.write_high_ram_byte(0, 0xFF);
+            ram.write_high_ram_byte(1, 0xFF);
         }
         cpu.pc = 0x06000000;
         cpu.step();
@@ -586,12 +588,18 @@ mod tests {
     }
 
     #[test]
-    fn test_tier2_f4_smpc_command_buffer_overflow() {
-        let mut smpc = Smpc::new();
-        for _ in 0..8 {
-            let _ = smpc.write_command(0x01);
-        }
-        assert!(smpc.write_command(0x02).is_err(), "SMPC failed to reject command overflow");
+    fn test_tier2_f4_smpc_intback_reports_normal_startup() {
+        // Real command dispatch: writing COMREG=0x10 (INTBACK) through the
+        // CPU's real memory-mapped write path must populate OREG0 with the
+        // real startup status byte -- see
+        // docs/implementation-plans/smpc-peripheral.md and
+        // docs/hardware-reference/smpc-peripheral.md §5.6.
+        let arbiter = Arc::new(BusArbiter::new());
+        let ram = Arc::new(WorkRam::new());
+        let mut cpu = Sh2::new(false, arbiter, ram.clone());
+        cpu.write_byte(0x0010_001F, 0x10); // COMREG = INTBACK
+        let oreg0 = ram.smpc_regs.read().unwrap()[0x21];
+        assert_eq!(oreg0 & 0x80, 0x80, "OREG0 bit 7 (normal startup) must be set after INTBACK");
     }
 
     #[test]
