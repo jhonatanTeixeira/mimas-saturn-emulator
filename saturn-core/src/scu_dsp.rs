@@ -672,7 +672,7 @@ fn read_long(work_ram: &WorkRam, address: u32) -> u32 {
     } else if (0x05F0_0000..0x05F8_0000).contains(&a) {
         read_long_from(&work_ram.vdp2_cram.read().unwrap()[..], (a - 0x05F0_0000) as usize)
     } else if (0x0600_0000..0x0700_0000).contains(&a) {
-        read_long_from(&work_ram.high_ram.read().unwrap()[..], (a - 0x0600_0000) as usize)
+        work_ram.read_high_ram_long((a - 0x0600_0000) as usize)
     } else {
         0
     }
@@ -689,7 +689,7 @@ fn write_long(work_ram: &WorkRam, address: u32, val: u32) {
     } else if (0x05F0_0000..0x05F8_0000).contains(&a) {
         write_long_to(&mut work_ram.vdp2_cram.write().unwrap()[..], (a - 0x05F0_0000) as usize, val);
     } else if (0x0600_0000..0x0700_0000).contains(&a) {
-        write_long_to(&mut work_ram.high_ram.write().unwrap()[..], (a - 0x0600_0000) as usize, val);
+        work_ram.write_high_ram_long((a - 0x0600_0000) as usize, val);
     }
 }
 
@@ -700,7 +700,7 @@ fn write_word(work_ram: &WorkRam, address: u32, val: u16) {
     } else if (0x05A0_0000..0x05B0_0000).contains(&a) {
         write_word_to(&mut work_ram.sound_ram.write().unwrap()[..], (a - 0x05A0_0000) as usize, val);
     } else if (0x0600_0000..0x0700_0000).contains(&a) {
-        write_word_to(&mut work_ram.high_ram.write().unwrap()[..], (a - 0x0600_0000) as usize, val);
+        work_ram.write_high_ram_word((a - 0x0600_0000) as usize, val);
     }
 }
 

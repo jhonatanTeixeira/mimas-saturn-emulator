@@ -45,6 +45,10 @@ impl LockStepSync {
         }
     }
 
+    pub fn slack_limit(&self) -> u64 {
+        self.slack_limit
+    }
+
     pub fn sync_core(&self, core_id: usize, current_cycles: u64) {
         let mut state = self.state.lock().unwrap();
         if state.shutdown {
@@ -71,11 +75,12 @@ impl LockStepSync {
 
             match min_others {
                 Some(min_val) => {
-                    // Calculate wrapping difference as signed distance
                     let diff = current_cycles.wrapping_sub(min_val) as i64;
                     if diff > self.slack_limit as i64 {
-                        // Drift exceeded, wait for slower active cores to catch up
+                        let start = std::time::Instant::now();
                         state = self.condvar.wait(state).unwrap();
+                        let duration = start.elapsed().as_nanos() as u64;
+                        crate::telemetry::record_idle_time(core_id, duration);
                     } else {
                         break;
                     }

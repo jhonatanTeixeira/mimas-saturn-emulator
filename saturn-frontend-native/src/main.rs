@@ -212,6 +212,9 @@ fn main() {
         }
     }
 
+    // Print telemetry profiling report
+    saturn_core::telemetry::print_report();
+
     // Shutdown system gracefully
     system.shutdown();
 

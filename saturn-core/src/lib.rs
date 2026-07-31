@@ -10,6 +10,7 @@ pub mod vdp;
 pub mod scsp;
 pub mod m68k;
 pub mod throttle;
+pub mod telemetry;
 
 pub use bus_arbiter::BusArbiter;
 pub use shared_buffers::{WorkRam, Vram, Framebuffer, DoubleBufferedFramebuffer};
@@ -48,9 +49,9 @@ pub struct SaturnSystem {
     pub vdp2_frame: Arc<arc_swap::ArcSwap<vdp::Framebuffer>>,
     /// Real hardware: SMPC's SNDON/SNDOFF commands reset/halt the SCSP's
     /// onboard M68000 sound CPU. Core 0 flips this (via `Sh2::m68k_control`)
-    /// when it processes those commands; Core 3 (which owns the actual
-    /// `M68k` instance, since it's already the VDP1/VDP2/SCSP thread) reads
-    /// it each loop iteration to know whether to step the M68K core.
+    /// when it processes those commands; Core 4 (`m68k-sound-cpu`, which
+    /// owns the actual `M68k` instance) reads it each loop iteration to know
+    /// whether to step the M68K core.
     pub m68k_control: Arc<std::sync::atomic::AtomicBool>,
     /// Real hardware: the SCSP's M68000 requests an interrupt to the SH-2
     /// (SCU "Sound Request", vector 0x46, level 9) by writing its MCIPD
@@ -70,6 +71,11 @@ pub struct SaturnSystem {
     /// See `crate::scu_dsp` for why a real DSP interpreter was needed (a
     /// boot wait loop polling the Program Control Port's `EX` bit).
     pub scu_dsp: Arc<Mutex<ScuDsp>>,
+    pub scsp: Arc<Mutex<Scsp>>,
+    /// The real SMPC command processor. Core 0 reaches it via `Sh2::smpc`
+    /// (register storage stays in `WorkRam::smpc_regs`); see `crate::smpc`
+    /// and `docs/implementation-plans/smpc-peripheral.md`.
+    pub smpc: Arc<Mutex<Smpc>>,
 }
 
 impl SaturnSystem {
@@ -81,7 +87,7 @@ impl SaturnSystem {
         let arbiter = Arc::new(BusArbiter::new());
         let work_ram = Arc::new(WorkRam::new());
         let vram = Arc::new(RwLock::new(Vram::new()));
-        let sync = Arc::new(LockStepSync::new(4, slack_limit));
+        let sync = Arc::new(LockStepSync::new(8, slack_limit));
         let shutdown = Arc::new(AtomicBool::new(false));
 
         Self {
@@ -98,6 +104,8 @@ impl SaturnSystem {
             sound_req_irq: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             speed: Arc::new(Mutex::new(ThrottleSpeed::Unthrottled)),
             scu_dsp: Arc::new(Mutex::new(ScuDsp::new())),
+            scsp: Arc::new(Mutex::new(Scsp::new())),
+            smpc: Arc::new(Mutex::new(Smpc::new())),
         }
     }
 
@@ -134,6 +142,7 @@ impl SaturnSystem {
         let sound_req_irq_c0 = self.sound_req_irq.clone();
         let speed_c0 = self.speed.clone();
         let scu_dsp_c0 = self.scu_dsp.clone();
+        let smpc_c0 = self.smpc.clone();
         let handle_c0 = thread::Builder::new().name("sh2-master".into()).spawn(move || {
             let _guard = PanicGuard::new(sync_c0.clone(), arbiter_c0.clone());
             let mut cpu = Sh2::new(false, arbiter_c0, work_ram_c0);
@@ -146,19 +155,12 @@ impl SaturnSystem {
             cpu.sound_req_irq = Some(sound_req_irq_c0);
             cpu.speed = Some(speed_c0);
             cpu.scu_dsp = Some(scu_dsp_c0);
+            cpu.smpc = Some(smpc_c0);
             cpu.run_loop(shutdown_c0);
         }).expect("failed to spawn Core 0 (Master SH-2) thread");
         self.handles.push(handle_c0);
 
-        // Spawn Core 1: Slave SH-2. Real hardware keeps this core halted
-        // until the Master issues SMPC's SSHON -- not yet implemented
-        // anywhere in this codebase (see `.development/TASKS.md`), so this
-        // parks at zero CPU (excluded from `LockStepSync`'s drift tracking
-        // exactly like a DMA-blocked core, via `set_thread_active`) instead
-        // of executing whatever garbage sits at unreset address 0. A future
-        // SSHON implementation wakes this core with
-        // `sync.set_thread_active(1, true)`, the same call DMA resume
-        // already uses -- see `LockStepSync::park_while_inactive`.
+        // Spawn Core 1: Slave SH-2.
         let shutdown_c1 = shutdown.clone();
         let arbiter_c1 = arbiter.clone();
         let work_ram_c1 = work_ram.clone();
@@ -181,142 +183,46 @@ impl SaturnSystem {
         }).expect("failed to spawn Core 1 (Slave SH-2) thread");
         self.handles.push(handle_c1);
 
-        // Spawn Core 2: SCU DSP slot. Parks at zero CPU (matching real
-        // hardware: the DSP only consumes cycles while a program is
-        // actually running) until Core 0 writes the Program Control
-        // Port's `EX` bit (see `Sh2::write_scu_dsp_port`, which calls
-        // `set_thread_active(2, true)` on that exact write) -- the same
-        // reactivation shape as Core 1's SSHON wiring. Re-parks the moment
-        // the DSP program reaches an End instruction and clears `EX`
-        // itself (real hardware: the DSP genuinely stops consuming cycles
-        // then, not just "looks idle").
+        // Spawn Core 2: VDP1 Drawing Engine.
         let sync_c2 = sync.clone();
         let arbiter_c2 = arbiter.clone();
-        let work_ram_c2 = work_ram.clone();
-        let scu_dsp_c2 = self.scu_dsp.clone();
-        let handle_c2 = thread::Builder::new().name("scu-dsp".into()).spawn(move || {
+        let shutdown_c2 = shutdown.clone();
+        let handle_c2 = thread::Builder::new().name("vdp1-draw".into()).spawn(move || {
             let _guard = PanicGuard::new(sync_c2.clone(), arbiter_c2);
-            sync_c2.set_thread_active(2, false);
             let mut cycles = 0u64;
-            loop {
-                if !sync_c2.park_while_inactive(2) {
-                    return; // shutdown fired before this core was ever reactivated
+            while !shutdown_c2.load(Ordering::Relaxed) {
+                if sync_c2.is_shutdown() {
+                    break;
                 }
-                while scu_dsp_c2.lock().unwrap().is_executing() {
-                    if sync_c2.is_shutdown() {
-                        return;
-                    }
-                    scu_dsp_c2.lock().unwrap().step(&work_ram_c2);
-                    cycles = cycles.wrapping_add(2);
-                    sync_c2.sync_core(2, cycles);
-                    thread::yield_now();
-                }
-                sync_c2.set_thread_active(2, false);
+                let step = (sync_c2.slack_limit() / 2).max(2).min(500);
+                cycles = cycles.wrapping_add(step);
+                sync_c2.sync_core(2, cycles);
+                thread::yield_now();
             }
-        }).expect("failed to spawn Core 2 (SCU DSP) thread");
+        }).expect("failed to spawn Core 2 (VDP1 Drawing Engine) thread");
         self.handles.push(handle_c2);
 
-        // Spawn Core 3: VDP1 / VDP2 / SCSP
+        // Spawn Core 3: VDP2 Compositor & Presentation Loop.
         let shutdown_c3 = shutdown.clone();
         let sync_c3 = sync.clone();
         let arbiter_c3 = arbiter.clone();
         let work_ram_c3 = work_ram.clone();
         let vdp2_frame = self.vdp2_frame.clone();
-        let m68k_control_c3 = self.m68k_control.clone();
-        let sound_req_irq_c3 = self.sound_req_irq.clone();
-        let speed_c3 = self.speed.clone();
-        let handle_c3 = thread::Builder::new().name("vdp-scsp-m68k".into()).spawn(move || {
+        let handle_c3 = thread::Builder::new().name("vdp2-composite".into()).spawn(move || {
             let _guard = PanicGuard::new(sync_c3.clone(), arbiter_c3);
             let mut cycles = 0u64;
-            // Real VDP2 output is genuinely paced by the video clock, not
-            // free-running: render one frame per ~60Hz tick, same cadence as
-            // the CPU's VBLANK-IN interrupt, rather than as fast as this
-            // thread can spin.
             let mut next_frame_due = std::time::Instant::now();
             let frame_interval = std::time::Duration::from_micros(16_666);
             let mut last_logged: Option<(u16, u16)> = None;
-            // SCSP's onboard M68000: owned by this thread since it's already
-            // the VDP1/VDP2/SCSP core. `m68k_control_c3` (flipped by Core 0's
-            // SNDON/SNDOFF handling) says whether it should currently be
-            // running; `was_running` detects the off->on edge so `reset()`
-            // (real SNDON semantics: `M68KStart` -> `M68K->Reset()`) fires
-            // exactly once per SNDON, not every loop iteration.
-            let mut m68k = m68k::M68k::new(work_ram_c3.clone());
-            m68k.sound_req_irq = Some(sound_req_irq_c3);
-            // Real wall-clock M68K throttle (see `crate::throttle`). `M68k`
-            // itself doesn't track cycles at all (no per-opcode timing
-            // model, unlike `Sh2`'s flat +2/instruction) -- charges a flat
-            // nominal cycle cost per `step()` call instead, the same
-            // simplification tier already accepted for the SH-2.
-            let mut m68k_throttle = crate::throttle::ClockThrottle::new(
-                crate::throttle::M68K_CLOCK_HZ,
-                speed_c3,
-            );
-            let mut was_running = false;
-            // Real hardware issues SNDON only after the SH-2 has finished
-            // uploading the sound driver into Sound RAM. Core 0 executes
-            // SH-2 instructions in strict program order on its own thread,
-            // so every Sound RAM write the upload routine makes necessarily
-            // completes before the COMREG=0x06 write that flips this flag --
-            // the data is always ready by the time SNDON fires. The gap was
-            // never timing; it was that `m68k_control` used to be
-            // `Ordering::Relaxed` on both ends, which gives no cross-thread
-            // visibility guarantee beyond the bool's own atomicity. A wall-
-            // clock debounce used to stand in here on the theory that more
-            // writes might still be arriving after SNDON -- disproved live
-            // (see `.development/current_blocker.md`: the Sound RAM image at
-            // reset time was byte-for-byte identical with and without the
-            // debounce). The actual fix is `Ordering::Release` on the SNDON/
-            // SNDOFF stores (`Sh2::smpc_execute_command`) paired with
-            // `Ordering::Acquire` on the load below -- the same publish/
-            // observe pair `BusArbiter::lock_for_dma`/`is_locked` already
-            // uses for `locked_by_dma` -- which *guarantees* this thread
-            // observes every Sound RAM write that preceded the flag flip,
-            // not just "usually does in practice." Removing the debounce is
-            // not expected to change the current M68K driver self-
-            // corruption wall (see `current_blocker.md`); that's a separate,
-            // already-tracked bug in the SH-2 upload logic itself.
             while !shutdown_c3.load(Ordering::Relaxed) {
                 if sync_c3.is_shutdown() {
                     break;
                 }
-                let should_run = m68k_control_c3.load(Ordering::Acquire);
-                if should_run && !was_running {
-                    m68k.reset();
-                    if std::env::var("MIMAS_DEBUG_M68K").is_ok() {
-                        let ram = work_ram_c3.sound_ram.read().unwrap();
-                        eprintln!(
-                            "[M68K] reset: SP={:#010X} PC={:#010X} first16={:02X?}",
-                            m68k.a[7], m68k.pc,
-                            &ram[0..16]
-                        );
-                    }
-                } else if !should_run && was_running {
-                    m68k.stop();
-                }
-                was_running = should_run;
-                if should_run {
-                    // Bounded per-iteration step count, same as before --
-                    // this thread also paces VDP2 frames and yields every
-                    // loop. Real clock-accurate pacing now comes from
-                    // `m68k_throttle.advance()` below, not from this count;
-                    // 200 just keeps this outer loop's own cadence
-                    // reasonable (comparable to before), independent of
-                    // whatever the throttle's internal batch size works
-                    // out to.
-                    for _ in 0..200 {
-                        m68k.step();
-                        m68k_throttle.advance(crate::throttle::M68K_NOMINAL_CYCLES_PER_INSTRUCTION);
-                    }
-                }
                 let now = std::time::Instant::now();
                 if now >= next_frame_due {
+                    crate::vdp::execute_vdp1(&work_ram_c3);
                     let frame = crate::vdp::render_backdrop(&work_ram_c3);
                     if std::env::var("MIMAS_DEBUG_VDP2").is_ok() {
-                        // One held guard for both register pairs below --
-                        // `vdp2_regs` is its own lock now, and a Core 0
-                        // write landing between two separate acquisitions
-                        // here would log a torn TVMD/BKTAL pair.
                         let regs = work_ram_c3.vdp2_regs.read().unwrap();
                         let tvmd = u16::from_be_bytes([regs[0], regs[1]]);
                         let bktal = u16::from_be_bytes([regs[0xAE], regs[0xAF]]);
@@ -332,12 +238,133 @@ impl SaturnSystem {
                     vdp2_frame.store(Arc::new(frame));
                     next_frame_due = now + frame_interval;
                 }
-                cycles = cycles.wrapping_add(2);
+                let step = (sync_c3.slack_limit() / 2).max(2).min(500);
+                cycles = cycles.wrapping_add(step);
                 sync_c3.sync_core(3, cycles);
                 thread::yield_now();
             }
-        }).expect("failed to spawn Core 3 (VDP1/VDP2/SCSP/M68K) thread");
+        }).expect("failed to spawn Core 3 (VDP2 Compositor) thread");
         self.handles.push(handle_c3);
+
+        // Spawn Core 4: MC68000 Sound CPU.
+        let shutdown_c4 = shutdown.clone();
+        let sync_c4 = sync.clone();
+        let arbiter_c4 = arbiter.clone();
+        let work_ram_c4 = work_ram.clone();
+        let m68k_control_c4 = self.m68k_control.clone();
+        let sound_req_irq_c4 = self.sound_req_irq.clone();
+        let speed_c4 = self.speed.clone();
+        let handle_c4 = thread::Builder::new().name("m68k-sound-cpu".into()).spawn(move || {
+            let _guard = PanicGuard::new(sync_c4.clone(), arbiter_c4);
+            let mut cycles = 0u64;
+            let mut m68k = m68k::M68k::new(work_ram_c4.clone());
+            m68k.sound_req_irq = Some(sound_req_irq_c4);
+            let mut m68k_throttle = crate::throttle::ClockThrottle::new(
+                crate::throttle::M68K_CLOCK_HZ,
+                speed_c4,
+            );
+            let mut was_running = false;
+            while !shutdown_c4.load(Ordering::Relaxed) {
+                if sync_c4.is_shutdown() {
+                    break;
+                }
+                let should_run = m68k_control_c4.load(Ordering::Acquire);
+                if should_run && !was_running {
+                    m68k.reset();
+                    if std::env::var("MIMAS_DEBUG_M68K").is_ok() {
+                        let ram = work_ram_c4.sound_ram.read().unwrap();
+                        eprintln!(
+                            "[M68K] reset: SP={:#010X} PC={:#010X} first16={:02X?}",
+                            m68k.a[7], m68k.pc,
+                            &ram[0..16]
+                        );
+                    }
+                } else if !should_run && was_running {
+                    m68k.stop();
+                }
+                was_running = should_run;
+                if should_run {
+                    for _ in 0..200 {
+                        m68k.step();
+                        m68k_throttle.advance(crate::throttle::M68K_NOMINAL_CYCLES_PER_INSTRUCTION);
+                    }
+                }
+                cycles = cycles.wrapping_add(2);
+                sync_c4.sync_core(4, cycles);
+                thread::yield_now();
+            }
+        }).expect("failed to spawn Core 4 (MC68000 Sound CPU) thread");
+        self.handles.push(handle_c4);
+
+        // Spawn Core 5: SCSP Sound Synthesizer.
+        let sync_c5 = sync.clone();
+        let arbiter_c5 = arbiter.clone();
+        let shutdown_c5 = shutdown.clone();
+        let work_ram_c5 = work_ram.clone();
+        let scsp_c5 = self.scsp.clone();
+        let handle_c5 = thread::Builder::new().name("scsp-synth".into()).spawn(move || {
+            let _guard = PanicGuard::new(sync_c5.clone(), arbiter_c5);
+            let mut cycles = 0u64;
+            while !shutdown_c5.load(Ordering::Relaxed) {
+                if sync_c5.is_shutdown() {
+                    break;
+                }
+                // Synthesize 128 audio samples per step
+                scsp_c5.lock().unwrap().synthesize(&work_ram_c5, 128);
+                let step = (sync_c5.slack_limit() / 2).max(2).min(500);
+                cycles = cycles.wrapping_add(step);
+                sync_c5.sync_core(5, cycles);
+                thread::yield_now();
+            }
+        }).expect("failed to spawn Core 5 (SCSP Sound Synthesizer) thread");
+        self.handles.push(handle_c5);
+
+        // Spawn Core 6: SCU DMA/DSP Thread.
+        let sync_c6 = sync.clone();
+        let arbiter_c6 = arbiter.clone();
+        let work_ram_c6 = work_ram.clone();
+        let scu_dsp_c6 = self.scu_dsp.clone();
+        let handle_c6 = thread::Builder::new().name("scu-dma-dsp".into()).spawn(move || {
+            let _guard = PanicGuard::new(sync_c6.clone(), arbiter_c6);
+            sync_c6.set_thread_active(6, false);
+            let mut cycles = 0u64;
+            loop {
+                if !sync_c6.park_while_inactive(6) {
+                    return;
+                }
+                while scu_dsp_c6.lock().unwrap().is_executing() {
+                    if sync_c6.is_shutdown() {
+                        return;
+                    }
+                    scu_dsp_c6.lock().unwrap().step(&work_ram_c6);
+                    let step = (sync_c6.slack_limit() / 2).max(2).min(500);
+                    cycles = cycles.wrapping_add(step);
+                    sync_c6.sync_core(6, cycles);
+                    thread::yield_now();
+                }
+                sync_c6.set_thread_active(6, false);
+            }
+        }).expect("failed to spawn Core 6 (SCU DMA/DSP) thread");
+        self.handles.push(handle_c6);
+
+        // Spawn Core 7: SMPC & CD-ROM Thread.
+        let sync_c7 = sync.clone();
+        let arbiter_c7 = arbiter.clone();
+        let shutdown_c7 = shutdown.clone();
+        let handle_c7 = thread::Builder::new().name("smpc-cd-block".into()).spawn(move || {
+            let _guard = PanicGuard::new(sync_c7.clone(), arbiter_c7);
+            let mut cycles = 0u64;
+            while !shutdown_c7.load(Ordering::Relaxed) {
+                if sync_c7.is_shutdown() {
+                    break;
+                }
+                let step = (sync_c7.slack_limit() / 2).max(2).min(500);
+                cycles = cycles.wrapping_add(step);
+                sync_c7.sync_core(7, cycles);
+                thread::yield_now();
+            }
+        }).expect("failed to spawn Core 7 (SMPC & CD-ROM) thread");
+        self.handles.push(handle_c7);
     }
 
     pub fn shutdown(&mut self) {

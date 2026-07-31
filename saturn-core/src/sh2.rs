@@ -32,6 +32,7 @@ enum MemRegion {
     Vdp2Regs(usize),
     ScuRegs(usize),
     Cs2Regs(usize),
+    OnChip(usize),
     Unmapped,
 }
 
@@ -160,6 +161,22 @@ pub struct Sh2 {
     /// `crate::scu_dsp` for why a real DSP interpreter was needed (a boot
     /// wait loop polling the Program Control Port's `EX` bit).
     pub scu_dsp: Option<Arc<std::sync::Mutex<crate::scu_dsp::ScuDsp>>>,
+    /// The real SMPC command processor, shared with whatever else needs to
+    /// reach it (`SaturnSystem` wires this up in `lib.rs`). `None` in plain
+    /// unit tests -- COMREG writes then fall through to the old inline
+    /// `smpc_execute_command`, so every existing bare-`Sh2` test keeps
+    /// working unchanged. See `crate::smpc` and
+    /// `docs/implementation-plans/smpc-peripheral.md` Phase 0.
+    pub smpc: Option<Arc<std::sync::Mutex<crate::smpc::Smpc>>>,
+    // On-chip Division Unit registers
+    pub dvsr: u32,
+    pub dvdnt: u32,
+    pub dvcr: u32,
+    pub vcrdiv: u32,
+    pub dvdnth: u32,
+    pub dvdntl: u32,
+    pub dvdntuh: u32,
+    pub dvdntul: u32,
 }
 
 // SR bit positions actually used by this subset of the ISA. Layout (T, S,
@@ -277,6 +294,15 @@ impl Sh2 {
             sound_req_irq: None,
             speed: None,
             scu_dsp: None,
+            smpc: None,
+            dvsr: 0,
+            dvdnt: 0,
+            dvcr: 0,
+            vcrdiv: 0,
+            dvdnth: 0,
+            dvdntl: 0,
+            dvdntuh: 0,
+            dvdntul: 0,
         }
     }
 
@@ -307,9 +333,20 @@ impl Sh2 {
         self.sr = 0x0000_00F0;
         self.illegal_instruction_flag = false;
         self.unaligned_access_flag = false;
+        self.dvsr = 0;
+        self.dvdnt = 0;
+        self.dvcr = 0;
+        self.vcrdiv = 0;
+        self.dvdnth = 0;
+        self.dvdntl = 0;
+        self.dvdntuh = 0;
+        self.dvdntul = 0;
     }
 
     fn translate(&self, address: u32) -> MemRegion {
+        if address >= 0xFFFF_FE00 {
+            return MemRegion::OnChip((address & 0x1FF) as usize);
+        }
         // Strip the SH-2 cache-control/partition bits (bit 29 selects the
         // "cache-through" mirror of the same physical space) -- we don't
         // model cache timing, so both mirrors resolve to the same data.
@@ -387,8 +424,7 @@ impl Sh2 {
                 ram[off & (ram.len() - 1)]
             }
             MemRegion::HighRam(off) => {
-                let ram = self.work_ram.high_ram.read().unwrap();
-                ram[off & (ram.len() - 1)]
+                self.work_ram.read_high_ram_byte(off)
             }
             MemRegion::SoundRam(off) => {
                 let ram = self.work_ram.sound_ram.read().unwrap();
@@ -447,16 +483,24 @@ impl Sh2 {
                 ram[off & (ram.len() - 1)]
             }
             // SF (offset 0x63): the busy/idle Status Flag. Real hardware
-            // sets it to 1 when a command is written to COMREG and clears
-            // it back to 0 once the SMPC finishes executing that command.
-            // Commands complete "instantly" from the CPU's point of view
-            // (see `smpc_execute_command`) -- SF reads idle (0)
-            // unconditionally. This is what actually unblocks the BIOS's
-            // real "wait for SMPC" handshake loops; returning a constant
-            // nonzero byte here (as the earlier code did) has bit 0
-            // permanently set, which looks like "busy forever" and hangs the
-            // boot sequence indefinitely.
-            MemRegion::Smpc(off) if off == SMPC_SF_OFFSET => 0x00,
+            // sets it to 1 when the CPU writes a command to COMREG and
+            // clears it back to 0 once the SMPC finishes executing that
+            // command -- `Smpc::execute_command` does exactly that
+            // unconditionally at the end, since commands complete
+            // "instantly" from the CPU's point of view. When a real `Smpc`
+            // is wired in, the read folds that stored bit into `bustmp`
+            // (`Smpc::read_sf`, see
+            // `docs/hardware-reference/smpc-peripheral.md` §1.3); the bare
+            // `0x00` fallback below is only for plain unit tests that never
+            // wired one in (pre-Phase-0 test compatibility, see
+            // `docs/implementation-plans/smpc-peripheral.md` Phase 0/1).
+            MemRegion::Smpc(off) if off == SMPC_SF_OFFSET => {
+                if let Some(smpc) = self.smpc.clone() {
+                    smpc.lock().unwrap().read_sf(&self.work_ram)
+                } else {
+                    0x00
+                }
+            }
             // Every other SMPC register (OREG/IREG/SR/PDR/DDR/IOSEL and
             // friends): real, persisted storage -- `smpc_execute_command`
             // populates OREG with genuine INTBACK response data on command
@@ -467,7 +511,7 @@ impl Sh2 {
                 let ram = self.work_ram.smpc_regs.read().unwrap();
                 ram[off & (ram.len() - 1)]
             }
-            MemRegion::Unmapped => 0,
+            MemRegion::Unmapped | MemRegion::OnChip(_) => 0,
         }
     }
 
@@ -484,9 +528,7 @@ impl Sh2 {
                 ram[off & mask] = val;
             }
             MemRegion::HighRam(off) => {
-                let mut ram = self.work_ram.high_ram.write().unwrap();
-                let mask = ram.len() - 1;
-                ram[off & mask] = val;
+                self.work_ram.write_high_ram_byte(off, val);
             }
             MemRegion::SoundRam(off) => {
                 let mut ram = self.work_ram.sound_ram.write().unwrap();
@@ -534,9 +576,14 @@ impl Sh2 {
                 ram[off & mask] = val;
             }
             MemRegion::Cs2Regs(off) => {
-                let mut ram = self.work_ram.cs2_regs.write().unwrap();
-                let mask = ram.len() - 1;
-                ram[off & mask] = val;
+                {
+                    let mut ram = self.work_ram.cs2_regs.write().unwrap();
+                    let mask = ram.len() - 1;
+                    ram[off & mask] = val;
+                }
+                if off == 6 || off == 7 {
+                    self.execute_cdrom_command();
+                }
             }
             MemRegion::BackupRam(off) => {
                 let mut ram = self.work_ram.backup_ram.write().unwrap();
@@ -554,12 +601,23 @@ impl Sh2 {
                     let mask = ram.len() - 1;
                     ram[off & mask] = val;
                 }
+                if let Some(smpc) = self.smpc.clone() {
+                    // §1.3: every SMPC byte write latches `bustmp` (except SF
+                    // itself, which has its own dedicated write semantics --
+                    // see `Smpc::on_register_write`'s doc comment).
+                    smpc.lock().unwrap().on_register_write(off, val);
+                }
                 if off == SMPC_COMREG_OFFSET {
-                    self.smpc_execute_command(val);
+                    if let Some(smpc) = self.smpc.clone() {
+                        let effects = smpc.lock().unwrap().execute_command(val, &self.work_ram);
+                        self.apply_smpc_effects(effects);
+                    } else {
+                        self.smpc_execute_command(val);
+                    }
                 }
             }
             // BIOS is ROM: writes are silently discarded, matching real hardware.
-            MemRegion::Bios(_) | MemRegion::Unmapped => {}
+            MemRegion::Bios(_) | MemRegion::Unmapped | MemRegion::OnChip(_) => {}
         }
     }
 
@@ -610,10 +668,14 @@ impl Sh2 {
             self.unaligned_access_flag = true;
         }
         self.bus_wait();
-        if let MemRegion::ScuRegs(off) = self.translate(address) {
+        let region = self.translate(address);
+        if let MemRegion::ScuRegs(off) = region {
             if let Some(val) = self.read_scu_dsp_port(off) {
                 return val;
             }
+        }
+        if let MemRegion::OnChip(off) = region {
+            return self.read_onchip(off);
         }
         let b0 = self.raw_read_byte(address) as u32;
         let b1 = self.raw_read_byte(address.wrapping_add(1)) as u32;
@@ -631,10 +693,39 @@ impl Sh2 {
         if address <= 0x0600_1000 && address + 4 > 0x0600_1000 {
             self.cdrom_command_executed = true;
         }
-        if let MemRegion::ScuRegs(off) = self.translate(address) {
+        let region = self.translate(address);
+        if let MemRegion::ScuRegs(off) = region {
             if self.write_scu_dsp_port(off, val) {
                 return;
             }
+            {
+                let mut ram = self.work_ram.scu_regs.write().unwrap();
+                let bytes = val.to_be_bytes();
+                if off + 3 < ram.len() {
+                    ram[off] = bytes[0];
+                    ram[off + 1] = bytes[1];
+                    ram[off + 2] = bytes[2];
+                    ram[off + 3] = bytes[3];
+                }
+            }
+            if off == 0x10 {
+                if val & 1 != 0 {
+                    self.execute_scu_dma(0);
+                }
+            } else if off == 0x30 {
+                if val & 1 != 0 {
+                    self.execute_scu_dma(1);
+                }
+            } else if off == 0x50 {
+                if val & 1 != 0 {
+                    self.execute_scu_dma(2);
+                }
+            }
+            return;
+        }
+        if let MemRegion::OnChip(off) = region {
+            self.write_onchip(off, val);
+            return;
         }
         self.raw_write_byte(address, (val >> 24) as u8);
         self.raw_write_byte(address.wrapping_add(1), (val >> 16) as u8);
@@ -667,7 +758,7 @@ impl Sh2 {
                 dsp.lock().unwrap().write_control_port(val);
                 if let Some(ref sync) = self.sync {
                     if val & 0x0001_0000 != 0 {
-                        sync.set_thread_active(2, true);
+                        sync.set_thread_active(6, true);
                     }
                 }
                 true
@@ -737,9 +828,48 @@ impl Sh2 {
         self.vblank_out_pending = true;
     }
 
-    /// Execute an SMPC command the instant COMREG is written, matching the
-    /// "completes instantly" simplification already used for SF (see the
-    /// read-side comment on `MemRegion::Smpc`).
+    /// Apply the side effects `Smpc::execute_command` reported, exactly
+    /// mirroring what the old inline `smpc_execute_command` below did for
+    /// each case -- see `docs/implementation-plans/smpc-peripheral.md`
+    /// Phase 0's "Lock order ... never call back into `Sh2`" rule: this runs
+    /// after the `Smpc` mutex has already been released by the caller.
+    fn apply_smpc_effects(&mut self, effects: crate::smpc::SmpcEffects) {
+        if effects.start_slave {
+            if let Some(ref sync) = self.sync {
+                sync.set_thread_active(1, true);
+            }
+        }
+        if effects.stop_slave {
+            if let Some(ref sync) = self.sync {
+                sync.set_thread_active(1, false);
+            }
+        }
+        if effects.sound_on {
+            if let Some(ref flag) = self.m68k_control {
+                // Release: publishes every Sound RAM write this thread made
+                // before this point (the uploaded driver) to Core 3's
+                // subsequent Acquire load -- see `m68k_control`'s field doc
+                // comment.
+                flag.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+        if effects.sound_off {
+            if let Some(ref flag) = self.m68k_control {
+                flag.store(false, std::sync::atomic::Ordering::Release);
+            }
+        }
+        if effects.system_manager_irq {
+            self.smpc_irq_pending = true;
+        }
+    }
+
+    /// Fallback SMPC command path used only when `self.smpc` is `None` (bare
+    /// `Sh2` unit tests that never had a real `Smpc` wired in) -- real,
+    /// wired-up systems go through `Smpc::execute_command` +
+    /// `apply_smpc_effects` above instead. Kept byte-for-byte identical to
+    /// before the Phase 0 extraction so every such test keeps passing
+    /// unchanged. Matches the "completes instantly" simplification already
+    /// used for SF (see the read-side comment on `MemRegion::Smpc`).
     ///
     /// INTBACK is real -- it's the command real BIOS boot code depends on to
     /// learn system status and proceed past its startup handshake (confirmed
@@ -760,6 +890,18 @@ impl Sh2 {
     /// forward progress and are accepted as already-complete no-ops -- SF
     /// already always reads idle regardless of command.
     fn smpc_execute_command(&mut self, command: u8) {
+        if command == 0x02 { // SSHON
+            if let Some(ref sync) = self.sync {
+                sync.set_thread_active(1, true);
+            }
+            return;
+        }
+        if command == 0x03 { // SSHOFF
+            if let Some(ref sync) = self.sync {
+                sync.set_thread_active(1, false);
+            }
+            return;
+        }
         if command == SMPC_CMD_SNDON {
             if let Some(ref flag) = self.m68k_control {
                 // Release: publishes every Sound RAM write this thread made
@@ -796,7 +938,12 @@ impl Sh2 {
         ram[SMPC_OREG_BASE_OFFSET + 9 * 2] = 1; // region: Japan fallback
         ram[SMPC_OREG_BASE_OFFSET + 10 * 2] = 0x34; // dotsel/mshnmi/sysres/sndres = 0
         ram[SMPC_OREG_BASE_OFFSET + 11 * 2] = 0; // cdres = 0
-        ram[SMPC_SR_OFFSET] = 0x4F | ((wants_peripheral as u8) << 5);
+        // PDE (bit 5) must be 1 when the command finishes, because peripheral
+        // data collection is complete (either we didn't request any, or we did
+        // and it completed instantly). Real BIOS boot code polls PDE waiting
+        // for it to be 1, so leaving it 0 when wants_peripheral is false hangs
+        // the boot loop at 0x338C.
+        ram[SMPC_SR_OFFSET] = 0x6F;
         drop(ram);
 
         // Real hardware fires the System Manager interrupt when the command
@@ -1372,6 +1519,223 @@ impl Sh2 {
         // the wall, decode, cross-check Yabause, implement, test).
     }
 
+    fn read_onchip(&self, off: usize) -> u32 {
+        match off {
+            0x100 | 0x120 => self.dvsr,
+            0x104 | 0x124 => self.dvdntl,
+            0x108 | 0x128 => self.dvcr,
+            0x10C | 0x12C => self.vcrdiv,
+            0x110 | 0x130 => self.dvdnth,
+            0x114 | 0x134 => self.dvdntl,
+            0x118 | 0x138 => self.dvdntuh,
+            0x11C | 0x13C => self.dvdntul,
+            _ => 0,
+        }
+    }
+
+    fn write_onchip(&mut self, off: usize, val: u32) {
+        match off {
+            0x100 | 0x120 => {
+                self.dvsr = val;
+            }
+            0x104 | 0x124 => {
+                let divisor = self.dvsr as i32;
+                let dividend = val as i32;
+                if divisor == 0 {
+                    if dividend < 0 {
+                        self.dvdntl = 0x80000000;
+                        self.dvdnth = 0xFFFFFFFC | ((val >> 29) & 3);
+                    } else {
+                        self.dvdntl = 0x7FFFFFFF;
+                        self.dvdnth = val >> 29;
+                    }
+                    self.dvdntul = self.dvdntl;
+                    self.dvdntuh = self.dvdnth;
+                    self.dvcr |= 1;
+                } else {
+                    let quotient = dividend / divisor;
+                    let remainder = dividend % divisor;
+                    self.dvdntl = quotient as u32;
+                    self.dvdntul = quotient as u32;
+                    self.dvdnth = remainder as u32;
+                    self.dvdntuh = remainder as u32;
+                }
+            }
+            0x108 | 0x128 => {
+                self.dvcr = val & 3;
+            }
+            0x10C | 0x12C => {
+                self.vcrdiv = val & 0xFFFF;
+            }
+            0x110 | 0x130 => {
+                self.dvdnth = val;
+            }
+            0x114 | 0x134 => {
+                let divisor = self.dvsr as i32;
+                let dividend_high = self.dvdnth as i64;
+                let dividend_low = val as i64;
+                let dividend = (dividend_high << 32) | (dividend_low & 0xFFFFFFFF);
+                if divisor == 0 {
+                    if (dividend_high & 0x80000000) != 0 {
+                        self.dvdntl = 0x80000000;
+                        self.dvdnth = (self.dvdnth << 3) as u32;
+                    } else {
+                        self.dvdntl = 0x7FFFFFFF;
+                        self.dvdnth = (self.dvdnth << 3) as u32;
+                    }
+                    self.dvdntul = self.dvdntl;
+                    self.dvdntuh = self.dvdnth;
+                    self.dvcr |= 1;
+                } else {
+                    let quotient = dividend / (divisor as i64);
+                    let remainder = dividend % (divisor as i64);
+                    self.dvdntl = quotient as u32;
+                    self.dvdntul = quotient as u32;
+                    self.dvdnth = remainder as u32;
+                    self.dvdntuh = remainder as u32;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn execute_scu_dma(&mut self, channel: usize) {
+        let base = channel * 0x20;
+        let scu = self.work_ram.scu_regs.read().unwrap();
+        let read_addr = u32::from_be_bytes([scu[base], scu[base+1], scu[base+2], scu[base+3]]);
+        let write_addr = u32::from_be_bytes([scu[base+4], scu[base+5], scu[base+6], scu[base+7]]);
+        let count = u32::from_be_bytes([scu[base+8], scu[base+9], scu[base+10], scu[base+11]]) & 0x00FFFFFF;
+        let add_val = u32::from_be_bytes([scu[base+12], scu[base+13], scu[base+14], scu[base+15]]);
+        let mode = u32::from_be_bytes([scu[base+20], scu[base+21], scu[base+22], scu[base+23]]);
+        drop(scu);
+
+        let indirect = (mode & 0x01_0000) != 0;
+
+        self.arbiter.lock_for_dma();
+
+        if indirect {
+            let mut desc_addr = read_addr;
+            loop {
+                // Read descriptor fields using raw reads to prevent deadlock
+                let size = {
+                    let b0 = self.raw_read_byte(desc_addr) as u32;
+                    let b1 = self.raw_read_byte(desc_addr + 1) as u32;
+                    let b2 = self.raw_read_byte(desc_addr + 2) as u32;
+                    let b3 = self.raw_read_byte(desc_addr + 3) as u32;
+                    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+                };
+                if size == 0 {
+                    break;
+                }
+                let end = (size & 0x80000000) != 0;
+                let len = (size & 0x00FFFFFF) as usize;
+                
+                let dst = {
+                    let b0 = self.raw_read_byte(desc_addr + 4) as u32;
+                    let b1 = self.raw_read_byte(desc_addr + 5) as u32;
+                    let b2 = self.raw_read_byte(desc_addr + 6) as u32;
+                    let b3 = self.raw_read_byte(desc_addr + 7) as u32;
+                    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+                };
+                
+                let src = {
+                    let b0 = self.raw_read_byte(desc_addr + 8) as u32;
+                    let b1 = self.raw_read_byte(desc_addr + 9) as u32;
+                    let b2 = self.raw_read_byte(desc_addr + 10) as u32;
+                    let b3 = self.raw_read_byte(desc_addr + 11) as u32;
+                    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+                };
+
+                for i in 0..len {
+                    let val = self.raw_read_byte(src + i as u32);
+                    self.raw_write_byte(dst + i as u32, val);
+                }
+
+                if end {
+                    break;
+                }
+                desc_addr += 12;
+            }
+        } else {
+            let add_step = match add_val & 7 {
+                0 => 0,
+                1 => 2,
+                2 => 4,
+                3 => 8,
+                4 => 16,
+                5 => 32,
+                6 => 64,
+                7 => 128,
+                _ => 2,
+            };
+            let mut src = read_addr;
+            let mut dst = write_addr;
+            let mut bytes_left = count;
+            while bytes_left > 0 {
+                if bytes_left >= 2 {
+                    let b0 = self.raw_read_byte(src);
+                    let b1 = self.raw_read_byte(src + 1);
+                    self.raw_write_byte(dst, b0);
+                    self.raw_write_byte(dst + 1, b1);
+                    src += 2;
+                    if add_step > 0 {
+                        dst += add_step;
+                    } else {
+                        dst += 2;
+                    }
+                    bytes_left = bytes_left.saturating_sub(2);
+                } else {
+                    let val = self.raw_read_byte(src);
+                    self.raw_write_byte(dst, val);
+                    src += 1;
+                    dst += 1;
+                    bytes_left = bytes_left.saturating_sub(1);
+                }
+            }
+        }
+
+        self.arbiter.unlock_from_dma();
+
+        // Clear EN flag
+        let mut scu = self.work_ram.scu_regs.write().unwrap();
+        scu[base + 0x10] = 0;
+        scu[base + 0x11] = 0;
+        scu[base + 0x12] = 0;
+        scu[base + 0x13] = 0;
+    }
+
+    fn execute_cdrom_command(&mut self) {
+        let (cr1, cr2, cr3, cr4) = {
+            let ram = self.work_ram.cs2_regs.read().unwrap();
+            let c1 = u16::from_be_bytes([ram[0], ram[1]]);
+            let c2 = u16::from_be_bytes([ram[2], ram[3]]);
+            let c3 = u16::from_be_bytes([ram[4], ram[5]]);
+            let c4 = u16::from_be_bytes([ram[6], ram[7]]);
+            (c1, c2, c3, c4)
+        };
+
+        let cmd = (cr1 >> 8) as u8;
+        match cmd {
+            0x00 => { // Get Status
+                let mut ram = self.work_ram.cs2_regs.write().unwrap();
+                // CR1 = 0x0400 (Status: open/closed, busy, etc.)
+                ram[0] = 0x04;
+                ram[1] = 0x00;
+                // HIRQ = 0x0001 (Command completed)
+                ram[8] = 0x00;
+                ram[9] = 0x01;
+            }
+            0x02 => { // Get Play Status
+                let mut ram = self.work_ram.cs2_regs.write().unwrap();
+                ram[0] = 0x04;
+                ram[1] = 0x00;
+                ram[8] = 0x00;
+                ram[9] = 0x01;
+            }
+            _ => {}
+        }
+    }
+
     /// Thread execution entry point
     pub fn run_loop(&mut self, shutdown: Arc<std::sync::atomic::AtomicBool>) {
         let now = std::time::Instant::now();
@@ -1415,7 +1779,11 @@ impl Sh2 {
                 reporter.store(self.pc, std::sync::atomic::Ordering::Relaxed);
             }
             if let Some(ref sync) = self.sync {
-                sync.sync_core(self.core_id, self.cycles);
+                let limit = sync.slack_limit();
+                let batch_mask = if limit > 100 { 0x1F } else if limit > 10 { 0x03 } else { 0x00 };
+                if batch_mask == 0 || (self.cycles & !batch_mask) != (cycles_before & !batch_mask) {
+                    sync.sync_core(self.core_id, self.cycles);
+                }
             }
             std::thread::yield_now();
         }
@@ -1682,7 +2050,7 @@ mod opcode_tests {
         assert_eq!(cpu.read_byte(base + SMPC_OREG_BASE_OFFSET as u32), 0x80, "OREG0: normal startup, resd=0");
         assert_eq!(cpu.read_byte(base + (SMPC_OREG_BASE_OFFSET + 9 * 2) as u32), 0x01, "OREG9: region defaults to Japan");
         assert_eq!(cpu.read_byte(base + (SMPC_OREG_BASE_OFFSET + 10 * 2) as u32), 0x34, "OREG10: flags all clear");
-        assert_eq!(cpu.read_byte(base + SMPC_SR_OFFSET as u32), 0x4F, "SR: no peripheral data requested (IREG1 bit3 unset)");
+        assert_eq!(cpu.read_byte(base + SMPC_SR_OFFSET as u32), 0x6F, "SR: no peripheral data requested (IREG1 bit3 unset)");
         assert!(cpu.smpc_irq_pending, "INTBACK completion must raise the System Manager interrupt");
 
         // Servicing it must jump through VBR + vector*4 at the documented
@@ -2008,5 +2376,68 @@ mod opcode_tests {
         let mut cpu = make_cpu();
         assert_eq!(cpu.read_byte(0x0010_0063), 0x00); // SF at the window's start
         assert_eq!(cpu.read_byte(0x0017_0063), 0x00); // same offset, mirrored deep in the window
+    }
+
+    #[test]
+    fn test_onchip_division() {
+        let mut cpu = make_cpu();
+        // 32-bit / 32-bit division: 100 / 3
+        cpu.write_long(0xFFFFFF00, 3); // DVSR = 3
+        cpu.write_long(0xFFFFFF04, 100); // DVDNT = 100 -> triggers division
+        assert_eq!(cpu.read_long(0xFFFFFF04), 33); // Quotient DVDNTL = 33
+        assert_eq!(cpu.read_long(0xFFFFFF10), 1);  // Remainder DVDNTH = 1
+
+        // Division by zero
+        cpu.write_long(0xFFFFFF00, 0); // DVSR = 0
+        cpu.write_long(0xFFFFFF04, 100); // DVDNT = 100 -> triggers division by zero
+        assert_eq!(cpu.read_long(0xFFFFFF08) & 1, 1); // DVCR overflow flag = 1
+
+        // 64-bit / 32-bit division: 0x00000002_00000000 / 4
+        cpu.write_long(0xFFFFFF00, 4); // DVSR = 4
+        cpu.write_long(0xFFFFFF10, 2); // DVDNTH = 2
+        cpu.write_long(0xFFFFFF14, 0); // DVDNTL = 0 -> triggers division
+        assert_eq!(cpu.read_long(0xFFFFFF04), 0x80000000); // Quotient DVDNTL = 0x80000000 (2^31)
+        assert_eq!(cpu.read_long(0xFFFFFF10), 0); // Remainder DVDNTH = 0
+    }
+
+    #[test]
+    fn test_scu_dma_direct() {
+        let mut cpu = make_cpu();
+        // Write source data to Low RAM offset 0 (0x00200000)
+        cpu.write_long(0x00200000, 0x11223344);
+        cpu.write_long(0x00200004, 0x55667788);
+
+        // Configure Channel 0 SCU DMA registers
+        cpu.write_long(0x05FE0000, 0x00200000); // D0R (Read Addr)
+        cpu.write_long(0x05FE0004, 0x00201000); // D0W (Write Addr)
+        cpu.write_long(0x05FE0008, 8);          // D0C (Count = 8 bytes)
+        cpu.write_long(0x05FE000C, 1);          // D0AD (Address increment mode)
+        cpu.write_long(0x05FE0014, 0);          // D0MD (Direct Mode)
+        
+        // Trigger DMA by writing 1 to D0EN
+        cpu.write_long(0x05FE0010, 1);
+
+        // Verify data was copied
+        assert_eq!(cpu.read_long(0x00201000), 0x11223344);
+        assert_eq!(cpu.read_long(0x00201004), 0x55667788);
+        
+        // D0EN register must be cleared automatically
+        assert_eq!(cpu.read_long(0x05FE0010), 0);
+    }
+
+    #[test]
+    fn test_cdrom_handshake() {
+        let mut cpu = make_cpu();
+        
+        // Write CR1 = 0x0000, CR2 = 0x0000, CR3 = 0x0000, CR4 = 0x0000 (Get Status command)
+        cpu.write_word(0x05800000, 0x0000); // CR1
+        cpu.write_word(0x05800002, 0x0000); // CR2
+        cpu.write_word(0x05800004, 0x0000); // CR3
+        cpu.write_word(0x05800006, 0x0000); // CR4 (triggers command)
+        
+        // Verify response CR1 = 0x0400
+        assert_eq!(cpu.read_word(0x05800000), 0x0400);
+        // Verify HIRQ = 0x0001
+        assert_eq!(cpu.read_word(0x05800008), 0x0001);
     }
 }
