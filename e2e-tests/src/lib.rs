@@ -733,7 +733,7 @@ mod tests {
         
         assert_eq!(cpu.cycles, 0);
         cpu.step();
-        assert_eq!(cpu.cycles, 2);
+        assert_eq!(cpu.cycles, 1);
         
         sync.sync_core(0, cpu.cycles);
         sync.sync_core(1, 0);

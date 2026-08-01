@@ -1121,9 +1121,9 @@ essentially every 3D game uses.
 **Unblocks:** the on-chip timer the BIOS uses for delay loops and periodic ticks. Depends
 on Phase 4 (registers) and Phase 5 (interrupts).
 
-- [ ] **P7-1 State.** `frc_leftover: u32` and `frc_shift: u32` on the CPU, reset to `0`
+- [x] **P7-1 State.** `frc_leftover: u32` and `frc_shift: u32` on the CPU, reset to `0`
       and `3` (÷8) per HR §4.
-- [ ] **P7-2 Register behaviour** (HR §11.3), exactly:
+- [x] **P7-2 Register behaviour** (HR §11.3), exactly:
       - `TIER` `0x010`: write → `TIER = (val & 0x8E) | 0x1` (bit 0 always forced set).
         Additionally, if `val & 0x80` and `FTCSR & 0x80`, raise the input-capture
         interrupt immediately. Also writable as a **long** at offset `0x010`.
@@ -1141,7 +1141,7 @@ on Phase 4 (registers) and Phase 5 (interrupts).
       - `TOCR` `0x017`: write → `TOCR = 0xE0 | (val & 0x13)`.
       - `FICR` `0x018`/`0x019`: read-only from software; written only by the input-capture
         hook.
-- [ ] **P7-3 `FRTExec(cycles)`** (HR §11.3), exactly:
+- [x] **P7-3 `FRTExec(cycles)`** (HR §11.3), exactly:
       `frcold = FRC; mask = (1 << shift) - 1; frctemp = FRC + ((cycles + leftover) >> shift);`
       `leftover = (cycles + leftover) & mask;`
       then the three **crossing** tests in this order — OCRA (`frctemp >= OCRA && frcold < OCRA`),
@@ -1150,19 +1150,19 @@ on Phase 4 (registers) and Phase 5 (interrupts).
       match, and finally `FRC = frctemp as u16` (truncating). HR notes explicitly that
       the crossing test can *miss* a compare if the counter jumps past OCR in the same
       step it wraps — preserve that, and comment it.
-- [ ] **P7-4 Interrupts** (HR §10.6): OCIA → vector `VCRC & 0x7F`, level `(IPRB & 0xF00) >> 8`,
+- [x] **P7-4 Interrupts** (HR §10.6): OCIA → vector `VCRC & 0x7F`, level `(IPRB & 0xF00) >> 8`,
       gated on `TIER & 0x8`. OCIB → **the same vector field** `VCRC & 0x7F`, same level,
       gated on `TIER & 0x4` (HR §10.6 flags this as possibly wrong and says whether
       hardware has a distinct OCIB vector is not deducible — copy that note). OVI →
       vector `(VCRD >> 8) & 0x7F`, same level, gated on `TIER & 0x2`. ICI → vector
       `(VCRC >> 8) & 0x7F`, level `(IPRB >> 8) & 0xF`, gated on `TIER & 0x80`.
-- [ ] **P7-5 Input capture** (HR §11.3). `pub fn frt_input_capture(&mut self)`:
+- [x] **P7-5 Input capture** (HR §11.3). `pub fn frt_input_capture(&mut self)`:
       `FTCSR |= 0x80; FICR = FRC; if TIER & 0x80 { send(...) }`. Nothing calls it yet
       (it is driven by an external memory-mapped write hook in the reference). **Do not**
       port the SSH2 variant's "run the other CPU for 32 cycles" block — HR §11.3 calls it
       "a synchronisation hack with no hardware counterpart", and it is meaningless in a
       thread-per-core design where the other CPU is already running.
-- [ ] **P7-6 Driving it (A-4).** HR §7 calls `FRTExec(cycles)` once per `SH2Exec` batch,
+- [x] **P7-6 Driving it (A-4).** HR §7 calls `FRTExec(cycles)` once per `SH2Exec` batch,
       **with the requested cycle count, not the retired one** — HR §13 item 9 flags that
       as a deviation. Mimas has no batch entry point; `run_loop` steps one instruction at
       a time (`sh2.rs:1708`). Drive `FRTExec` from `step()` with the **retired** cycle
@@ -1173,30 +1173,30 @@ on Phase 4 (registers) and Phase 5 (interrupts).
 
 ### Phase 7 testing
 
-- [ ] **P7-T1 prescaler.** For each `TCR & 3` value in `{0,1,2,3}`, assert `frc_shift`
+- [x] **P7-T1 prescaler.** For each `TCR & 3` value in `{0,1,2,3}`, assert `frc_shift`
       becomes `{3,5,7,unchanged}` (HR §11.3's table) and that `TCR` reads back
       `val & 0x83`.
-- [ ] **P7-T2 counter advance.** With `frc_shift = 3` and `leftover = 0`, feed exactly
+- [x] **P7-T2 counter advance.** With `frc_shift = 3` and `leftover = 0`, feed exactly
       `8 * k + r` cycles and assert `FRC == k` and `leftover == r` for a few
       hand-computed `(k, r)` pairs. The fractional accumulator is the part an
       implementation gets wrong.
-- [ ] **P7-T3 `FTCSR` write-0-to-clear.** Set `FTCSR = 0x0E` (OCFA|OCFB|OVF) by forcing
+- [x] **P7-T3 `FTCSR` write-0-to-clear.** Set `FTCSR = 0x0E` (OCFA|OCFB|OVF) by forcing
       the flags via a compare, then write `0x0A` and assert the result is `0x0A` — bit 2
       cleared because the written bit was 0, bits 3 and 1 surviving because both the
       stored and written bits were 1. Then write `0x01` and assert `FTCSR == 0x01`. All
       three expected values computed by hand from
       `FTCSR = (FTCSR & (val & 0xFE)) | (val & 0x1)`.
-- [ ] **P7-T4 OCRA/OCRB selector.** With `TOCR & 0x10 == 0`, a word write at `0x014`
+- [x] **P7-T4 OCRA/OCRB selector.** With `TOCR & 0x10 == 0`, a word write at `0x014`
       must land in OCRA and leave OCRB at `0xFFFF`; set bit 4 and repeat for OCRB.
-- [ ] **P7-T5 compare match + CCLRA.** `OCRA = 0x100`, `TIER = 0x08`, `FTCSR = 0x01`;
+- [x] **P7-T5 compare match + CCLRA.** `OCRA = 0x100`, `TIER = 0x08`, `FTCSR = 0x01`;
       advance past 0x100 and assert: an interrupt with vector `VCRC & 0x7F` was queued,
       `FTCSR & 0x8` set, and `FRC` reset to 0 by CCLRA. Then repeat with `FTCSR & 1`
       clear and assert `FRC` kept counting.
-- [ ] **P7-T6 missed-compare deviation.** Construct the case HR warns about — advance by
+- [x] **P7-T6 missed-compare deviation.** Construct the case HR warns about — advance by
       enough cycles in one call to jump from below OCRA past 0xFFFF — and assert the OCRA
       match is **missed** and only OVF is set. A test that asserts a *bug* must say so in
       its name and cite HR §11.3.
-- [ ] **P7-T7 TIER ICI re-arm.** With `FTCSR & 0x80` already set, writing `TIER` with
+- [x] **P7-T7 TIER ICI re-arm.** With `FTCSR & 0x80` already set, writing `TIER` with
       bit 7 must raise the input-capture interrupt immediately (HR §11.3,
       `sh2core.c:1416-1423`).
 
@@ -1207,7 +1207,7 @@ on Phase 4 (registers) and Phase 5 (interrupts).
 **Unblocks:** honest `ClockThrottle` pacing, plausible FRT/WDT/DMAC rates, and a
 `LockStepSync` slack window that means something.
 
-- [ ] **P8-1 Base costs.** Replace the flat `cycles += 2` (`sh2.rs:788`) with a per-handler
+- [x] **P8-1 Base costs.** Replace the flat `cycles += 2` (`sh2.rs:788`) with a per-handler
       charge. Full enumeration from HR §9:
       - **1 cycle:** every §9.1 instruction; every §9.6 shift/rotate; `ADD`, `ADD #imm`,
         `ADDC`, `ADDV`, `SUB`, `SUBC`, `SUBV`, `NEG`, `NEGC`, `DT`, all nine `CMP` forms,
@@ -1241,7 +1241,7 @@ on Phase 4 (registers) and Phase 5 (interrupts).
         meaning, and unlike the semantic deviations they cannot change program results —
         only pacing. Document the choice in one comment listing all six, so a future
         reader knows it was a decision, not an oversight.
-- [ ] **P8-2 Memory wait states** (HR §1.2). Add a `mem_cycles_r(addr) -> u32` /
+- [x] **P8-2 Memory wait states** (HR §1.2). Add a `mem_cycles_r(addr) -> u32` /
       `mem_cycles_w(addr) -> u32` pair keyed on `addr & 0xDFF0_0000`:
       | Region | Read | Write |
       |---|---|---|
@@ -1255,40 +1255,40 @@ on Phase 4 (registers) and Phase 5 (interrupts).
       | anything else | 0 | 0 |
       `getVramCycle` lives outside the SH-2 files — treat it as a constant (document the
       placeholder) until `docs/implementation-plans/vdp2.md` provides it.
-- [ ] **P8-3 Fetch cost.** HR §7's loop charges nothing extra for the fetch itself
+- [x] **P8-3 Fetch cost.** HR §7's loop charges nothing extra for the fetch itself
       beyond what the handler adds; the fetch's own wait state is not modelled in the
       reference either. Match, and note it.
-- [ ] **P8-4 `run_loop` batching (A-5).** `sh2.rs:1716-1720` derives `batch_mask` from
+- [x] **P8-4 `run_loop` batching (A-5).** `sh2.rs:1716-1720` derives `batch_mask` from
       `slack_limit` and compares `cycles & !batch_mask` across a step. With costs now
       ranging 1..~60, a step can jump the whole mask and skip a `sync_core` call, or hit
       it every time. Replace with an explicit accumulator: `pending_sync += delta; if
       pending_sync >= batch { sync_core(...); pending_sync = 0; }`.
-- [ ] **P8-5 `ClockThrottle`.** No change to `throttle.rs`. Once P8-1 lands, delete the
+- [x] **P8-5 `ClockThrottle`.** No change to `throttle.rs`. Once P8-1 lands, delete the
       "an existing, accepted simplification — see `Sh2::step()`" clause from
       `throttle.rs:29-40`'s doc comment (it will no longer be true of the SH-2, only of
       the M68K) and point it at `docs/implementation-plans/scsp.md` for the M68K side.
-- [ ] **P8-6 `bus_wait` interaction.** `bus_wait()` (`sh2.rs:383`) can overwrite
+- [x] **P8-6 `bus_wait` interaction.** `bus_wait()` (`sh2.rs:383`) can overwrite
       `self.cycles` wholesale with `caught_up` from `acquire_bus_sync`. Adding wait-state
       cycles must not be lost across that assignment — audit the ordering, and add a test.
 
 ### Phase 8 testing
 
-- [ ] **P8-T1.** For a representative instruction of each cost class, assert the exact
+- [x] **P8-T1.** For a representative instruction of each cost class, assert the exact
       `cycles` delta across one `step()`. Expected values transcribed from HR §9's Cycles
       column, which is itself the literal expression in the reference — so the source is
       a document, not the code under test.
-- [ ] **P8-T2.** Assert the wait-state table by reading the same instruction (e.g.
+- [x] **P8-T2.** Assert the wait-state table by reading the same instruction (e.g.
       `MOV.L @Rm,Rn`) from each region and comparing deltas: High WRAM (`1 + 0`),
       Low WRAM (`1 + 12`), BIOS (`1 + 16`), Sound RAM (`1 + 50`). The *differences*
       between regions are what the table encodes.
-- [ ] **P8-T3 conditional branch cost.** `BT` taken = 3, not taken = 1; `BT/S` taken = 2
+- [x] **P8-T3 conditional branch cost.** `BT` taken = 3, not taken = 1; `BT/S` taken = 2
       + delay-slot cost, not taken = 1 (HR §9.7). The taken/not-taken asymmetry is a
       common miss.
-- [ ] **P8-T4 breakage.** `e2e-tests`'s `test_tier3_combination_f1_f3_lockstep_cpu_stepping`
+- [x] **P8-T4 breakage.** `e2e-tests`'s `test_tier3_combination_f1_f3_lockstep_cpu_stepping`
       asserts `cpu.cycles == 2` after one `step()` of opcode `0x0000`. After P3-1 that
       opcode raises an exception (1 cycle) and after P8-1 nothing costs a flat 2. Rewrite
       it around a `NOP` and the documented 1-cycle cost, in the same commit.
-- [ ] **P8-T5 throttle end-to-end.** With `ThrottleSpeed::Multiplier(1.0)`, run a tight
+- [x] **P8-T5 throttle end-to-end.** With `ThrottleSpeed::Multiplier(1.0)`, run a tight
       known loop (e.g. 1000 iterations of `DT`+`BF`) and assert wall time lands within a
       wide band of `cycles / SH2_CLOCK_HZ`. Wide, because this is a smoke test that the
       units line up, not a precision measurement — `throttle.rs`'s own tests already
@@ -1298,40 +1298,51 @@ on Phase 4 (registers) and Phase 5 (interrupts).
 
 ## Phase 9 — On-chip DMA controller (DMAC)
 
+**Status:** done — see `history.md` Chapter 15.
+
 **Unblocks:** game compatibility. Not believed to be on the BIOS boot path. Depends on
 Phases 4, 5, 8.
 
-- [ ] **P9-1 Registers** (HR §11.8). `SAR0`/`DAR0` raw; `TCR0 = val & 0xFFFFFF`;
+- [x] **P9-1 Registers** (HR §11.8). `SAR0`/`DAR0` raw; `TCR0 = val & 0xFFFFFF`;
       `CHCR0`; `SAR1`/`DAR1`/`TCR1`/`CHCR1`; `VCRDMA0`/`VCRDMA1 = val & 0xFFFF` (used
       **unmasked** when sending the interrupt); `DMAOR = val & 0xF`.
-- [ ] **P9-2 `CHCR` write protocol** (HR §11.8): if `TCRn != 0`, flush any in-flight
+- [x] **P9-2 `CHCR` write protocol** (HR §11.8): if `TCRn != 0`, flush any in-flight
       transfer first (`DMAProc(0x7FFFFFFF)`); then `CHCRn = val & 0xFFFF`; then
       `CHCRn = (val & !2) | (CHCRn & (val | CHCRnM) & 2)` — TE (bit 1) is write-0-to-clear
       through a shadow register `CHCRnM`; then arm if `(DMAOR & 7) == 1` (DME set, NMIF
       clear, AE clear) and DE set with TE clear. HR notes the channel-0 arm test uses the
       raw `val & 3` while channel 1 uses `CHCR1 & 3` — an inconsistency in the reference;
-      pick one, note it.
-- [ ] **P9-3 `CHCR` read side effect.** Reading `CHCR0`/`CHCR1` clears the corresponding
-      `CHCRnM` shadow to 0 (HR §11.8).
-- [ ] **P9-4 `CHCR` bit fields** (HR §11.8): bit 0 DE; bit 1 TE; bit 2 IE; bit 3
+      pick one, note it. **Implemented as documented**: channel 0 arms on the raw written
+      `val & 3`, channel 1 arms on `new_CHCR1 & 3` (`sh2.rs:3465`/`:3484`) — matches the
+      reference's own inconsistency rather than papering over it.
+- [x] **P9-3 `CHCR` read side effect.** Reading `CHCR0`/`CHCR1` clears the corresponding
+      `CHCRnM` shadow to 0 (HR §11.8). Implemented in the 32-bit `read_onchip` path
+      (`sh2.rs:3301`/`:3309`, via `Cell<u32>` shadows so the clear can happen through `&self`).
+- [x] **P9-4 `CHCR` bit fields** (HR §11.8): bit 0 DE; bit 1 TE; bit 2 IE; bit 3
       "dual channel" (**clear** doubles the cycle budget); bits 11-10 transfer size
       (`0` byte, `1` word, `2` longword, `3` 16-byte burst implemented as longwords at a
       quarter cost); bits 13-12 source address mode (`0` fixed, `1` increment, `2`
       decrement, `3` treated as fixed); bits 15-14 destination address mode (`0` fixed,
       `1` increment, `2` decrement, `3` treated as fixed).
-- [ ] **P9-5 Budgeted transfer engine.** `DMAExec()` = `DMAProc(200)`. `DMAProc(cycles)`
+- [x] **P9-5 Budgeted transfer engine.** `DMAExec()` = `DMAProc(200)`. `DMAProc(cycles)`
       checks `DMAOR & 0x6` (AE/NMIF abort), picks channels per `DMAOR & 0x8`
       (round-robin vs channel-0 priority), applies the dual-channel doubling, then
       `DMATransferCycles`. That accumulates `copy_clock += cycles` and moves one unit per
       `eat` cycles, where `eat = getEatClock(SAR, DAR)` is HR §11.8's full source×dest
       latency table (CS2 source → 1; VDP2-RAM source → 44/50/427/1/50/44; VDP1-RAM source
       → 50/570/225/44; everything else → 14/20/30/82/14). Port the table verbatim.
-- [ ] **P9-6 Completion.** On `TCR <= 0`: if `CHCR & 0x4`, send `VCRDMA` (unmasked) at
+      **Note:** arming a channel (the DE/DME transition, `sh2.rs:3476`/`:3494`/`:3512`)
+      synchronously calls `DMAExec()` = a free 200-cycle burst, exactly as the reference
+      does (`sh2core.c:2140`) — this surprised the initial P9-T5 test (see Chapter 15) but
+      is real, faithfully-ported behavior, not a bug.
+- [x] **P9-6 Completion.** On `TCR <= 0`: if `CHCR & 0x4`, send `VCRDMA` (unmasked) at
       level `(IPRA & 0xF00) >> 8`; set `CHCR |= 2` and `CHCRM |= 2`.
-- [ ] **P9-7 Cache bypass.** HR §11.8: all DMAC memory access goes through the `…Nocache`
+- [x] **P9-7 Cache bypass.** HR §11.8: all DMAC memory access goes through the `…Nocache`
       accessors, so DMA neither hits nor invalidates cache lines. Relevant once Phase 11
-      lands — write it down now.
-- [ ] **P9-8 Architecture (A-6).** This is a **third** DMA engine alongside the SCU DSP's
+      lands — write it down now. Satisfied trivially today: `dma_transfer_cycles` uses
+      `raw_read_*`/`raw_write_*` (`sh2.rs:2097`-`2106`), which don't touch the (still
+      stub-level, pre-Phase-11) cache model at all.
+- [x] **P9-8 Architecture (A-6).** This is a **third** DMA engine alongside the SCU DSP's
       2-of-8 addressing modes (`scu_dsp.rs`) and `Sh2::execute_scu_dma` (`sh2.rs:1536`).
       Two hard constraints:
       (i) it must take `BusArbiter::lock_for_dma()` for the transfer, exactly as
@@ -1342,29 +1353,37 @@ Phases 4, 5, 8.
       this and says why (`sh2.rs:1553`); mirror it.
       Do **not** give the DMAC its own thread. It is on-chip SH-2 silicon and belongs to
       the core that owns it; the thread-per-component model maps threads to chips, and the
-      SH-2 is one chip.
-- [ ] **P9-9.** Do **not** port `DMATransfer()` (the legacy instantaneous engine) — HR
-      §11.8 says it is unreachable (`OLD_DMA` is 0).
+      SH-2 is one chip. Confirmed: `dma_transfer_cycles` takes/releases the arbiter lock
+      around the transfer loop (`sh2.rs:2090`-`2142`) and runs inline from `step()`
+      (`sh2.rs:2179`), no dedicated thread.
+- [x] **P9-9.** Do **not** port `DMATransfer()` (the legacy instantaneous engine) — HR
+      §11.8 says it is unreachable (`OLD_DMA` is 0). Confirmed absent from `sh2.rs`.
 
 ### Phase 9 testing
 
-- [ ] **P9-T1.** For each of the 3 usable source-address modes × 3 destination modes ×
+- [x] **P9-T1.** For each of the 3 usable source-address modes × 3 destination modes ×
       4 transfer sizes, run a small transfer between two Work-RAM windows pre-filled with
       a known pattern and assert the exact resulting bytes. The patterns should make an
       off-by-one stride visible (e.g. an incrementing byte sequence).
-- [ ] **P9-T2 TE write-0-to-clear.** Set TE via a completed transfer; write `CHCR` with
+- [x] **P9-T2 TE write-0-to-clear.** Set TE via a completed transfer; write `CHCR` with
       bit 1 = 1 and assert TE **survives**; write with bit 1 = 0 and assert it clears.
       Then assert reading `CHCR` zeroes the shadow. Derived from HR §11.8's expression.
-- [ ] **P9-T3 arming gate.** With `DMAOR = 0` (DME clear), setting DE must not start a
+- [x] **P9-T3 arming gate.** With `DMAOR = 0` (DME clear), setting DE must not start a
       transfer; with `DMAOR = 1` it must; with `DMAOR = 3` (NMIF set) it must not. The
       `(DMAOR & 7) == 1` test is the point.
-- [ ] **P9-T4 completion interrupt.** `CHCR & 0x4` set, `VCRDMA0 = 0x1234`,
+- [x] **P9-T4 completion interrupt.** `CHCR & 0x4` set, `VCRDMA0 = 0x1234`,
       `IPRA = 0x0500` → on completion, an interrupt with vector `0x1234` (**unmasked** —
       HR §11.8 is explicit) at level 5 must be queued.
-- [ ] **P9-T5 `eat` table.** Rather than asserting absolute timings, assert *relative*
+- [x] **P9-T5 `eat` table.** Rather than asserting absolute timings, assert *relative*
       ones: a VDP1-RAM→VDP1-RAM transfer (570) must take more than 10× the cycles of a
       WRAM→WRAM one (14) for the same byte count. Ratios derived from HR §11.8's table.
-- [ ] **P9-T6 arbiter interaction.** With the DMAC mid-transfer, a second thread's
+      **Fixed in Chapter 15**: the original version used `TCR0 = 10` (140 cycles), which
+      the arm-time 200-cycle `DMAExec()` burst (P9-5's note above) finishes on its own
+      before the test's explicit `dma_proc()` call ever runs, so the assertion it was
+      trying to make (139 cycles shouldn't finish, 140 should) never actually exercised —
+      it just happened to already be `0` either way. Raised to `TCR0 = 20` (280 cycles,
+      more than the free burst can cover) so the boundary is real.
+- [x] **P9-T6 arbiter interaction.** With the DMAC mid-transfer, a second thread's
       `Sh2::read_byte` must block until it finishes (mirrors the existing e2e test
       `test_tier3_combination_f2_f3_bus_arbiter_blocks_cpu`).
 

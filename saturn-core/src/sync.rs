@@ -1,4 +1,4 @@
-use std::sync::{Mutex, Condvar, Arc};
+use std::sync::{Arc, Condvar, Mutex};
 
 pub struct LockStepSync {
     num_threads: usize,

@@ -1,5 +1,5 @@
-use crossbeam::channel::{bounded, Sender, Receiver};
 use crate::shared_buffers::WorkRam;
+use crossbeam::channel::{bounded, Receiver, Sender};
 
 pub struct Scsp {
     pub volume: u8,
@@ -46,27 +46,27 @@ impl Scsp {
             // KYON is bit 11 of the first word (offset 0)
             let ky_on = (regs[base] & 0x08) != 0;
             let voice = &mut self.voices[i];
-            
+
             if ky_on {
                 if !voice.active {
                     voice.active = true;
                     // SA is in sound RAM
-                    let sa = (((regs[base] & 7) as u32) << 16) 
-                        | ((regs[base + 1] as u32) << 8) 
+                    let sa = (((regs[base] & 7) as u32) << 16)
+                        | ((regs[base + 1] as u32) << 8)
                         | (regs[base + 2] as u32);
                     voice.sample_addr = sa & 0x7FFFF;
                     voice.current_offset = 0.0;
-                    
+
                     let lsa = ((regs[base + 4] as u32) << 8) | (regs[base + 5] as u32);
                     voice.loop_start = lsa & 0x7FFFF;
-                    
+
                     let lea = ((regs[base + 6] as u32) << 8) | (regs[base + 7] as u32);
                     voice.loop_end = lea & 0x7FFFF;
-                    
+
                     // Pitch FNS
                     let fns = ((regs[base + 10] as u32) << 8) | (regs[base + 11] as u32);
                     voice.step = if fns > 0 { fns as f64 / 1024.0 } else { 1.0 };
-                    
+
                     let level = regs[base + 12];
                     voice.volume = level as f32 / 255.0;
                 }
@@ -87,12 +87,14 @@ impl Scsp {
                 if ptr < sound_ram.len() {
                     let byte = sound_ram[ptr];
                     let sample = (byte as f32 - 128.0) / 128.0;
-                    
+
                     left_sample += sample * voice.volume;
                     right_sample += sample * voice.volume;
-                    
+
                     voice.current_offset += voice.step;
-                    if voice.loop_end > voice.loop_start && voice.current_offset as u32 >= voice.loop_end {
+                    if voice.loop_end > voice.loop_start
+                        && voice.current_offset as u32 >= voice.loop_end
+                    {
                         voice.current_offset = voice.loop_start as f64;
                     }
                 } else {

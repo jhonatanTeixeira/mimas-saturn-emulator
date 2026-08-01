@@ -18,11 +18,8 @@
 //!
 //! Scope: the full ALU/operation/load-immediate/jump/loop/end instruction
 //! groups are implemented (Program RAM is only 256 words -- not a large
-//! surface). Only 2 of real hardware's 8 DMA addressing-mode variants
-//! (Yabause's `dsp_dma03`/`dsp_dma04`) are implemented, matching what the
-//! real BIOS DSP program traced during this wall actually uses. The other
-//! 6 are a known gap -- add them the same way as everything else in this
-//! project: hit the wall, decode, cross-check Yabause, implement, test.
+//! surface), including all 8 of real hardware's DMA addressing-mode
+//! variants (`dsp_dma01`-`dsp_dma08` in Yabause's naming, `scu.c:674-946`).
 
 use crate::shared_buffers::WorkRam;
 
@@ -64,6 +61,15 @@ pub struct ScuDsp {
     wa0m: u32,
     pub lop: u16,
     pub top: u8,
+    /// Deferred `CT[n]` post-increment flags (real hardware's `incFlg`,
+    /// `scu.c:62`/`:498` -- a set of flags raised by a `readgensrc`/
+    /// `writed1busdest`/`writeloadimdest` call with post-increment
+    /// semantics, applied *after* the whole instruction body runs
+    /// (`scu.c:1949-1952`), not immediately at the point of use. This
+    /// matters when one instruction reads the same `MCn` bus source twice
+    /// (X and Y in the same cycle): both reads see the *same*, not-yet-
+    /// incremented `CT[n]`.
+    inc_flg: [bool; 4],
     /// 48-bit-effective accumulators, stored as `i64` with only the low 48
     /// bits meaningful -- mirrors Yabause's `s64 all` union exactly (see
     /// `scu.h`'s `AC`/`P`/`ALU` bitfield unions: `.part.L` is the low 32
@@ -105,6 +111,7 @@ impl ScuDsp {
             wa0m: 0,
             lop: 0,
             top: 0,
+            inc_flg: [false; 4],
             ac: 0,
             p: 0,
             alu: 0,
@@ -190,15 +197,39 @@ impl ScuDsp {
         acc as i32
     }
 
+    /// Apply every deferred `CT[n]` post-increment now and clear the flags
+    /// (`scu.c:1949-1952`'s post-instruction block, and the one early-apply
+    /// call site inside `MOV SImm,[d]`, `scu.c:1691-1694`).
+    fn apply_inc_flg(&mut self) {
+        for n in 0..4 {
+            if self.inc_flg[n] {
+                self.ct[n] = self.ct[n].wrapping_add(1) & 0x3F;
+                self.inc_flg[n] = false;
+            }
+        }
+    }
+
+    /// Force-complete a pending DSP DMA right now, matching `scu.c`'s
+    /// `readgensrc`/`writed1busdest`/`writeloadimdest` preamble
+    /// (`:500-503`, `:555-558`, `:620-623`): any DSP RAM/register access
+    /// while a DMA is in flight makes it finish immediately rather than on
+    /// its own two-step schedule.
+    fn force_complete_dma(&mut self, work_ram: &WorkRam) {
+        if self.dsp_dma_wait > 0 {
+            self.dsp_dma_wait = 0;
+            self.step_dma(work_ram);
+        }
+    }
+
     /// `scu.c`'s `readgensrc` -- general-purpose ALU/bus source read.
-    fn read_gen_src(&mut self, num: u32) -> u32 {
+    fn read_gen_src(&mut self, num: u32, work_ram: &WorkRam) -> u32 {
         if num <= 7 {
             let bank = (num & 0x3) as usize;
-            let val = self.md[bank][(self.ct[bank] & 0x3F) as usize];
             if (num >> 2) & 1 != 0 {
-                self.ct[bank] = self.ct[bank].wrapping_add(1) & 0x3F;
+                self.inc_flg[bank] = true;
             }
-            val
+            self.force_complete_dma(work_ram);
+            self.md[bank][(self.ct[bank] & 0x3F) as usize]
         } else if num == 0x9 {
             Self::low32(self.alu) as u32 // ALL
         } else if num == 0xA {
@@ -209,22 +240,47 @@ impl ScuDsp {
     }
 
     /// `scu.c`'s `writed1busdest` -- D1-bus store destinations.
-    fn write_d1_bus_dest(&mut self, num: u32, val: u32) {
+    fn write_d1_bus_dest(&mut self, num: u32, val: u32, work_ram: &WorkRam) {
+        self.force_complete_dma(work_ram);
         match num {
-            0x0 => { self.md[0][(self.ct[0] & 0x3F) as usize] = val; self.ct[0] = self.ct[0].wrapping_add(1) & 0x3F; }
-            0x1 => { self.md[1][(self.ct[1] & 0x3F) as usize] = val; self.ct[1] = self.ct[1].wrapping_add(1) & 0x3F; }
-            0x2 => { self.md[2][(self.ct[2] & 0x3F) as usize] = val; self.ct[2] = self.ct[2].wrapping_add(1) & 0x3F; }
-            0x3 => { self.md[3][(self.ct[3] & 0x3F) as usize] = val; self.ct[3] = self.ct[3].wrapping_add(1) & 0x3F; }
+            0x0 => {
+                self.md[0][(self.ct[0] & 0x3F) as usize] = val;
+                self.inc_flg[0] = true;
+            }
+            0x1 => {
+                self.md[1][(self.ct[1] & 0x3F) as usize] = val;
+                self.inc_flg[1] = true;
+            }
+            0x2 => {
+                self.md[2][(self.ct[2] & 0x3F) as usize] = val;
+                self.inc_flg[2] = true;
+            }
+            0x3 => {
+                self.md[3][(self.ct[3] & 0x3F) as usize] = val;
+                self.inc_flg[3] = true;
+            }
             0x4 => self.rx = val as i32,
             0x5 => self.p = val as i32 as i64,
             0x6 => self.ra0 = val,
             0x7 => self.wa0 = val,
             0xA => self.lop = val as u16,
             0xB => self.top = val as u8,
-            0xC => self.ct[0] = val as u8,
-            0xD => self.ct[1] = val as u8,
-            0xE => self.ct[2] = val as u8,
-            0xF => self.ct[3] = val as u8,
+            0xC => {
+                self.ct[0] = val as u8;
+                self.inc_flg[0] = false;
+            }
+            0xD => {
+                self.ct[1] = val as u8;
+                self.inc_flg[1] = false;
+            }
+            0xE => {
+                self.ct[2] = val as u8;
+                self.inc_flg[2] = false;
+            }
+            0xF => {
+                self.ct[3] = val as u8;
+                self.inc_flg[3] = false;
+            }
             _ => {}
         }
     }
@@ -232,12 +288,25 @@ impl ScuDsp {
     /// `scu.c`'s `writeloadimdest` -- MVI (load-immediate) destinations.
     /// Destination `0xC` is the DSP's "call" form (`scu.h`/`scu.c`: sets
     /// `TOP` as a return address, then jumps).
-    fn write_load_im_dest(&mut self, num: u32, val: u32) {
+    fn write_load_im_dest(&mut self, num: u32, val: u32, work_ram: &WorkRam) {
+        self.force_complete_dma(work_ram);
         match num {
-            0x0 => self.md[0][(self.ct[0] & 0x3F) as usize] = val,
-            0x1 => self.md[1][(self.ct[1] & 0x3F) as usize] = val,
-            0x2 => self.md[2][(self.ct[2] & 0x3F) as usize] = val,
-            0x3 => self.md[3][(self.ct[3] & 0x3F) as usize] = val,
+            0x0 => {
+                self.md[0][(self.ct[0] & 0x3F) as usize] = val;
+                self.inc_flg[0] = true;
+            }
+            0x1 => {
+                self.md[1][(self.ct[1] & 0x3F) as usize] = val;
+                self.inc_flg[1] = true;
+            }
+            0x2 => {
+                self.md[2][(self.ct[2] & 0x3F) as usize] = val;
+                self.inc_flg[2] = true;
+            }
+            0x3 => {
+                self.md[3][(self.ct[3] & 0x3F) as usize] = val;
+                self.inc_flg[3] = true;
+            }
             0x4 => self.rx = val as i32,
             0x5 => self.p = val as i32 as i64,
             0x6 => self.ra0 = val & 0x01FF_FFFF,
@@ -267,6 +336,11 @@ impl ScuDsp {
 
         let instruction = self.program_ram[self.pc as usize];
 
+        // Deferred CT-increment flags are cleared once per instruction,
+        // right after fetch (`scu.c:1384-1387`) -- before anything in this
+        // instruction gets a chance to set one.
+        self.inc_flg = [false; 4];
+
         // ALU op always computes (real hardware: a VLIW slot that runs
         // every cycle regardless of whether anything captures its
         // result) -- `scu.c`'s unconditional `ScuDsp->ALU.all = ScuDsp->AC.all;`
@@ -277,10 +351,14 @@ impl ScuDsp {
         let top2 = (instruction >> 30) & 0x3;
         match top2 {
             0x0 => self.execute_operation(instruction, work_ram),
-            0x2 => self.execute_load_immediate(instruction),
+            0x2 => self.execute_load_immediate(instruction, work_ram),
             0x3 => self.execute_other(instruction, work_ram),
             _ => {}
         }
+
+        // Pending CT increments apply after the whole instruction body, but
+        // before PC advances (`scu.c:1949-1954`).
+        self.apply_inc_flg();
 
         self.pc = self.pc.wrapping_add(1);
 
@@ -297,72 +375,94 @@ impl ScuDsp {
         }
     }
 
-    /// ALU op group (bits 29-26), cross-checked against `scu.c`'s switch
-    /// on `instruction >> 26`.
+    /// ALU op group, cross-checked against `scu.c`'s switch on
+    /// `instruction >> 26` (**not** masked to 4 bits there -- the switch is
+    /// unguarded by instruction class, but classes `01`/`10`/`11` push the
+    /// unmasked selector to `>= 0x10`, which hits no case and falls to
+    /// `default` (no ALU effect). Masking to `& 0xF` before matching, as
+    /// this used to do, throws away the class bits and lets a JMP/LPS/BTM/
+    /// MVI's own encoding bits accidentally land on a real ALU opcode --
+    /// this was D-DSP-1, a phantom-ALU-op bug on every non-Operation-Command
+    /// instruction).
     fn execute_alu(&mut self, instruction: u32) {
-        let op = (instruction >> 26) & 0xF;
+        let op = instruction >> 26;
         let ac_l = Self::low32(self.ac);
         let p_l = Self::low32(self.p);
         match op {
             0x0 => {} // NOP -- ALU already holds AC passthrough
-            0x1 => { // AND
+            0x1 => {
+                // AND
                 let r = (ac_l as u32) & (p_l as u32);
                 Self::set_low32(&mut self.alu, r as i32);
                 self.set_zsc(r == 0, (r as i32) < 0, false);
             }
-            0x2 => { // OR
+            0x2 => {
+                // OR
                 let r = (ac_l as u32) | (p_l as u32);
                 Self::set_low32(&mut self.alu, r as i32);
                 self.set_zsc(r == 0, (r as i32) < 0, false);
             }
-            0x3 => { // XOR
+            0x3 => {
+                // XOR
                 let r = (ac_l as u32) ^ (p_l as u32);
                 Self::set_low32(&mut self.alu, r as i32);
                 self.set_zsc(r == 0, (r as i32) < 0, false);
             }
-            0x4 => { // ADD
+            0x4 => {
+                // ADD
                 let r = ac_l.wrapping_add(p_l);
                 Self::set_low32(&mut self.alu, r);
                 let carry = ((ac_l as u32 as u64) + (p_l as u32 as u64)) & 0x1_0000_0000 != 0;
                 self.set_zsc(r == 0, r < 0, carry);
             }
-            0x5 => { // SUB
+            0x5 => {
+                // SUB
                 let r = ac_l.wrapping_sub(p_l);
                 Self::set_low32(&mut self.alu, r);
-                let carry = ((ac_l as u32 as u64).wrapping_sub(p_l as u32 as u64)) & 0x1_0000_0000 != 0;
+                let carry =
+                    ((ac_l as u32 as u64).wrapping_sub(p_l as u32 as u64)) & 0x1_0000_0000 != 0;
                 self.set_zsc(r == 0, r < 0, carry);
             }
-            0x6 => { // AD2 -- full 48-bit add, uses .all directly
+            0x6 => {
+                // AD2 -- full 48-bit add, uses .all directly
                 let r = self.ac.wrapping_add(self.p);
                 self.alu = r;
-                let carry = (((self.ac & 0xFFFF_FFFF_FFFF) as u64) + ((self.p & 0xFFFF_FFFF_FFFF) as u64)) & 0x1_0000_0000_0000 != 0;
+                let carry = (((self.ac & 0xFFFF_FFFF_FFFF) as u64)
+                    + ((self.p & 0xFFFF_FFFF_FFFF) as u64))
+                    & 0x1_0000_0000_0000
+                    != 0;
                 self.set_zsc(r == 0, r & 0x8000_0000_0000 != 0, carry);
             }
-            0x8 => { // SR
+            0x8 => {
+                // SR
                 let carry = ac_l & 1 != 0;
                 let r = ((ac_l as u32 & 0x8000_0000) | ((ac_l as u32) >> 1)) as i32;
                 Self::set_low32(&mut self.alu, r);
                 self.set_zsc(r == 0, r < 0, carry);
             }
-            0x9 => { // RR
+            0x9 => {
+                // RR
                 let carry_in = ac_l & 1 != 0;
                 let r = (((carry_in as u32) << 31) | ((ac_l as u32) >> 1)) as i32;
                 Self::set_low32(&mut self.alu, r);
                 self.set_zsc(r == 0, r < 0, carry_in);
             }
-            0xA => { // SL
+            0xA => {
+                // SL
                 let carry = (ac_l as u32) & 0x8000_0000 != 0;
                 let r = ((ac_l as u32) << 1) as i32;
                 Self::set_low32(&mut self.alu, r);
                 self.set_zsc(r == 0, r < 0, carry);
             }
-            0xB => { // RL
+            0xB => {
+                // RL
                 let carry = (ac_l as u32) & 0x8000_0000 != 0;
                 let r = (((ac_l as u32) << 1) | (carry as u32)) as i32;
                 Self::set_low32(&mut self.alu, r);
                 self.set_zsc(r == 0, r < 0, carry);
             }
-            0xF => { // RL8
+            0xF => {
+                // RL8
                 let carry = (ac_l as u32) & 0x0100_0000 != 0;
                 let r = (((ac_l as u32) << 8) | (((ac_l as u32) >> 24) & 0xFF)) as i32;
                 Self::set_low32(&mut self.alu, r);
@@ -384,42 +484,56 @@ impl ScuDsp {
     fn execute_operation(&mut self, instruction: u32, work_ram: &WorkRam) {
         match (instruction >> 23) & 0x3 {
             2 => self.p = (self.rx as i64).wrapping_mul(self.ry as i64), // MOV MUL,P
-            3 => self.p = self.read_gen_src((instruction >> 20) & 0x7) as i32 as i64, // MOV [s],P
+            3 => self.p = self.read_gen_src((instruction >> 20) & 0x7, work_ram) as i32 as i64, // MOV [s],P
             _ => {}
         }
         if (instruction >> 23) & 0x4 != 0 {
-            self.rx = self.read_gen_src((instruction >> 20) & 0x7) as i32; // MOV [s],X
+            self.rx = self.read_gen_src((instruction >> 20) & 0x7, work_ram) as i32;
+            // MOV [s],X
         }
         if (instruction >> 17) & 0x4 != 0 {
-            self.ry = self.read_gen_src((instruction >> 14) & 0x7) as i32; // MOV [s],Y
+            self.ry = self.read_gen_src((instruction >> 14) & 0x7, work_ram) as i32;
+            // MOV [s],Y
         }
         match (instruction >> 17) & 0x3 {
-            1 => self.ac = 0, // CLR A
+            1 => self.ac = 0,        // CLR A
             2 => self.ac = self.alu, // MOV ALU,A
-            3 => self.ac = self.read_gen_src((instruction >> 14) & 0x7) as i32 as i64, // MOV [s],A
+            3 => self.ac = self.read_gen_src((instruction >> 14) & 0x7, work_ram) as i32 as i64, // MOV [s],A
             _ => {}
         }
         match (instruction >> 12) & 0x3 {
-            1 => { // MOV SImm,[d]
+            1 => {
+                // MOV SImm,[d]
+                // Early-apply: any pending CT increment from earlier in
+                // this same instruction (X/Y-bus reads above) lands before
+                // this store, not after the whole instruction like normal
+                // (`scu.c:1691-1694`) -- matters when the D1 dest is the
+                // same bank an earlier MCn read this instruction.
+                self.apply_inc_flg();
                 let imm = (instruction & 0xFF) as i8 as i32 as u32;
-                self.write_d1_bus_dest((instruction >> 8) & 0xF, imm);
+                self.write_d1_bus_dest((instruction >> 8) & 0xF, imm, work_ram);
             }
-            3 => { // MOV [s],[d]
-                let src = self.read_gen_src(instruction & 0xF);
-                self.write_d1_bus_dest((instruction >> 8) & 0xF, src);
+            3 => {
+                // MOV [s],[d]
+                let src = self.read_gen_src(instruction & 0xF, work_ram);
+                self.write_d1_bus_dest((instruction >> 8) & 0xF, src, work_ram);
             }
             _ => {}
         }
-        let _ = work_ram; // this instruction group never touches main RAM directly
     }
 
     /// Load Immediate Commands (top2 == 0b10), cross-checked against
     /// `scu.c`'s `case 0x02` block (conditional MVI variants + plain MVI).
-    fn execute_load_immediate(&mut self, instruction: u32) {
+    fn execute_load_immediate(&mut self, instruction: u32, work_ram: &WorkRam) {
         let dest = (instruction >> 26) & 0xF;
         if (instruction >> 25) & 1 != 0 {
             let cond = (instruction >> 19) & 0x3F;
-            let imm = (instruction & 0x7_FFFF) | if instruction & 0x4_0000 != 0 { 0xFFF8_0000 } else { 0 };
+            let imm = (instruction & 0x7_FFFF)
+                | if instruction & 0x4_0000 != 0 {
+                    0xFFF8_0000
+                } else {
+                    0
+                };
             let z = self.prog_control & PCP_Z != 0;
             let s = self.prog_control & PCP_S != 0;
             let c = self.prog_control & PCP_C != 0;
@@ -438,12 +552,16 @@ impl ScuDsp {
                 _ => false,
             };
             if take {
-                self.write_load_im_dest(dest, imm);
+                self.write_load_im_dest(dest, imm, work_ram);
             }
         } else {
             let raw = instruction & 0x01FF_FFFF;
-            let imm = if raw & 0x0100_0000 != 0 { raw | 0xFE00_0000 } else { raw };
-            self.write_load_im_dest(dest, imm);
+            let imm = if raw & 0x0100_0000 != 0 {
+                raw | 0xFE00_0000
+            } else {
+                raw
+            };
+            self.write_load_im_dest(dest, imm, work_ram);
         }
     }
 
@@ -451,22 +569,26 @@ impl ScuDsp {
     /// against `scu.c`'s `case 0x03` block.
     fn execute_other(&mut self, instruction: u32, work_ram: &WorkRam) {
         match (instruction >> 28) & 0xF {
-            0xC => self.start_dma(instruction), // DMA Commands
-            0xD => self.execute_jump(instruction), // Jump Commands
-            0xE => { // Loop bottom Commands
-                if instruction & 0x0800_0000 != 0 { // LPS
+            0xC => self.start_dma(instruction, work_ram), // DMA Commands
+            0xD => self.execute_jump(instruction),        // Jump Commands
+            0xE => {
+                // Loop bottom Commands
+                if instruction & 0x0800_0000 != 0 {
+                    // LPS
                     if self.lop != 0 {
                         self.jmpaddr = Some(self.pc);
                         self.delayed = false;
                         self.lop -= 1;
                     }
-                } else if self.lop != 0 { // BTM
+                } else if self.lop != 0 {
+                    // BTM
                     self.jmpaddr = Some(self.top);
                     self.delayed = false;
                     self.lop -= 1;
                 }
             }
-            0xF => { // End Commands
+            0xF => {
+                // End Commands
                 self.prog_control &= !PCP_EX;
                 if instruction & 0x0800_0000 != 0 {
                     self.prog_control |= PCP_E;
@@ -475,11 +597,15 @@ impl ScuDsp {
                     // interrupt vector yet; the BIOS program traced for
                     // this wall uses plain END (no interrupt requested).
                 }
-                self.prog_control = (self.prog_control & !0xFF) | (self.pc as u32);
+                // D-DSP-5: real hardware writes PC+1 here (`scu.c`:
+                // `ProgControlPort.part.P = ScuDsp->PC+1;`), anticipating
+                // the unconditional `PC++` every instruction still gets
+                // after this switch -- not the pre-increment `PC` a naive
+                // read would use.
+                self.prog_control = (self.prog_control & !0xFF) | (self.pc.wrapping_add(1) as u32);
             }
             _ => {}
         }
-        let _ = work_ram; // DMA is the only sub-case touching main RAM; handled in start_dma/step_dma
     }
 
     fn execute_jump(&mut self, instruction: u32) {
@@ -512,14 +638,14 @@ impl ScuDsp {
         }
     }
 
-    // ---- DMA (only the 2 real-BIOS-observed variants) ----
+    // ---- DMA (all 8 real addressing-mode variants) ----
 
-    fn start_dma(&mut self, instruction: u32) {
+    fn start_dma(&mut self, instruction: u32, work_ram: &WorkRam) {
         // Finish a still-in-flight previous DMA first, matching real
-        // hardware's "each DMA instruction stalls behind the last".
-        if self.dsp_dma_wait > 0 {
-            self.dsp_dma_wait = 0;
-        }
+        // hardware's "each DMA instruction stalls behind the last"
+        // (`scu.c:1765-1768`: this force-completes it, doesn't just drop
+        // it on the floor).
+        self.force_complete_dma(work_ram);
         self.dsp_dma_instruction = instruction;
         self.prog_control |= PCP_T0;
 
@@ -548,10 +674,11 @@ impl ScuDsp {
         self.ra0m = self.ra0;
     }
 
-    /// Called once per `step()` while `T0` is set -- mirrors `scu.c`'s
-    /// `step_dsp_dma`'s countdown-then-fire shape (real DMA takes a few
-    /// real cycles, it isn't instantaneous even though this interpreter
-    /// doesn't model exact per-word timing).
+    /// Called once per `step()` while `T0` is set (and, force-completing,
+    /// from `read_gen_src`/`write_d1_bus_dest`/`write_load_im_dest`/
+    /// `start_dma`) -- mirrors `scu.c`'s `step_dsp_dma`'s countdown-then-
+    /// fire shape (real DMA takes a few real cycles, it isn't instantaneous
+    /// even though this interpreter doesn't model exact per-word timing).
     fn step_dma(&mut self, work_ram: &WorkRam) {
         if self.prog_control & PCP_T0 == 0 {
             return;
@@ -560,30 +687,103 @@ impl ScuDsp {
         if self.dsp_dma_wait > 0 {
             return;
         }
+        // Reproduce `step_dsp_dma`'s exact if-else chain order
+        // (`scu.c:960-989`) -- the eight tests are mutually exclusive by
+        // construction, but keep the reference's own order rather than
+        // relying on that.
         let instruction = self.dsp_dma_instruction;
         let d1 = (instruction >> 10) & 0x1F;
         let d2 = (instruction >> 11) & 0xF;
-        if d2 == 0x04 {
-            self.dma_read_from_main_ram(instruction, work_ram);
+        if d1 == 0x00 {
+            self.dsp_dma01(instruction, work_ram);
+        } else if d1 == 0x04 {
+            self.dsp_dma02(instruction, work_ram);
+        } else if d2 == 0x04 {
+            self.dsp_dma03(instruction, work_ram);
         } else if d1 == 0x0C {
-            self.dma_write_to_main_ram(instruction, work_ram);
+            self.dsp_dma04(instruction, work_ram);
+        } else if d2 == 0x08 {
+            self.dsp_dma05(instruction, work_ram);
+        } else if d1 == 0x14 {
+            self.dsp_dma06(instruction, work_ram);
+        } else if d2 == 0x0C {
+            self.dsp_dma07(instruction, work_ram);
+        } else if d1 == 0x1C {
+            self.dsp_dma08(instruction, work_ram);
         }
-        // Other 6 real addressing-mode variants (dsp_dma01/02/05/06/07/08
-        // in Yabause's naming) aren't implemented yet -- not exercised by
-        // the real BIOS program that unblocked this wall. Add the same
-        // way as everything else here: hit it, decode, cross-check
-        // Yabause, implement, test.
+        // [QUIRK] Encodings matching none of the eight (bit 11 set, or bit
+        // 10 set on the immediate-count/write variants) are silently
+        // dropped -- T0/instruction/wait still clear below as though a
+        // transfer had run (§3.8.2).
         self.prog_control &= !PCP_T0;
         self.dsp_dma_instruction = 0;
         self.dsp_dma_wait = 0;
     }
 
-    /// Yabause's `dsp_dma03`: Main RAM -> Data RAM / Program RAM, reading
-    /// `dsp_dma_size` longwords starting at `ra0m<<2`.
-    fn dma_read_from_main_ram(&mut self, instruction: u32, work_ram: &WorkRam) {
-        let sel = ((instruction >> 8) & 0x7) as usize;
+    /// Read-side address step shared by `dsp_dma01`/`dsp_dma03` (and their
+    /// hold wrappers): instruction bit 16 selects 1 long-word advance or
+    /// none. Already `>> 2`'d into long-word units (`scu.c:681-682`,
+    /// `:823-824`).
+    fn dma_read_add(instruction: u32) -> u32 {
         let mode = (instruction >> 15) & 0x7;
-        let add = (1u32 << (mode & 0x2)) & !1;
+        ((1u32 << (mode & 0x2)) & !1) >> 2
+    }
+
+    /// Write-side address step shared by `dsp_dma02`/`dsp_dma04` (and their
+    /// hold wrappers): full 3-bit table in long-word units (`scu.c:798-808`,
+    /// deliberately a *different* decode of the same instruction field from
+    /// the read-side rule above -- keep them separate, don't unify).
+    fn dma_write_add(instruction: u32) -> u32 {
+        match (instruction >> 15) & 0x7 {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            3 => 4,
+            4 => 8,
+            5 => 16,
+            6 => 32,
+            7 => 64,
+            _ => 0,
+        }
+    }
+
+    /// Yabause's `dsp_dma01`: non-hold, immediate count, D0-bus ->
+    /// `MD[sel]`. `sel` is 2 bits here (unlike `dsp_dma03`'s 3) -- the
+    /// immediate-count read variants never target Program RAM.
+    fn dsp_dma01(&mut self, instruction: u32, work_ram: &WorkRam) {
+        let sel = ((instruction >> 8) & 0x3) as usize;
+        let count = instruction & 0xFF;
+        let add = Self::dma_read_add(instruction);
+        for _ in 0..count {
+            let val = read_long(work_ram, self.ra0m << 2);
+            self.md[sel][(self.ct[sel] & 0x3F) as usize] = val;
+            self.ct[sel] = self.ct[sel].wrapping_add(1) & 0x3F;
+            self.ra0m = self.ra0m.wrapping_add(add);
+        }
+        self.ra0 = self.ra0m;
+    }
+
+    /// Yabause's `dsp_dma02`: non-hold, immediate count, `MD[sel]` ->
+    /// D0-bus, through the shared `dsp_dma_write_d0bus` path.
+    fn dsp_dma02(&mut self, instruction: u32, work_ram: &WorkRam) {
+        let sel = ((instruction >> 8) & 0x3) as usize;
+        let count = instruction & 0xFF;
+        let add = Self::dma_write_add(instruction);
+        self.dsp_dma_write_d0bus(sel, add, count, work_ram);
+    }
+
+    /// Yabause's `dsp_dma03`: Main RAM -> Data RAM / Program RAM, reading
+    /// `dsp_dma_size` longwords starting at `ra0m<<2`. `sel == 0x4` selects
+    /// Program RAM, written from a local index starting at 0 (ignoring
+    /// `PC`), instead of a Data RAM bank.
+    fn dsp_dma03(&mut self, instruction: u32, work_ram: &WorkRam) {
+        let sel = ((instruction >> 8) & 0x7) as usize;
+        let add = Self::dma_read_add(instruction);
+        // [QUIRK] `RA0` is only written back on the non-A-Bus path
+        // (`scu.c:864`, D-DSP-7) -- an A-Bus source read via this variant
+        // leaves `RA0` at its pre-transfer value even without the hold bit.
+        let abus_check = (self.ra0m << 2) & 0x0FF0_0000;
+        let is_abus = (0x0200_0000..0x0590_0000).contains(&abus_check);
         let mut index = 0usize;
         for _ in 0..self.dsp_dma_size {
             let val = read_long(work_ram, self.ra0m << 2);
@@ -593,30 +793,72 @@ impl ScuDsp {
                 }
                 index += 1;
             } else {
-                let bank = sel & 0x3;
-                self.md[bank][(self.ct[bank] & 0x3F) as usize] = val;
-                self.ct[bank] = self.ct[bank].wrapping_add(1) & 0x3F;
+                self.md[sel][(self.ct[sel] & 0x3F) as usize] = val;
+                self.ct[sel] = self.ct[sel].wrapping_add(1) & 0x3F;
             }
-            self.ra0m = self.ra0m.wrapping_add(add >> 2);
+            self.ra0m = self.ra0m.wrapping_add(add);
         }
-        self.ra0 = self.ra0m;
+        if !is_abus {
+            self.ra0 = self.ra0m;
+        }
     }
 
-    /// Yabause's `dsp_dma04` + `dsp_dma_write_d0bus`: Data RAM -> Main RAM,
-    /// writing `dsp_dma_size` longwords starting at `wa0m<<2`, with the
-    /// same A-bus/B-bus/CPU-bus address-range split the reference uses
-    /// (B-bus writes as two 16-bit halves, matching real SCSP/Sound RAM
-    /// 16-bit port width).
-    fn dma_write_to_main_ram(&mut self, instruction: u32, work_ram: &WorkRam) {
+    /// Yabause's `dsp_dma04`: Data RAM -> Main RAM, writing
+    /// `dsp_dma_size` longwords through the shared `dsp_dma_write_d0bus`
+    /// path.
+    fn dsp_dma04(&mut self, instruction: u32, work_ram: &WorkRam) {
         let sel = ((instruction >> 8) & 0x3) as usize;
-        let mode = (instruction >> 15) & 0x7;
-        let mut add: u32 = match mode {
-            0 => 0, 1 => 1, 2 => 2, 3 => 4, 4 => 8, 5 => 16, 6 => 32, 7 => 64, _ => 0,
-        };
+        let add = Self::dma_write_add(instruction);
         let count = self.dsp_dma_size;
+        self.dsp_dma_write_d0bus(sel, add, count, work_ram);
+    }
+
+    /// Yabause's `dsp_dma05`: `dsp_dma01` wrapped, restoring `RA0`
+    /// afterward (the hold bit -- the transfer itself still walks `RA0M`
+    /// forward, only the CPU-visible `RA0` is rewound). [QUIRK] this
+    /// variant's own encoding accepts `RAMsel == 4` (Program RAM) but
+    /// forwards into `dsp_dma01`, whose `sel` is masked to 2 bits -- `PRG`
+    /// degrades silently to `MD0`. `dsp_dma07` (below) does not have this
+    /// problem: it wraps `dsp_dma03`, whose `sel` is the full 3 bits.
+    fn dsp_dma05(&mut self, instruction: u32, work_ram: &WorkRam) {
+        let save_ra0 = self.ra0m;
+        self.dsp_dma01(instruction, work_ram);
+        self.ra0 = save_ra0;
+    }
+
+    /// Yabause's `dsp_dma06`: `dsp_dma02` wrapped, restoring `WA0`.
+    fn dsp_dma06(&mut self, instruction: u32, work_ram: &WorkRam) {
+        let save_wa0 = self.wa0m;
+        self.dsp_dma02(instruction, work_ram);
+        self.wa0 = save_wa0;
+    }
+
+    /// Yabause's `dsp_dma07`: `dsp_dma03` wrapped, restoring `RA0`.
+    fn dsp_dma07(&mut self, instruction: u32, work_ram: &WorkRam) {
+        let save_ra0 = self.ra0m;
+        self.dsp_dma03(instruction, work_ram);
+        self.ra0 = save_ra0;
+    }
+
+    /// Yabause's `dsp_dma08`: `dsp_dma04` wrapped, restoring `WA0`.
+    fn dsp_dma08(&mut self, instruction: u32, work_ram: &WorkRam) {
+        let save_wa0 = self.wa0m;
+        self.dsp_dma04(instruction, work_ram);
+        self.wa0 = save_wa0;
+    }
+
+    /// Yabause's `dsp_dma_write_d0bus` (`scu.c:715-788`) -- shared by
+    /// `dsp_dma02` and `dsp_dma04` (and, through them, `dsp_dma06`/
+    /// `dsp_dma08`). Three destination classes, each with its own `add`
+    /// fixup: A-Bus writes as longwords with `add` clamped to at most 1;
+    /// B-Bus writes as two 16-bit halves (real SCSP/Sound RAM 16-bit port
+    /// width), `WA0M` advancing once at the end by `add * count`; CPU bus
+    /// [QUIRK] redirects into High WRAM (`0xFFFFC` mask) regardless of the
+    /// nominal destination, with its own halved stride when `add != 1`.
+    fn dsp_dma_write_d0bus(&mut self, sel: usize, add: u32, count: u32, work_ram: &WorkRam) {
         let addr = (self.wa0m << 2) & 0x0FFF_FFFF;
         if (0x0200_0000..0x05A0_0000).contains(&addr) {
-            if add > 1 { add = 1; }
+            let add = if add > 1 { 1 } else { add };
             for _ in 0..count {
                 let val = self.md[sel][(self.ct[sel] & 0x3F) as usize];
                 write_long(work_ram, self.wa0m << 2, val);
@@ -654,53 +896,171 @@ impl Default for ScuDsp {
     }
 }
 
+/// Which `WorkRam` region a DSP-DMA address decodes to (D-DSP-6).
+enum DspRegion {
+    LowRam,
+    SoundRam,
+    ScspRegs,
+    Vdp1Vram,
+    Vdp1Framebuffer,
+    Vdp1Regs,
+    Vdp2Vram,
+    Vdp2Cram,
+    Vdp2Regs,
+    Cs2Regs,
+    HighRam,
+}
 
-/// Minimal main-RAM address decode for DSP DMA -- mirrors `Sh2::translate`'s
-/// region boundaries (`sh2.rs`) for the regions real SCU DSP DMA can
-/// plausibly target. Duplicated rather than shared because `Sh2`'s
-/// `MemRegion`/`translate` are private to that module and this is a small,
-/// stable set of ranges; if the two ever drift, `sh2.rs`'s `translate` is
-/// the source of truth (cross-checked against Yabause's `memory.c`).
-fn read_long(work_ram: &WorkRam, address: u32) -> u32 {
+/// Shared main-RAM address decode for DSP DMA -- mirrors `Sh2::translate`'s
+/// region boundaries (`sh2.rs:594-611`) for every region real SCU DSP DMA
+/// can plausibly target: Low WRAM, CS2, Sound RAM, SCSP regs, VDP1 VRAM/
+/// framebuffer/regs, VDP2 VRAM/CRAM/regs, High WRAM. Duplicated rather than
+/// shared because `Sh2`'s `MemRegion`/`translate` are private to that
+/// module and this is a small, stable set of ranges; if the two ever drift,
+/// `sh2.rs`'s `translate` remains the source of truth (cross-checked
+/// against Yabause's `memory.c`). Unmapped A-Bus/cartridge space and
+/// anything else reads `0` / discards writes -- `None`.
+fn decode(address: u32) -> Option<(DspRegion, usize)> {
     let a = address & 0x0FFF_FFFF;
     if (0x0020_0000..0x0030_0000).contains(&a) {
-        read_long_from(&work_ram.low_ram.read().unwrap()[..], (a - 0x0020_0000) as usize)
+        Some((DspRegion::LowRam, (a - 0x0020_0000) as usize))
+    } else if (0x0580_0000..0x0590_0000).contains(&a) {
+        Some((DspRegion::Cs2Regs, (a - 0x0580_0000) as usize))
     } else if (0x05A0_0000..0x05B0_0000).contains(&a) {
-        read_long_from(&work_ram.sound_ram.read().unwrap()[..], (a - 0x05A0_0000) as usize)
+        Some((DspRegion::SoundRam, (a - 0x05A0_0000) as usize))
+    } else if (0x05B0_0000..0x05C0_0000).contains(&a) {
+        Some((DspRegion::ScspRegs, (a - 0x05B0_0000) as usize))
+    } else if (0x05C0_0000..0x05C8_0000).contains(&a) {
+        Some((DspRegion::Vdp1Vram, (a - 0x05C0_0000) as usize))
+    } else if (0x05C8_0000..0x05D0_0000).contains(&a) {
+        Some((DspRegion::Vdp1Framebuffer, (a - 0x05C8_0000) as usize))
+    } else if (0x05D0_0000..0x05D8_0000).contains(&a) {
+        Some((DspRegion::Vdp1Regs, (a - 0x05D0_0000) as usize))
     } else if (0x05E0_0000..0x05F0_0000).contains(&a) {
-        read_long_from(&work_ram.vdp2_vram.read().unwrap()[..], (a - 0x05E0_0000) as usize)
+        Some((DspRegion::Vdp2Vram, (a - 0x05E0_0000) as usize))
     } else if (0x05F0_0000..0x05F8_0000).contains(&a) {
-        read_long_from(&work_ram.vdp2_cram.read().unwrap()[..], (a - 0x05F0_0000) as usize)
+        Some((DspRegion::Vdp2Cram, (a - 0x05F0_0000) as usize))
+    } else if (0x05F8_0000..0x05FC_0000).contains(&a) {
+        Some((DspRegion::Vdp2Regs, (a - 0x05F8_0000) as usize))
     } else if (0x0600_0000..0x0700_0000).contains(&a) {
-        work_ram.read_high_ram_long((a - 0x0600_0000) as usize)
+        Some((DspRegion::HighRam, (a - 0x0600_0000) as usize))
     } else {
-        0
+        None
+    }
+}
+
+fn read_long(work_ram: &WorkRam, address: u32) -> u32 {
+    match decode(address) {
+        Some((DspRegion::LowRam, off)) => {
+            read_long_from(&work_ram.low_ram.read().unwrap()[..], off)
+        }
+        Some((DspRegion::SoundRam, off)) => {
+            read_long_from(&work_ram.sound_ram.read().unwrap()[..], off)
+        }
+        Some((DspRegion::ScspRegs, off)) => {
+            read_long_from(&work_ram.scsp_regs.read().unwrap()[..], off)
+        }
+        Some((DspRegion::Vdp1Vram, off)) => {
+            read_long_from(&work_ram.vdp1_vram.read().unwrap()[..], off)
+        }
+        Some((DspRegion::Vdp1Framebuffer, off)) => {
+            read_long_from(&work_ram.vdp1_framebuffer.read().unwrap()[..], off)
+        }
+        Some((DspRegion::Vdp1Regs, off)) => {
+            read_long_from(&work_ram.vdp1_regs.read().unwrap()[..], off)
+        }
+        Some((DspRegion::Vdp2Vram, off)) => {
+            read_long_from(&work_ram.vdp2_vram.read().unwrap()[..], off)
+        }
+        Some((DspRegion::Vdp2Cram, off)) => {
+            read_long_from(&work_ram.vdp2_cram.read().unwrap()[..], off)
+        }
+        Some((DspRegion::Vdp2Regs, off)) => {
+            read_long_from(&work_ram.vdp2_regs.read().unwrap()[..], off)
+        }
+        Some((DspRegion::Cs2Regs, off)) => {
+            read_long_from(&work_ram.cs2_regs.read().unwrap()[..], off)
+        }
+        Some((DspRegion::HighRam, off)) => work_ram.read_high_ram_long(off),
+        None => 0,
     }
 }
 
 fn write_long(work_ram: &WorkRam, address: u32, val: u32) {
-    let a = address & 0x0FFF_FFFF;
-    if (0x0020_0000..0x0030_0000).contains(&a) {
-        write_long_to(&mut work_ram.low_ram.write().unwrap()[..], (a - 0x0020_0000) as usize, val);
-    } else if (0x05A0_0000..0x05B0_0000).contains(&a) {
-        write_long_to(&mut work_ram.sound_ram.write().unwrap()[..], (a - 0x05A0_0000) as usize, val);
-    } else if (0x05E0_0000..0x05F0_0000).contains(&a) {
-        write_long_to(&mut work_ram.vdp2_vram.write().unwrap()[..], (a - 0x05E0_0000) as usize, val);
-    } else if (0x05F0_0000..0x05F8_0000).contains(&a) {
-        write_long_to(&mut work_ram.vdp2_cram.write().unwrap()[..], (a - 0x05F0_0000) as usize, val);
-    } else if (0x0600_0000..0x0700_0000).contains(&a) {
-        work_ram.write_high_ram_long((a - 0x0600_0000) as usize, val);
+    match decode(address) {
+        Some((DspRegion::LowRam, off)) => {
+            write_long_to(&mut work_ram.low_ram.write().unwrap()[..], off, val)
+        }
+        Some((DspRegion::SoundRam, off)) => {
+            write_long_to(&mut work_ram.sound_ram.write().unwrap()[..], off, val)
+        }
+        Some((DspRegion::ScspRegs, off)) => {
+            write_long_to(&mut work_ram.scsp_regs.write().unwrap()[..], off, val)
+        }
+        Some((DspRegion::Vdp1Vram, off)) => {
+            write_long_to(&mut work_ram.vdp1_vram.write().unwrap()[..], off, val)
+        }
+        Some((DspRegion::Vdp1Framebuffer, off)) => write_long_to(
+            &mut work_ram.vdp1_framebuffer.write().unwrap()[..],
+            off,
+            val,
+        ),
+        Some((DspRegion::Vdp1Regs, off)) => {
+            write_long_to(&mut work_ram.vdp1_regs.write().unwrap()[..], off, val)
+        }
+        Some((DspRegion::Vdp2Vram, off)) => {
+            write_long_to(&mut work_ram.vdp2_vram.write().unwrap()[..], off, val)
+        }
+        Some((DspRegion::Vdp2Cram, off)) => {
+            write_long_to(&mut work_ram.vdp2_cram.write().unwrap()[..], off, val)
+        }
+        Some((DspRegion::Vdp2Regs, off)) => {
+            write_long_to(&mut work_ram.vdp2_regs.write().unwrap()[..], off, val)
+        }
+        Some((DspRegion::Cs2Regs, off)) => {
+            write_long_to(&mut work_ram.cs2_regs.write().unwrap()[..], off, val)
+        }
+        Some((DspRegion::HighRam, off)) => work_ram.write_high_ram_long(off, val),
+        None => {}
     }
 }
 
 fn write_word(work_ram: &WorkRam, address: u32, val: u16) {
-    let a = address & 0x0FFF_FFFF;
-    if (0x0020_0000..0x0030_0000).contains(&a) {
-        write_word_to(&mut work_ram.low_ram.write().unwrap()[..], (a - 0x0020_0000) as usize, val);
-    } else if (0x05A0_0000..0x05B0_0000).contains(&a) {
-        write_word_to(&mut work_ram.sound_ram.write().unwrap()[..], (a - 0x05A0_0000) as usize, val);
-    } else if (0x0600_0000..0x0700_0000).contains(&a) {
-        work_ram.write_high_ram_word((a - 0x0600_0000) as usize, val);
+    match decode(address) {
+        Some((DspRegion::LowRam, off)) => {
+            write_word_to(&mut work_ram.low_ram.write().unwrap()[..], off, val)
+        }
+        Some((DspRegion::SoundRam, off)) => {
+            write_word_to(&mut work_ram.sound_ram.write().unwrap()[..], off, val)
+        }
+        Some((DspRegion::ScspRegs, off)) => {
+            write_word_to(&mut work_ram.scsp_regs.write().unwrap()[..], off, val)
+        }
+        Some((DspRegion::Vdp1Vram, off)) => {
+            write_word_to(&mut work_ram.vdp1_vram.write().unwrap()[..], off, val)
+        }
+        Some((DspRegion::Vdp1Framebuffer, off)) => write_word_to(
+            &mut work_ram.vdp1_framebuffer.write().unwrap()[..],
+            off,
+            val,
+        ),
+        Some((DspRegion::Vdp1Regs, off)) => {
+            write_word_to(&mut work_ram.vdp1_regs.write().unwrap()[..], off, val)
+        }
+        Some((DspRegion::Vdp2Vram, off)) => {
+            write_word_to(&mut work_ram.vdp2_vram.write().unwrap()[..], off, val)
+        }
+        Some((DspRegion::Vdp2Cram, off)) => {
+            write_word_to(&mut work_ram.vdp2_cram.write().unwrap()[..], off, val)
+        }
+        Some((DspRegion::Vdp2Regs, off)) => {
+            write_word_to(&mut work_ram.vdp2_regs.write().unwrap()[..], off, val)
+        }
+        Some((DspRegion::Cs2Regs, off)) => {
+            write_word_to(&mut work_ram.cs2_regs.write().unwrap()[..], off, val)
+        }
+        Some((DspRegion::HighRam, off)) => work_ram.write_high_ram_word(off, val),
+        None => {}
     }
 }
 
@@ -756,7 +1116,11 @@ mod tests {
         dsp.write_control_port(0x0001_8000); // EX+LE
         dsp.prog_control |= PCP_Z | PCP_T0; // simulate status bits the exec loop would set
         let readback = dsp.read_control_port();
-        assert_eq!(readback & PCP_READABLE_MASK, readback, "read must never expose bits outside 0x00FD00FF");
+        assert_eq!(
+            readback & PCP_READABLE_MASK,
+            readback,
+            "read must never expose bits outside 0x00FD00FF"
+        );
         assert_ne!(readback & PCP_EX, 0, "EX must read back set");
         assert_ne!(readback & PCP_Z, 0, "Z must read back set");
     }
@@ -770,7 +1134,10 @@ mod tests {
         assert_eq!(dsp.program_ram[0], 0x1111_1111);
         assert_eq!(dsp.program_ram[1], 0x2222_2222);
         assert_eq!(dsp.program_ram[2], 0x3333_3333);
-        assert_eq!(dsp.pc, 3, "each write must auto-increment PC, matching real hardware's upload port");
+        assert_eq!(
+            dsp.pc, 3,
+            "each write must auto-increment PC, matching real hardware's upload port"
+        );
     }
 
     #[test]
@@ -786,7 +1153,10 @@ mod tests {
         for _ in 0..1000 {
             dsp.step(&work_ram);
         }
-        assert!(dsp.is_executing(), "an empty program must never clear EX by itself");
+        assert!(
+            dsp.is_executing(),
+            "an empty program must never clear EX by itself"
+        );
     }
 
     #[test]
@@ -797,7 +1167,11 @@ mod tests {
         dsp.write_control_port(0x0001_8000); // EX+LE, PC=0
         dsp.step(&work_ram);
         assert!(!dsp.is_executing(), "an End instruction must clear EX");
-        assert_eq!(dsp.prog_control & PCP_E, 0, "plain End (bit27 clear) must not raise the interrupt flag");
+        assert_eq!(
+            dsp.prog_control & PCP_E,
+            0,
+            "plain End (bit27 clear) must not raise the interrupt flag"
+        );
     }
 
     #[test]
@@ -808,7 +1182,11 @@ mod tests {
         dsp.write_control_port(0x0001_8000);
         dsp.step(&work_ram);
         assert!(!dsp.is_executing());
-        assert_ne!(dsp.prog_control & PCP_E, 0, "End-with-interrupt must set the E status bit");
+        assert_ne!(
+            dsp.prog_control & PCP_E,
+            0,
+            "End-with-interrupt must set the E status bit"
+        );
     }
 
     #[test]
@@ -845,7 +1223,11 @@ mod tests {
         assert_eq!(ScuDsp::low32(dsp.alu), -3, "5 - 8 must land in ALU as -3");
         assert_eq!(dsp.prog_control & PCP_Z, 0);
         assert_ne!(dsp.prog_control & PCP_S, 0, "-3 must set the sign flag");
-        assert_ne!(dsp.prog_control & PCP_C, 0, "5 - 8 must set the borrow/carry flag");
+        assert_ne!(
+            dsp.prog_control & PCP_C,
+            0,
+            "5 - 8 must set the borrow/carry flag"
+        );
     }
 
     #[test]
@@ -870,12 +1252,11 @@ mod tests {
         // this program must now run to completion in a bounded number of
         // steps.
         const PROGRAM: [u32; 32] = [
-            0x00001c00, 0x00003604, 0x00003704, 0x00001c02, 0x00001d00, 0x00861540,
-            0x14003109, 0x00003100, 0x00001d00, 0x00003005, 0x00001c03, 0x00003005,
-            0x00001c02, 0x83100000, 0x00001c03, 0x82100040, 0x00001c03, 0x00823500,
-            0x10000000, 0xd308001f, 0x00000000, 0xd3400015, 0x00001f00, 0xc0012300,
-            0xd3400018, 0x00001f00, 0xc000b300, 0xd340001b, 0x00000000, 0xd0000003,
-            0x00000000, 0xf0000000,
+            0x00001c00, 0x00003604, 0x00003704, 0x00001c02, 0x00001d00, 0x00861540, 0x14003109,
+            0x00003100, 0x00001d00, 0x00003005, 0x00001c03, 0x00003005, 0x00001c02, 0x83100000,
+            0x00001c03, 0x82100040, 0x00001c03, 0x00823500, 0x10000000, 0xd308001f, 0x00000000,
+            0xd3400015, 0x00001f00, 0xc0012300, 0xd3400018, 0x00001f00, 0xc000b300, 0xd340001b,
+            0x00000000, 0xd0000003, 0x00000000, 0xf0000000,
         ];
         let mut dsp = ScuDsp::new();
         let work_ram = WorkRam::new();
@@ -892,6 +1273,310 @@ mod tests {
             dsp.step(&work_ram);
             steps += 1;
         }
-        assert!(!dsp.is_executing(), "the real BIOS DSP program must reach its End instruction, not loop forever");
+        assert!(
+            !dsp.is_executing(),
+            "the real BIOS DSP program must reach its End instruction, not loop forever"
+        );
+    }
+
+    // ---- Phase 1 (scu.md): interpreter defects (D-DSP-1..7) ----
+
+    #[test]
+    fn ddsp1_p9_jmp_does_not_corrupt_alu_flags() {
+        // D-DSP-1 regression: before the fix, `execute_alu`'s op selector
+        // was masked to 4 bits (`(instruction >> 26) & 0xF`), discarding the
+        // instruction-class bits, so a non-Operation-Command instruction's
+        // own encoding could accidentally match a real ALU opcode. 0xD3400015
+        // is a JMP word (class 11, `(instr>>28)&0xF == 0xD`) whose bits
+        // 29:26 happen to equal 0x4 (ADD) -- under the old masked code this
+        // ran a phantom ADD on AC=5,P=8 (5+8=13 -> Z=0,S=0,C=0), clobbering
+        // the preceding SUB's real Z=0,S=1,C=1.
+        let mut dsp = ScuDsp::new();
+        let work_ram = WorkRam::new();
+        dsp.ac = 5;
+        dsp.p = 8;
+        dsp.program_ram[0] = 0x1400_0000; // Operation Command, ALU op SUB
+        dsp.program_ram[1] = 0xD340_0015; // JMP -- must not touch flags
+        dsp.write_control_port(0x0001_8000); // EX+LE, PC=0
+        dsp.step(&work_ram); // SUB: ALU = 5-8 = -3
+        assert_eq!(dsp.prog_control & PCP_Z, 0);
+        assert_ne!(dsp.prog_control & PCP_S, 0);
+        assert_ne!(dsp.prog_control & PCP_C, 0);
+        dsp.step(&work_ram); // JMP
+        assert_eq!(
+            dsp.prog_control & PCP_Z,
+            0,
+            "JMP must not clear Z spuriously"
+        );
+        assert_ne!(
+            dsp.prog_control & PCP_S,
+            0,
+            "JMP must not clobber S -- this is the D-DSP-1 regression"
+        );
+        assert_ne!(
+            dsp.prog_control & PCP_C,
+            0,
+            "JMP must not clobber C -- this is the D-DSP-1 regression"
+        );
+    }
+
+    #[test]
+    fn ddsp2_3_p9_deferred_increment_same_instruction_dual_read() {
+        // D-DSP-2/3 regression: reading MC0 on both the X-bus and Y-bus in
+        // the SAME instruction must return the *same* Data RAM word --
+        // CT[0] hasn't advanced yet mid-instruction, since increments are
+        // deferred via `inc_flg` and applied once after the whole
+        // instruction body runs. CT[0] must advance by exactly 1 total for
+        // the instruction, not once per read.
+        let mut dsp = ScuDsp::new();
+        let work_ram = WorkRam::new();
+        dsp.md[0][0] = 0x1234_5678;
+        // Operation Command: XL=1,Xsrc=MC0(4),YL=1,Ysrc=MC0(4), nothing else.
+        dsp.program_ram[0] = 0x0249_0000;
+        dsp.write_control_port(0x0001_8000);
+        dsp.step(&work_ram);
+        assert_eq!(dsp.rx, 0x1234_5678, "X-bus read of MC0");
+        assert_eq!(
+            dsp.ry, 0x1234_5678,
+            "Y-bus read of MC0 in the same instruction must see the SAME pre-increment word"
+        );
+        assert_eq!(
+            dsp.ct[0], 1,
+            "CT[0] must advance by exactly 1 for the whole instruction, not once per read"
+        );
+    }
+
+    #[test]
+    fn ddsp3_p9_mvi_mc0_sequence_lands_at_incrementing_offsets() {
+        let mut dsp = ScuDsp::new();
+        let work_ram = WorkRam::new();
+        dsp.program_ram[0] = 0x8000_000A; // MVI 10, MC0
+        dsp.program_ram[1] = 0x8000_0014; // MVI 20, MC0
+        dsp.program_ram[2] = 0x8000_001E; // MVI 30, MC0
+        dsp.write_control_port(0x0001_8000);
+        dsp.step(&work_ram);
+        dsp.step(&work_ram);
+        dsp.step(&work_ram);
+        assert_eq!(dsp.md[0][0], 10);
+        assert_eq!(dsp.md[0][1], 20);
+        assert_eq!(dsp.md[0][2], 30);
+        assert_eq!(
+            dsp.ct[0], 3,
+            "each MVI ...,MC0 must set incFlg[0], applied once per instruction"
+        );
+    }
+
+    #[test]
+    fn ddsp5_p9_end_writes_pc_plus_one_into_control_port() {
+        let mut dsp = ScuDsp::new();
+        let work_ram = WorkRam::new();
+        dsp.program_ram[5] = 0xF000_0000; // plain End
+        dsp.write_control_port(0x0001_8005); // EX+LE, PC=5
+        dsp.step(&work_ram);
+        assert!(!dsp.is_executing());
+        assert_eq!(
+            dsp.read_control_port() & 0xFF,
+            6,
+            "End must write PC+1 (6), not the pre-increment PC (5)"
+        );
+    }
+
+    #[test]
+    fn ddsp6_p9_dma_write_reaches_vdp2_vram() {
+        // D-DSP-6 regression: before widening read_long/write_long/
+        // write_word's region coverage, VDP2 VRAM wasn't decoded by this
+        // module at all -- this DMA silently wrote nothing.
+        let mut dsp = ScuDsp::new();
+        let work_ram = WorkRam::new();
+        // dsp_dma02 (H=0 CS=0 DIR=1, d1==0x04): mode=1 (add=1 longword),
+        // sel=1, immediate count=1.
+        dsp.program_ram[0] = 0xC000_9101;
+        dsp.wa0 = 0x0178_0000; // WA0<<2 == 0x05E00000 (VDP2 VRAM start -- inside the DMA engine's B-Bus range, 0x05A00000..0x06000000)
+        dsp.md[1][0] = 0xCAFE_BABE;
+        dsp.write_control_port(0x0001_8000);
+        for _ in 0..3 {
+            dsp.step(&work_ram);
+        }
+        let vram = work_ram.vdp2_vram.read().unwrap();
+        assert_eq!(
+            &vram[0..4],
+            &[0xCA, 0xFE, 0xBA, 0xBE],
+            "B-Bus path writes two 16-bit halves, big-endian"
+        );
+    }
+
+    // ---- Phase 1 (scu.md): the 6 previously-missing DMA addressing-mode
+    // variants. Instruction words and expected transfer results derived
+    // independently via a throwaway Python model of HR sec 3.8's bit
+    // layout (`dsp_dma_model.py`, not checked in) -- not hand-typed to
+    // match whatever this file's own implementation happens to compute. ----
+
+    #[test]
+    fn dsp_dma01_p9_read_immediate_nonhold() {
+        // 0xC0010103: DMA read, H=0 CS=0 DIR=0 (dispatch d1=0x00), mode
+        // bits17:15=010 (bit16 set -> read add=1 longword), sel=1 (MD1),
+        // immediate count=3.
+        let mut dsp = ScuDsp::new();
+        let work_ram = WorkRam::new();
+        dsp.program_ram[0] = 0xC001_0103;
+        dsp.ra0 = 0x0008_0000; // RA0<<2 == 0x00200000 (Low WRAM)
+        {
+            let mut low = work_ram.low_ram.write().unwrap();
+            write_long_to(&mut low[..], 0, 0xA5A5_0000);
+            write_long_to(&mut low[..], 4, 0xA5A5_0001);
+            write_long_to(&mut low[..], 8, 0xA5A5_0002);
+        }
+        dsp.write_control_port(0x0001_8000);
+        for _ in 0..3 {
+            dsp.step(&work_ram);
+        }
+        assert_eq!(dsp.md[1][0], 0xA5A5_0000);
+        assert_eq!(dsp.md[1][1], 0xA5A5_0001);
+        assert_eq!(dsp.md[1][2], 0xA5A5_0002);
+        assert_eq!(
+            dsp.ra0, 0x0008_0003,
+            "RA0 must advance by 3 longwords (add=1 each)"
+        );
+    }
+
+    #[test]
+    fn dsp_dma02_p9_write_immediate_nonhold() {
+        // 0xC0009203: DMA write, H=0 CS=0 DIR=1 (dispatch d1=0x04), mode=1
+        // (add=1 longword), sel=2 (MD2), immediate count=3.
+        let mut dsp = ScuDsp::new();
+        let work_ram = WorkRam::new();
+        dsp.program_ram[0] = 0xC000_9203;
+        dsp.wa0 = 0x0180_0400; // WA0<<2 == 0x06001000 (High WRAM, CPU-bus path)
+        dsp.md[2][0] = 0x1111_1111;
+        dsp.md[2][1] = 0x2222_2222;
+        dsp.md[2][2] = 0x3333_3333;
+        dsp.write_control_port(0x0001_8000);
+        for _ in 0..3 {
+            dsp.step(&work_ram);
+        }
+        assert_eq!(work_ram.read_high_ram_long(0x1000), 0x1111_1111);
+        assert_eq!(work_ram.read_high_ram_long(0x1004), 0x2222_2222);
+        assert_eq!(work_ram.read_high_ram_long(0x1008), 0x3333_3333);
+        assert_eq!(dsp.wa0, 0x0180_0403, "WA0 must advance by 3 longwords");
+    }
+
+    #[test]
+    fn dsp_dma05_p9_read_immediate_hold() {
+        // 0xC0014103: same as dsp_dma01's test but with H=1 (hold, dispatch
+        // d2=0x08).
+        let mut dsp = ScuDsp::new();
+        let work_ram = WorkRam::new();
+        dsp.program_ram[0] = 0xC001_4103;
+        dsp.ra0 = 0x0008_0000;
+        {
+            let mut low = work_ram.low_ram.write().unwrap();
+            write_long_to(&mut low[..], 0, 0xA5A5_0000);
+            write_long_to(&mut low[..], 4, 0xA5A5_0001);
+            write_long_to(&mut low[..], 8, 0xA5A5_0002);
+        }
+        dsp.write_control_port(0x0001_8000);
+        for _ in 0..3 {
+            dsp.step(&work_ram);
+        }
+        assert_eq!(
+            dsp.md[1][0], 0xA5A5_0000,
+            "hold variant must still move data, same as the non-hold one"
+        );
+        assert_eq!(dsp.md[1][1], 0xA5A5_0001);
+        assert_eq!(dsp.md[1][2], 0xA5A5_0002);
+        assert_eq!(
+            dsp.ra0, 0x0008_0000,
+            "H (hold) bit must restore RA0 to its pre-transfer value"
+        );
+    }
+
+    #[test]
+    fn dsp_dma06_p9_write_immediate_hold() {
+        // 0xC000D203: same as dsp_dma02's test but with H=1 (hold,
+        // dispatch d1=0x14).
+        let mut dsp = ScuDsp::new();
+        let work_ram = WorkRam::new();
+        dsp.program_ram[0] = 0xC000_D203;
+        dsp.wa0 = 0x0180_0400;
+        dsp.md[2][0] = 0x1111_1111;
+        dsp.md[2][1] = 0x2222_2222;
+        dsp.md[2][2] = 0x3333_3333;
+        dsp.write_control_port(0x0001_8000);
+        for _ in 0..3 {
+            dsp.step(&work_ram);
+        }
+        assert_eq!(work_ram.read_high_ram_long(0x1000), 0x1111_1111);
+        assert_eq!(work_ram.read_high_ram_long(0x1004), 0x2222_2222);
+        assert_eq!(work_ram.read_high_ram_long(0x1008), 0x3333_3333);
+        assert_eq!(
+            dsp.wa0, 0x0180_0400,
+            "H (hold) bit must restore WA0 to its pre-transfer value"
+        );
+    }
+
+    #[test]
+    fn dsp_dma07_p9_read_count_from_ram_hold_program_ram() {
+        // 0xC0016404: H=1 CS=1 DIR=0 (dispatch d2=0x0C), RAMsel=4 (Program
+        // RAM), count source bits2:0=4 -> MD[0][CT0] with post-increment.
+        // Count reduced to 2 (not the encoding's ceiling) so the transfer
+        // doesn't overwrite `program_ram[2]`, which is still the current PC
+        // by the time the transfer runs -- real hardware would genuinely
+        // execute whatever DMA just wrote there next (self-modifying-code
+        // edge case matching `step_dsp_dma` running before fetch each
+        // step), which this test isn't trying to exercise.
+        let mut dsp = ScuDsp::new();
+        let work_ram = WorkRam::new();
+        dsp.program_ram[0] = 0xC001_6404;
+        dsp.ra0 = 0x0008_0800; // RA0<<2 == 0x00202000
+        dsp.ct[0] = 5;
+        dsp.md[0][5] = 2; // count, read with post-increment (bits2:0 == 4)
+        {
+            let mut low = work_ram.low_ram.write().unwrap();
+            write_long_to(&mut low[..], 0x2000, 0xB0B0_0000);
+            write_long_to(&mut low[..], 0x2004, 0xB0B0_0001);
+        }
+        dsp.write_control_port(0x0001_8000);
+        for _ in 0..3 {
+            dsp.step(&work_ram);
+        }
+        assert_eq!(
+            dsp.program_ram[0], 0xB0B0_0000,
+            "RAMsel==4 must load Program RAM from index 0, ignoring PC"
+        );
+        assert_eq!(dsp.program_ram[1], 0xB0B0_0001);
+        assert_eq!(dsp.ra0, 0x0008_0800, "H (hold) bit must restore RA0");
+        assert_eq!(
+            dsp.ct[0], 6,
+            "count-from-RAM with bits2:0==4 must post-increment CT0"
+        );
+    }
+
+    #[test]
+    fn dsp_dma08_p9_write_count_from_ram_hold() {
+        // 0xC000F204: H=1 CS=1 DIR=1 (dispatch d1=0x1C), sel=2, count
+        // source bits2:0=4 -> MD[0][CT0] with post-increment.
+        let mut dsp = ScuDsp::new();
+        let work_ram = WorkRam::new();
+        dsp.program_ram[0] = 0xC000_F204;
+        dsp.wa0 = 0x0180_0800; // WA0<<2 == 0x06002000
+        dsp.ct[0] = 5;
+        dsp.md[0][5] = 4; // count, post-increment
+        dsp.md[2][0] = 0x4444_4444;
+        dsp.md[2][1] = 0x5555_5555;
+        dsp.md[2][2] = 0x6666_6666;
+        dsp.md[2][3] = 0x7777_7777;
+        dsp.write_control_port(0x0001_8000);
+        for _ in 0..3 {
+            dsp.step(&work_ram);
+        }
+        assert_eq!(work_ram.read_high_ram_long(0x2000), 0x4444_4444);
+        assert_eq!(work_ram.read_high_ram_long(0x2004), 0x5555_5555);
+        assert_eq!(work_ram.read_high_ram_long(0x2008), 0x6666_6666);
+        assert_eq!(work_ram.read_high_ram_long(0x200C), 0x7777_7777);
+        assert_eq!(dsp.wa0, 0x0180_0800, "H (hold) bit must restore WA0");
+        assert_eq!(
+            dsp.ct[0], 6,
+            "count-from-RAM with bits2:0==4 must post-increment CT0"
+        );
     }
 }

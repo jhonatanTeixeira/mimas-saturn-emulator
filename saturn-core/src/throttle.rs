@@ -28,15 +28,10 @@ pub const M68K_CLOCK_HZ: f64 = 44_100.0 * 256.0;
 
 /// `m68k.rs` doesn't model real per-opcode 68000 cycle costs at all (every
 /// `M68k::step()` call executes exactly one instruction with no timing
-/// information) -- unlike `Sh2`, which already flatly charges 2
-/// cycles/instruction regardless of real opcode timing (an existing,
-/// accepted simplification -- see `Sh2::step()`). Building a real
-/// per-opcode M68K cycle table is a separate, much bigger undertaking than
-/// this throttle; charging a flat nominal average keeps the same
-/// simplification tier already accepted for the SH-2, honestly documented
-/// as an approximation rather than silently pretended-precise. 8 is a
-/// commonly-cited rough average for 68000 code (real costs range roughly
-/// 4-20+ cycles depending on addressing mode).
+/// information). Building a real per-opcode M68K cycle table is a separate,
+/// much bigger undertaking; charging a flat nominal average keeps it
+/// documented as an approximation. See docs/implementation-plans/scsp.md
+/// for details on the M68K side.
 pub const M68K_NOMINAL_CYCLES_PER_INSTRUCTION: u64 = 8;
 
 /// Target amount of emulated time per pacing batch. Large enough that OS
@@ -130,9 +125,8 @@ impl ClockThrottle {
         // up degrades to a permanent no-op below (never sleeps, never
         // lies about elapsed time) -- exactly the documented "running
         // behind real-time... consider this observable" behavior.
-        let ideal_duration = Duration::from_secs_f64(
-            cycles_this_batch as f64 / (self.clock_hz * multiplier),
-        );
+        let ideal_duration =
+            Duration::from_secs_f64(cycles_this_batch as f64 / (self.clock_hz * multiplier));
         self.next_batch_due += ideal_duration;
         let now = Instant::now();
         if self.next_batch_due > now {
@@ -162,7 +156,10 @@ mod tests {
         // If this were mistakenly paced at Multiplier(1.0) instead, the
         // same workload would take roughly 1 second (1000 batches * 1ms) --
         // 200ms leaves a wide, unambiguous margin either way.
-        assert!(start.elapsed() < Duration::from_millis(200), "Unthrottled must not pace at all");
+        assert!(
+            start.elapsed() < Duration::from_millis(200),
+            "Unthrottled must not pace at all"
+        );
     }
 
     #[test]
@@ -178,8 +175,16 @@ mod tests {
             throttle.advance(1);
         }
         let elapsed = start.elapsed();
-        assert!(elapsed >= Duration::from_millis(7), "real-speed throttle paced too fast: {:?}", elapsed);
-        assert!(elapsed < Duration::from_millis(300), "real-speed throttle paced far too slow: {:?}", elapsed);
+        assert!(
+            elapsed >= Duration::from_millis(7),
+            "real-speed throttle paced too fast: {:?}",
+            elapsed
+        );
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "real-speed throttle paced far too slow: {:?}",
+            elapsed
+        );
     }
 
     #[test]
@@ -203,7 +208,8 @@ mod tests {
         assert!(
             fast_elapsed < slow_elapsed,
             "a higher multiplier must pace faster (real: {:?}, 50x: {:?})",
-            slow_elapsed, fast_elapsed
+            slow_elapsed,
+            fast_elapsed
         );
     }
 
@@ -229,7 +235,8 @@ mod tests {
     #[test]
     fn non_positive_multiplier_behaves_like_unthrottled() {
         for bad_multiplier in [0.0, -1.0] {
-            let mut throttle = ClockThrottle::new(10_000.0, speed(ThrottleSpeed::Multiplier(bad_multiplier)));
+            let mut throttle =
+                ClockThrottle::new(10_000.0, speed(ThrottleSpeed::Multiplier(bad_multiplier)));
             let start = Instant::now();
             for _ in 0..10_000 {
                 throttle.advance(1);

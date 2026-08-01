@@ -1,7 +1,7 @@
-use std::sync::{Arc, Mutex};
 use crate::bus_arbiter::BusArbiter;
 use crate::shared_buffers::WorkRam;
 use crate::sync::LockStepSync;
+use std::sync::{Arc, Mutex};
 
 static INTERRUPT_OVERRUN_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 fn log_interrupt_overrun_once(vector: u8, level: u8) {
@@ -223,6 +223,9 @@ pub struct Sh2 {
     pub onchip: crate::sh2_onchip::Sh2OnChip,
     pub address_array: [u32; 0x100],
     pub data_array: Box<[u8; 0x1000]>,
+    pub frc_leftover: u32,
+    pub frc_shift: u32,
+    pub pending_sync: u32,
 }
 
 // SR bit positions actually used by this subset of the ISA. Layout (T, S,
@@ -297,13 +300,22 @@ static ILLEGAL_OP_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec
 fn log_reg_access_once(region: &MemRegion, is_write: bool, val: u8) {
     let interesting = matches!(
         region,
-        MemRegion::Smpc(_) | MemRegion::Vdp1Regs(_) | MemRegion::Vdp2Regs(_)
-            | MemRegion::ScuRegs(_) | MemRegion::Cs2Regs(_) | MemRegion::OnChip(_)
+        MemRegion::Smpc(_)
+            | MemRegion::Vdp1Regs(_)
+            | MemRegion::Vdp2Regs(_)
+            | MemRegion::ScuRegs(_)
+            | MemRegion::Cs2Regs(_)
+            | MemRegion::OnChip(_)
     );
     if !interesting {
         return;
     }
-    let key = format!("{:?} {} val={:#04X}", region, if is_write { "W" } else { "R" }, val);
+    let key = format!(
+        "{:?} {} val={:#04X}",
+        region,
+        if is_write { "W" } else { "R" },
+        val
+    );
     let mut log = REG_ACCESS_LOG.lock().unwrap();
     if !log.contains(&key) {
         eprintln!("[REGACCESS] {}", key);
@@ -335,10 +347,16 @@ fn log_bus_miss_once(address: u32, is_write: bool, width: u8, pc: u32, info: &st
     }
     let area = address >> 29;
     let block = address & 0x0FF00000;
-    let key = format!("area={} block={:#010X} is_write={} width={}", area, block, is_write, width);
+    let key = format!(
+        "area={} block={:#010X} is_write={} width={}",
+        area, block, is_write, width
+    );
     let mut log = lock_bus_miss_log();
     if !log.contains(&key) {
-        eprintln!("[BUSMISS] area={} block={:#010X} is_write={} width={} pc={:#010X} info={}", area, block, is_write, width, pc, info);
+        eprintln!(
+            "[BUSMISS] area={} block={:#010X} is_write={} width={} pc={:#010X} info={}",
+            area, block, is_write, width, pc, info
+        );
         log.push(key);
     }
 }
@@ -397,19 +415,34 @@ impl Sh2 {
                     if a < 0x0010_0000 && a >= 0x0008_0000 {
                         is_miss = true;
                         info = "BIOS mirror offset";
-                    } else if a >= 0x0018_0000 && a < 0x0020_0000 && (a - 0x0018_0000) >= 0x0001_0000 {
+                    } else if a >= 0x0018_0000
+                        && a < 0x0020_0000
+                        && (a - 0x0018_0000) >= 0x0001_0000
+                    {
                         is_miss = true;
                         info = "Backup RAM mirror offset";
-                    } else if a >= 0x05D0_0000 && a < 0x05D8_0000 && (a - 0x05D0_0000) >= 0x0000_0100 {
+                    } else if a >= 0x05D0_0000
+                        && a < 0x05D8_0000
+                        && (a - 0x05D0_0000) >= 0x0000_0100
+                    {
                         is_miss = true;
                         info = "VDP1 Regs mirror offset";
-                    } else if a >= 0x05F8_0000 && a < 0x05FC_0000 && (a - 0x05F8_0000) >= 0x0000_0200 {
+                    } else if a >= 0x05F8_0000
+                        && a < 0x05FC_0000
+                        && (a - 0x05F8_0000) >= 0x0000_0200
+                    {
                         is_miss = true;
                         info = "VDP2 Regs mirror offset";
-                    } else if a >= 0x05FE_0000 && a < 0x05FF_0000 && (a - 0x05FE_0000) >= 0x0000_0100 {
+                    } else if a >= 0x05FE_0000
+                        && a < 0x05FF_0000
+                        && (a - 0x05FE_0000) >= 0x0000_0100
+                    {
                         is_miss = true;
                         info = "SCU Regs mirror offset";
-                    } else if a >= 0x0600_0000 && a < 0x0700_0000 && (a - 0x0600_0000) >= 0x0010_0000 {
+                    } else if a >= 0x0600_0000
+                        && a < 0x0700_0000
+                        && (a - 0x0600_0000) >= 0x0010_0000
+                    {
                         is_miss = true;
                         info = "High RAM mirror offset";
                     }
@@ -458,6 +491,9 @@ impl Sh2 {
             onchip: crate::sh2_onchip::Sh2OnChip::new(is_slave),
             address_array: [0; 0x100],
             data_array: Box::new([0; 0x1000]),
+            frc_leftover: 0,
+            frc_shift: 3,
+            pending_sync: 0,
         }
     }
 
@@ -559,6 +595,9 @@ impl Sh2 {
 
         // Reset on-chip registers
         self.onchip.reset(self.is_slave);
+        self.frc_leftover = 0;
+        self.frc_shift = 3;
+        self.pending_sync = 0;
     }
 
     fn translate(&self, address: u32) -> MemRegion {
@@ -612,6 +651,178 @@ impl Sh2 {
         }
     }
 
+    fn get_base_cycles(&self, opcode: u16) -> u32 {
+        if opcode & 0xFF00 == 0xC300 {
+            // TRAPA #imm
+            return 8;
+        }
+
+        // 4 cycles
+        if (opcode & 0xF0FF) == 0x401B {
+            // TAS.B @Rn
+            return 4;
+        }
+        if opcode == 0x002B {
+            // RTE
+            return 4;
+        }
+
+        // 3 cycles
+        if (opcode & 0xF0FF) == 0x4007 || (opcode & 0xF0FF) == 0x4017 {
+            // LDC.L @Rm+,SR or LDC.L @Rm+,GBR
+            return 3;
+        }
+        if (opcode & 0xF0FF) == 0x4027 {
+            // LDC.L @Rm+,VBR
+            return 3;
+        }
+        if opcode & 0xFC00 == 0xCC00 {
+            // TST.B/AND.B/XOR.B/OR.B #imm,@(R0,GBR)
+            return 3;
+        }
+        if (opcode & 0xF00F) == 0x000F || (opcode & 0xF00F) == 0x000E {
+            // MAC.L or MAC.W
+            return 3;
+        }
+        if opcode == 0x001B {
+            // SLEEP
+            return 3;
+        }
+        if opcode & 0xFF00 == 0x8900 {
+            // BT label
+            return if (self.sr & SR_T) != 0 { 3 } else { 1 };
+        }
+        if opcode & 0xFF00 == 0x8B00 {
+            // BF label
+            return if (self.sr & SR_T) == 0 { 3 } else { 1 };
+        }
+
+        // 2 cycles
+        if opcode & 0xFF00 == 0x8D00 {
+            // BT/S label
+            return if (self.sr & SR_T) != 0 { 2 } else { 1 };
+        }
+        if opcode & 0xFF00 == 0x8F00 {
+            // BF/S label
+            return if (self.sr & SR_T) == 0 { 2 } else { 1 };
+        }
+        if opcode & 0xF000 == 0xA000 {
+            // BRA
+            return 2;
+        }
+        if opcode & 0xF000 == 0xB000 {
+            // BSR
+            return 2;
+        }
+        if (opcode & 0xF0FF) == 0x402B {
+            // JMP
+            return 2;
+        }
+        if (opcode & 0xF0FF) == 0x400B {
+            // JSR
+            return 2;
+        }
+        if opcode == 0x000B {
+            // RTS
+            return 2;
+        }
+        if (opcode & 0xF0FF) == 0x0023 {
+            // BRAF Rn
+            return 2;
+        }
+        if (opcode & 0xF0FF) == 0x0003 {
+            // BSRF Rn
+            return 2;
+        }
+        if (opcode & 0xF00F) == 0x0007 {
+            // MUL.L Rm,Rn
+            return 2;
+        }
+        if (opcode & 0xF00F) == 0x300D {
+            // DMULS.L Rm,Rn
+            return 2;
+        }
+        if (opcode & 0xF00F) == 0x3005 {
+            // DMULU.L Rm,Rn
+            return 2;
+        }
+
+        // Default 1 cycle
+        1
+    }
+
+    fn mem_cycles_r(&self, addr: u32) -> u32 {
+        let phys = addr & 0x1FFF_FFFF;
+        if phys <= 0x000F_FFFF {
+            16 // BIOS ROM
+        } else if phys >= 0x0010_0000 && phys <= 0x001F_FFFF {
+            16 // Backup RAM
+        } else if phys >= 0x0020_0000 && phys <= 0x00FF_FFFF {
+            12 // Low Work RAM
+        } else if phys >= 0x0200_0000 && phys <= 0x03FF_FFFF {
+            24 // CS0
+        } else if phys >= 0x0580_0000 && phys <= 0x059F_FFFF {
+            24 // CS2
+        } else if phys >= 0x05A0_0000 && phys <= 0x05AF_FFFF {
+            50 // Sound RAM
+        } else if phys >= 0x05B0_0000 && phys <= 0x05BF_FFFF {
+            50 // Sound regs
+        } else if phys >= 0x05C0_0000 && phys <= 0x05DF_FFFF {
+            50 // VDP1 RAM
+        } else if phys >= 0x05E0_0000 && phys <= 0x05FF_FFFF {
+            // PLACEHOLDER: until getVramCycle is implemented in VDP2
+            2
+        } else {
+            0
+        }
+    }
+
+    fn mem_cycles_w(&self, addr: u32) -> u32 {
+        let phys = addr & 0x1FFF_FFFF;
+        if phys <= 0x000F_FFFF {
+            0 // BIOS ROM
+        } else if phys >= 0x0010_0000 && phys <= 0x001F_FFFF {
+            0 // Backup RAM
+        } else if phys >= 0x0020_0000 && phys <= 0x00FF_FFFF {
+            7 // Low Work RAM
+        } else if phys >= 0x0200_0000 && phys <= 0x03FF_FFFF {
+            0 // CS0
+        } else if phys >= 0x0580_0000 && phys <= 0x059F_FFFF {
+            0 // CS2
+        } else if phys >= 0x05A0_0000 && phys <= 0x05AF_FFFF {
+            7 // Sound RAM only
+        } else if phys >= 0x05C0_0000 && phys <= 0x05DF_FFFF {
+            2 // VDP1 RAM
+        } else if phys >= 0x05E0_0000 && phys <= 0x05FF_FFFF {
+            // PLACEHOLDER: until getVramCycle is implemented in VDP2
+            2
+        } else if phys >= 0x0600_0000 && phys <= 0x060F_FFFF {
+            2 // High Work RAM
+        } else {
+            0
+        }
+    }
+
+    fn add_wait_states_r(&mut self, address: u32) {
+        let wait = self.mem_cycles_r(address);
+        if wait > 0 {
+            self.cycles = self.cycles.wrapping_add(wait as u64);
+            if self.frc_shift <= 7 {
+                self.frt_exec(wait);
+            }
+        }
+    }
+
+    fn add_wait_states_w(&mut self, address: u32) {
+        let wait = self.mem_cycles_w(address);
+        if wait > 0 {
+            self.cycles = self.cycles.wrapping_add(wait as u64);
+            if self.frc_shift <= 7 {
+                self.frt_exec(wait);
+            }
+        }
+    }
+
     fn bus_wait(&mut self) {
         if let Some(sync) = self.sync.clone() {
             if let Some(caught_up) = self.arbiter.acquire_bus_sync(self.core_id, &sync) {
@@ -648,12 +859,13 @@ impl Sh2 {
                 let ram = self.work_ram.low_ram.read().unwrap();
                 ram[off & (ram.len() - 1)]
             }
-            MemRegion::HighRam(off) => {
-                self.work_ram.read_high_ram_byte(off)
-            }
+            MemRegion::HighRam(off) => self.work_ram.read_high_ram_byte(off),
             MemRegion::SoundRam(off) => {
                 let mut addr = off & 0xFFFFF;
-                let mem4b = self.work_ram.mem4b.load(std::sync::atomic::Ordering::Relaxed);
+                let mem4b = self
+                    .work_ram
+                    .mem4b
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 if !mem4b {
                     addr &= 0x3FFFF;
                     let ram = self.work_ram.sound_ram.read().unwrap();
@@ -693,7 +905,11 @@ impl Sh2 {
                 let masked_off = off & 0x1FF;
                 if masked_off == 0x004 || masked_off == 0x005 {
                     let tvstat = self.tvstat_word();
-                    if masked_off == 0x004 { (tvstat >> 8) as u8 } else { (tvstat & 0xFF) as u8 }
+                    if masked_off == 0x004 {
+                        (tvstat >> 8) as u8
+                    } else {
+                        (tvstat & 0xFF) as u8
+                    }
                 } else {
                     let ram = self.work_ram.vdp2_regs.read().unwrap();
                     ram[masked_off]
@@ -747,12 +963,8 @@ impl Sh2 {
             }
             MemRegion::PurgeArea => 0xFF,
             MemRegion::AddressArray(_) => 0, // Byte read falls to Unmapped/returns 0
-            MemRegion::DataArray(off) => {
-                self.data_array[off & 0xFFF]
-            }
-            MemRegion::OnChip(off) => {
-                self.read_onchip_byte(off)
-            }
+            MemRegion::DataArray(off) => self.data_array[off & 0xFFF],
+            MemRegion::OnChip(off) => self.read_onchip_byte(off),
             MemRegion::Unmapped => 0,
         }
     }
@@ -774,7 +986,10 @@ impl Sh2 {
             }
             MemRegion::SoundRam(off) => {
                 let mut addr = off & 0xFFFFF;
-                let mem4b = self.work_ram.mem4b.load(std::sync::atomic::Ordering::Relaxed);
+                let mem4b = self
+                    .work_ram
+                    .mem4b
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 if !mem4b {
                     addr &= 0x3FFFF;
                     let mut ram = self.work_ram.sound_ram.write().unwrap();
@@ -793,7 +1008,9 @@ impl Sh2 {
                 ram[masked_off] = val;
                 if masked_off == 0x400 {
                     let mem4b = (val & 2) != 0;
-                    self.work_ram.mem4b.store(mem4b, std::sync::atomic::Ordering::Relaxed);
+                    self.work_ram
+                        .mem4b
+                        .store(mem4b, std::sync::atomic::Ordering::Relaxed);
                 }
             }
             MemRegion::Vdp1Vram(off) => {
@@ -892,12 +1109,14 @@ impl Sh2 {
     pub fn read_byte(&mut self, address: u32) -> u8 {
         self.check_bus_miss(address, false, 1);
         self.bus_wait();
+        self.add_wait_states_r(address);
         self.raw_read_byte(address)
     }
 
     pub fn write_byte(&mut self, address: u32, val: u8) {
         self.check_bus_miss(address, true, 1);
         self.bus_wait();
+        self.add_wait_states_w(address);
         if address == 0x0600_1000 {
             self.cdrom_command_executed = true;
         }
@@ -913,6 +1132,7 @@ impl Sh2 {
             self.unaligned_access_flag = true;
         }
         self.bus_wait();
+        self.add_wait_states_r(address);
         self.raw_read_word(address)
     }
 
@@ -923,6 +1143,7 @@ impl Sh2 {
             self.unaligned_access_flag = true;
         }
         self.bus_wait();
+        self.add_wait_states_w(address);
         if address == 0x0600_1000 {
             self.cdrom_command_executed = true;
         }
@@ -936,6 +1157,7 @@ impl Sh2 {
             self.unaligned_access_flag = true;
         }
         self.bus_wait();
+        self.add_wait_states_r(address);
         self.raw_read_long(address)
     }
 
@@ -946,6 +1168,7 @@ impl Sh2 {
             self.unaligned_access_flag = true;
         }
         self.bus_wait();
+        self.add_wait_states_w(address);
         if address <= 0x0600_1000 && address + 4 > 0x0600_1000 {
             self.cdrom_command_executed = true;
         }
@@ -1005,12 +1228,13 @@ impl Sh2 {
                 let b1 = ram[(off + 1) & mask] as u16;
                 (b0 << 8) | b1
             }
-            MemRegion::HighRam(off) => {
-                self.work_ram.read_high_ram_word(off)
-            }
+            MemRegion::HighRam(off) => self.work_ram.read_high_ram_word(off),
             MemRegion::SoundRam(off) => {
                 let mut addr = off & 0xFFFFF;
-                let mem4b = self.work_ram.mem4b.load(std::sync::atomic::Ordering::Relaxed);
+                let mem4b = self
+                    .work_ram
+                    .mem4b
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 if !mem4b {
                     addr &= 0x3FFFF;
                     let ram = self.work_ram.sound_ram.read().unwrap();
@@ -1117,9 +1341,7 @@ impl Sh2 {
                 let b1 = self.data_array[(off + 1) & 0xFFF] as u16;
                 (b0 << 8) | b1
             }
-            MemRegion::OnChip(off) => {
-                self.read_onchip_word(off)
-            }
+            MemRegion::OnChip(off) => self.read_onchip_word(off),
             MemRegion::PurgeArea => 0xFFFF,
             MemRegion::AddressArray(_) | MemRegion::Unmapped => 0,
         }
@@ -1148,12 +1370,13 @@ impl Sh2 {
                 let b3 = ram[(off + 3) & mask] as u32;
                 (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
             }
-            MemRegion::HighRam(off) => {
-                self.work_ram.read_high_ram_long(off)
-            }
+            MemRegion::HighRam(off) => self.work_ram.read_high_ram_long(off),
             MemRegion::SoundRam(off) => {
                 let mut addr = off & 0xFFFFF;
-                let mem4b = self.work_ram.mem4b.load(std::sync::atomic::Ordering::Relaxed);
+                let mem4b = self
+                    .work_ram
+                    .mem4b
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 if !mem4b {
                     addr &= 0x3FFFF;
                     let ram = self.work_ram.sound_ram.read().unwrap();
@@ -1295,12 +1518,8 @@ impl Sh2 {
                 let b3 = self.data_array[(off + 3) & 0xFFF] as u32;
                 (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
             }
-            MemRegion::OnChip(off) => {
-                self.read_onchip(off)
-            }
-            MemRegion::AddressArray(off) => {
-                self.address_array[off >> 2]
-            }
+            MemRegion::OnChip(off) => self.read_onchip(off),
+            MemRegion::AddressArray(off) => self.address_array[off >> 2],
             MemRegion::PurgeArea => 0xFFFFFFFF,
             MemRegion::Unmapped => 0,
         }
@@ -1319,7 +1538,10 @@ impl Sh2 {
             }
             MemRegion::SoundRam(off) => {
                 let mut addr = off & 0xFFFFF;
-                let mem4b = self.work_ram.mem4b.load(std::sync::atomic::Ordering::Relaxed);
+                let mem4b = self
+                    .work_ram
+                    .mem4b
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 if !mem4b {
                     addr &= 0x3FFFF;
                     let mut ram = self.work_ram.sound_ram.write().unwrap();
@@ -1340,13 +1562,17 @@ impl Sh2 {
                 ram[masked_off] = (val >> 8) as u8;
                 if masked_off == 0x400 {
                     let mem4b = (ram[masked_off] & 2) != 0;
-                    self.work_ram.mem4b.store(mem4b, std::sync::atomic::Ordering::Relaxed);
+                    self.work_ram
+                        .mem4b
+                        .store(mem4b, std::sync::atomic::Ordering::Relaxed);
                 }
                 let masked_off2 = (off + 1) & mask;
                 ram[masked_off2] = val as u8;
                 if masked_off2 == 0x400 {
                     let mem4b = (ram[masked_off2] & 2) != 0;
-                    self.work_ram.mem4b.store(mem4b, std::sync::atomic::Ordering::Relaxed);
+                    self.work_ram
+                        .mem4b
+                        .store(mem4b, std::sync::atomic::Ordering::Relaxed);
                 }
             }
             MemRegion::Vdp1Vram(off) => {
@@ -1398,7 +1624,11 @@ impl Sh2 {
                         ram[masked_off] = (val >> 8) as u8;
                         ram[(masked_off + 1) & 0xFFF] = val as u8;
                     }
-                    if masked_off == 6 || masked_off == 7 || masked_off + 1 == 6 || masked_off + 1 == 7 {
+                    if masked_off == 6
+                        || masked_off == 7
+                        || masked_off + 1 == 6
+                        || masked_off + 1 == 7
+                    {
                         self.execute_cdrom_command();
                     }
                 }
@@ -1420,7 +1650,10 @@ impl Sh2 {
                 let uncached_addr = address & 0x0FFF_FFFF;
                 self.raw_write_word(uncached_addr, val);
             }
-            MemRegion::AddressArray(_) | MemRegion::DataArray(_) | MemRegion::Bios(_) | MemRegion::Unmapped => {}
+            MemRegion::AddressArray(_)
+            | MemRegion::DataArray(_)
+            | MemRegion::Bios(_)
+            | MemRegion::Unmapped => {}
         }
     }
 
@@ -1439,7 +1672,10 @@ impl Sh2 {
             }
             MemRegion::SoundRam(off) => {
                 let mut addr = off & 0xFFFFF;
-                let mem4b = self.work_ram.mem4b.load(std::sync::atomic::Ordering::Relaxed);
+                let mem4b = self
+                    .work_ram
+                    .mem4b
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 if !mem4b {
                     addr &= 0x3FFFF;
                     let mut ram = self.work_ram.sound_ram.write().unwrap();
@@ -1465,7 +1701,9 @@ impl Sh2 {
                     ram[masked_off] = (val >> (8 * (3 - i))) as u8;
                     if masked_off == 0x400 {
                         let mem4b = (ram[masked_off] & 2) != 0;
-                        self.work_ram.mem4b.store(mem4b, std::sync::atomic::Ordering::Relaxed);
+                        self.work_ram
+                            .mem4b
+                            .store(mem4b, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
             }
@@ -1555,7 +1793,7 @@ impl Sh2 {
                         ram[(masked_off + 2) & 0xFFF] = (val >> 8) as u8;
                         ram[(masked_off + 3) & 0xFFF] = val as u8;
                     }
-                    if (masked_off..masked_off+4).any(|o| o == 6 || o == 7) {
+                    if (masked_off..masked_off + 4).any(|o| o == 6 || o == 7) {
                         self.execute_cdrom_command();
                     }
                 }
@@ -1610,7 +1848,9 @@ impl Sh2 {
     }
 
     fn write_scu_dsp_port(&self, off: usize, val: u32) -> bool {
-        let Some(dsp) = self.scu_dsp.as_ref() else { return false };
+        let Some(dsp) = self.scu_dsp.as_ref() else {
+            return false;
+        };
         match off {
             0x80 => {
                 dsp.lock().unwrap().write_control_port(val);
@@ -1621,9 +1861,18 @@ impl Sh2 {
                 }
                 true
             }
-            0x84 => { dsp.lock().unwrap().write_program_ram_port(val); true }
-            0x88 => { dsp.lock().unwrap().write_data_ram_addr_port(val); true }
-            0x8C => { dsp.lock().unwrap().write_data_ram_data_port(val); true }
+            0x84 => {
+                dsp.lock().unwrap().write_program_ram_port(val);
+                true
+            }
+            0x88 => {
+                dsp.lock().unwrap().write_data_ram_addr_port(val);
+                true
+            }
+            0x8C => {
+                dsp.lock().unwrap().write_data_ram_data_port(val);
+                true
+            }
             _ => false,
         }
     }
@@ -1676,20 +1925,372 @@ impl Sh2 {
         }
     }
 
+    /// Execute the Free-Running Timer (FRT) for a given number of retired cycles.
+    /// DEVIATION: driven per retired cycles of each instruction step for accuracy,
+    /// rather than once per SH2Exec batch.
+    pub fn frt_exec(&mut self, cycles: u32) {
+        let shift = self.frc_shift;
+        if shift > 7 {
+            return;
+        }
+        let frcold = self.onchip.frc as u32;
+        let mask = (1 << shift) - 1;
+        let added_ticks = (cycles + self.frc_leftover) >> shift;
+        let mut frctemp = frcold + added_ticks;
+        let frctemp_orig = frctemp;
+        self.frc_leftover = (cycles + self.frc_leftover) & mask;
+
+        // DEVIATION: The crossing test wraps frctemp to 16-bit first, which can cause
+        // compare matches to be missed if the counter wraps past the target OCR
+        // value in a single step (HR §11.3).
+        frctemp &= 0xFFFF;
+
+        let cclra = (self.onchip.ftcsr & 0x01) != 0;
+
+        // 1. OCRA crossing test
+        if frctemp >= self.onchip.ocra as u32 && frcold < self.onchip.ocra as u32 {
+            self.onchip.ftcsr |= 0x08;
+            if (self.onchip.tier & 0x08) != 0 {
+                let vector = (self.onchip.vcrc & 0x7F) as u8;
+                let level = ((self.onchip.iprb >> 8) & 0xF) as u8;
+                self.queue_send(vector, level);
+            }
+            if cclra {
+                frctemp = 0;
+                self.frc_leftover = 0;
+            }
+        }
+
+        // 2. OCRB crossing test
+        if frctemp >= self.onchip.ocrb as u32 && frcold < self.onchip.ocrb as u32 {
+            self.onchip.ftcsr |= 0x04;
+            if (self.onchip.tier & 0x04) != 0 {
+                let vector = (self.onchip.vcrc & 0x7F) as u8;
+                let level = ((self.onchip.iprb >> 8) & 0xF) as u8;
+                self.queue_send(vector, level);
+            }
+        }
+
+        // 3. Overflow crossing test
+        if frctemp_orig > 0xFFFF {
+            self.onchip.ftcsr |= 0x02;
+            if (self.onchip.tier & 0x02) != 0 {
+                let vector = ((self.onchip.vcrd >> 8) & 0x7F) as u8;
+                let level = ((self.onchip.iprb >> 8) & 0xF) as u8;
+                self.queue_send(vector, level);
+            }
+        }
+
+        self.onchip.frc = frctemp as u16;
+    }
+
+    /// Trigger FRT Input Capture
+    pub fn frt_input_capture(&mut self) {
+        self.onchip.ftcsr |= 0x80;
+        self.onchip.ficr = self.onchip.frc;
+        if (self.onchip.tier & 0x80) != 0 {
+            let vector = ((self.onchip.vcrc >> 8) & 0x7F) as u8;
+            let level = ((self.onchip.iprb >> 8) & 0xF) as u8;
+            self.queue_send(vector, level);
+        }
+    }
+
+    pub fn dma_exec(&mut self) {
+        self.dma_proc(200);
+    }
+
+    pub fn dma_proc(&mut self, mut cycles: u32) {
+        // 1. AE / NMIF abort check
+        if (self.onchip.dmaor & 0x6) != 0 {
+            self.onchip.dmaor &= !1; // Clear DME
+            return;
+        }
+
+        // 2. DME check
+        if (self.onchip.dmaor & 0x1) == 0 {
+            return;
+        }
+
+        // 3. Find active channels (DE set and TE clear)
+        let ch0_active = (self.onchip.chcr0 & 1) != 0 && (self.onchip.chcr0 & 2) == 0;
+        let ch1_active = (self.onchip.chcr1 & 1) != 0 && (self.onchip.chcr1 & 2) == 0;
+
+        if !ch0_active && !ch1_active {
+            return;
+        }
+
+        // 4. Determine channel priority
+        let ch = if (self.onchip.dmaor & 0x8) != 0 {
+            // Round-robin
+            if ch0_active && ch1_active {
+                if self.onchip.dma_round_robin_next == 1 {
+                    1
+                } else {
+                    0
+                }
+            } else if ch0_active {
+                0
+            } else {
+                1
+            }
+        } else {
+            // Fixed priority: Channel 0 has priority
+            if ch0_active {
+                0
+            } else {
+                1
+            }
+        };
+
+        // 5. Apply dual channel cycle budget doubling and run transfer
+        if ch == 0 {
+            let budget = if (self.onchip.chcr0 & 0x8) == 0 {
+                cycles.saturating_mul(2)
+            } else {
+                cycles
+            };
+            self.dma_transfer_cycles(0, budget);
+            if (self.onchip.dmaor & 0x8) != 0 && ch0_active && ch1_active {
+                self.onchip.dma_round_robin_next = 1;
+            }
+        } else {
+            let budget = if (self.onchip.chcr1 & 0x8) == 0 {
+                cycles.saturating_mul(2)
+            } else {
+                cycles
+            };
+            self.dma_transfer_cycles(1, budget);
+            if (self.onchip.dmaor & 0x8) != 0 && ch0_active && ch1_active {
+                self.onchip.dma_round_robin_next = 0;
+            }
+        }
+    }
+
+    fn get_eat_clock(&self, sar: u32, dar: u32) -> u32 {
+        let s = sar & 0x0FFF_FFFF;
+        let d = dar & 0x0FFF_FFFF;
+
+        // CS2 source: 0x05800000 to 0x059FFFFF
+        if (0x0580_0000..0x05A0_0000).contains(&s) {
+            return 1;
+        }
+
+        // VDP2 RAM source: 0x05E00000 to 0x05EFFFFF (VDP2 VRAM)
+        if (0x05E0_0000..0x05F0_0000).contains(&s) {
+            if (0x0600_0000..0x0800_0000).contains(&d) {
+                return 44; // High WRAM
+            } else if (0x0020_0000..0x0030_0000).contains(&d) {
+                return 50; // Low WRAM
+            } else if (0x05A0_0000..0x05D8_0000).contains(&d) {
+                return 427; // Sound RAM/regs, VDP1 RAM/regs
+            } else if (0x05E0_0000..0x05F0_0000).contains(&d) {
+                return 1; // VDP2 RAM
+            } else if (0x05F8_0000..0x05FC_0000).contains(&d) {
+                return 50; // VDP2 regs
+            } else {
+                return 44;
+            }
+        }
+
+        // VDP1 RAM source: 0x05C00000 to 0x05C7FFFF
+        if (0x05C0_0000..0x05D0_0000).contains(&s) {
+            if (0x0600_0000..0x0800_0000).contains(&d)
+                || (0x0020_0000..0x0030_0000).contains(&d)
+                || (0x05A0_0000..0x05C0_0000).contains(&d)
+                || (0x05F8_0000..0x05FC_0000).contains(&d)
+            {
+                return 50;
+            } else if (0x05C0_0000..0x05D8_0000).contains(&d) {
+                return 570; // VDP1 RAM / VDP1 regs
+            } else if (0x05E0_0000..0x05F0_0000).contains(&d) {
+                return 225; // VDP2 RAM
+            } else {
+                return 44;
+            }
+        }
+
+        // WRAM / anything else source
+        if (0x0600_0000..0x0800_0000).contains(&d)
+            || (0x0020_0000..0x0030_0000).contains(&d)
+            || (0x05C0_0000..0x05D0_0000).contains(&d)
+            || (0x05F8_0000..0x05FC_0000).contains(&d)
+        {
+            return 14;
+        } else if (0x05A0_0000..0x05C0_0000).contains(&d) {
+            return 20; // Sound RAM/regs
+        } else if (0x05D0_0000..0x05D8_0000).contains(&d) {
+            return 30; // VDP1 regs
+        } else if (0x05E0_0000..0x05F0_0000).contains(&d) {
+            return 82; // VDP2 RAM
+        } else {
+            return 14;
+        }
+    }
+
+    fn dma_transfer_cycles(&mut self, ch: usize, budget: u32) {
+        let mut sar = if ch == 0 {
+            self.onchip.sar0
+        } else {
+            self.onchip.sar1
+        };
+        let mut dar = if ch == 0 {
+            self.onchip.dar0
+        } else {
+            self.onchip.dar1
+        };
+        let mut tcr = if ch == 0 {
+            self.onchip.tcr0
+        } else {
+            self.onchip.tcr1
+        };
+        let mut chcr = if ch == 0 {
+            self.onchip.chcr0
+        } else {
+            self.onchip.chcr1
+        };
+        let mut copy_clock = if ch == 0 {
+            self.onchip.ch0_copy_clock
+        } else {
+            self.onchip.ch1_copy_clock
+        };
+        let vcrdma = if ch == 0 {
+            self.onchip.vcrdma0
+        } else {
+            self.onchip.vcrdma1
+        };
+
+        copy_clock = copy_clock.saturating_add(budget);
+
+        let size = (chcr >> 10) & 3;
+        let stride = match size {
+            0 => 1,
+            1 => 2,
+            2 | 3 => 4,
+            _ => 1,
+        };
+
+        let src_mode = (chcr >> 12) & 3;
+        let dst_mode = (chcr >> 14) & 3;
+
+        let mut locked = false;
+
+        if tcr == 0 {
+            chcr |= 2;
+            if ch == 0 {
+                self.onchip.chcr0m.set(self.onchip.chcr0m.get() | 2);
+            } else {
+                self.onchip.chcr1m.set(self.onchip.chcr1m.get() | 2);
+            }
+            if (chcr & 0x4) != 0 {
+                let vector = (vcrdma & 0xFF) as u8;
+                let level = ((self.onchip.ipra & 0xF00) >> 8) as u8;
+                self.queue_send(vector, level);
+            }
+        }
+
+        while tcr > 0 {
+            let eat = self.get_eat_clock(sar, dar);
+            let cost = if size == 3 {
+                std::cmp::max(1, eat >> 2)
+            } else {
+                eat
+            };
+
+            if copy_clock < cost {
+                break;
+            }
+            copy_clock -= cost;
+
+            if !locked {
+                self.arbiter.lock_for_dma();
+                locked = true;
+            }
+
+            match size {
+                0 => {
+                    let val = self.raw_read_byte(sar);
+                    self.raw_write_byte(dar, val);
+                }
+                1 => {
+                    let val = self.raw_read_word(sar);
+                    self.raw_write_word(dar, val);
+                }
+                2 | 3 => {
+                    let val = self.raw_read_long(sar);
+                    self.raw_write_long(dar, val);
+                }
+                _ => {}
+            }
+
+            match src_mode {
+                1 => sar = sar.wrapping_add(stride),
+                2 => sar = sar.wrapping_sub(stride),
+                _ => {}
+            }
+            match dst_mode {
+                1 => dar = dar.wrapping_add(stride),
+                2 => dar = dar.wrapping_sub(stride),
+                _ => {}
+            }
+
+            tcr = tcr.wrapping_sub(1);
+
+            if tcr == 0 {
+                chcr |= 2;
+                if ch == 0 {
+                    self.onchip.chcr0m.set(self.onchip.chcr0m.get() | 2);
+                } else {
+                    self.onchip.chcr1m.set(self.onchip.chcr1m.get() | 2);
+                }
+                if (chcr & 0x4) != 0 {
+                    let vector = (vcrdma & 0xFF) as u8;
+                    let level = ((self.onchip.ipra & 0xF00) >> 8) as u8;
+                    self.queue_send(vector, level);
+                }
+                break;
+            }
+        }
+
+        if locked {
+            self.arbiter.unlock_from_dma();
+        }
+
+        if ch == 0 {
+            self.onchip.sar0 = sar;
+            self.onchip.dar0 = dar;
+            self.onchip.tcr0 = tcr;
+            self.onchip.chcr0 = chcr;
+            self.onchip.ch0_copy_clock = copy_clock;
+        } else {
+            self.onchip.sar1 = sar;
+            self.onchip.dar1 = dar;
+            self.onchip.tcr1 = tcr;
+            self.onchip.chcr1 = chcr;
+            self.onchip.ch1_copy_clock = copy_clock;
+        }
+    }
+
     /// Run single step of CPU
     pub fn step(&mut self) {
         self.service_pending_interrupt();
+        // NOTE: Instruction fetch uses raw_read_word to avoid charging fetch wait states,
+        // matching the hardware reference (P8-3).
         let opcode = if (self.pc & 0xC000_0000) == 0xC000_0000 {
             let off = (self.pc & 0xFFF) as usize;
             let hi = self.data_array[off];
             let lo = self.data_array[off.wrapping_add(1) & 0xFFF];
             (hi as u16) << 8 | (lo as u16)
         } else {
-            self.read_word(self.pc)
+            self.raw_read_word(self.pc)
         };
         self.pc = self.pc.wrapping_add(2);
+        let base = self.get_base_cycles(opcode);
         self.execute(opcode);
-        self.cycles = self.cycles.wrapping_add(2);
+        self.cycles = self.cycles.wrapping_add(base as u64);
+        if self.frc_shift <= 7 {
+            self.frt_exec(base);
+        }
+        self.dma_proc(base);
     }
 
     /// Raise VBLANK-IN. Actual entry into the handler (if any) happens on
@@ -1767,13 +2368,15 @@ impl Sh2 {
     /// forward progress and are accepted as already-complete no-ops -- SF
     /// already always reads idle regardless of command.
     fn smpc_execute_command(&mut self, command: u8) {
-        if command == 0x02 { // SSHON
+        if command == 0x02 {
+            // SSHON
             if let Some(ref sync) = self.sync {
                 sync.set_thread_active(1, true);
             }
             return;
         }
-        if command == 0x03 { // SSHOFF
+        if command == 0x03 {
+            // SSHOFF
             if let Some(ref sync) = self.sync {
                 sync.set_thread_active(1, false);
             }
@@ -1821,11 +2424,11 @@ impl Sh2 {
         ram[SMPC_OREG_BASE_OFFSET + 9 * 2] = 1; // region: Japan fallback
         ram[SMPC_OREG_BASE_OFFSET + 10 * 2] = 0x34; // dotsel/mshnmi/sysres/sndres = 0
         ram[SMPC_OREG_BASE_OFFSET + 11 * 2] = 0; // cdres = 0
-        // PDE (bit 5) must be 1 when the command finishes, because peripheral
-        // data collection is complete (either we didn't request any, or we did
-        // and it completed instantly). Real BIOS boot code polls PDE waiting
-        // for it to be 1, so leaving it 0 when wants_peripheral is false hangs
-        // the boot loop at 0x338C.
+                                                 // PDE (bit 5) must be 1 when the command finishes, because peripheral
+                                                 // data collection is complete (either we didn't request any, or we did
+                                                 // and it completed instantly). Real BIOS boot code polls PDE waiting
+                                                 // for it to be 1, so leaving it 0 when wants_peripheral is false hangs
+                                                 // the boot loop at 0x338C.
         ram[SMPC_SR_OFFSET] = 0x6F;
         drop(ram);
 
@@ -1844,8 +2447,12 @@ impl Sh2 {
     /// `VBLANK_DURATION` of the period, matching real hardware's scanline
     /// split (see the `VBLANK_DURATION` doc comment).
     fn tvstat_word(&self) -> u16 {
-        let Some(due) = self.next_vblank_due else { return 0 };
-        let Some(period_start) = due.checked_sub(VBLANK_INTERVAL) else { return 0 };
+        let Some(due) = self.next_vblank_due else {
+            return 0;
+        };
+        let Some(period_start) = due.checked_sub(VBLANK_INTERVAL) else {
+            return 0;
+        };
         let now = std::time::Instant::now();
         if now >= period_start && now.duration_since(period_start) < VBLANK_DURATION {
             TVSTAT_VBLANK_BIT
@@ -1898,7 +2505,11 @@ impl Sh2 {
         self.registers[15] = pc_addr;
 
         // Update SR mask: clamp NMI level to 15 (0xF)
-        let new_mask = if int.level == 16 { 15 } else { int.level as u32 };
+        let new_mask = if int.level == 16 {
+            15
+        } else {
+            int.level as u32
+        };
         self.sr = (self.sr & !(0xFu32 << SR_IMASK_SHIFT)) | (new_mask << SR_IMASK_SHIFT);
 
         // Vector jump
@@ -1912,7 +2523,12 @@ impl Sh2 {
         let slot_pc = self.pc;
         let opcode = self.read_word(slot_pc);
         self.pc = target.wrapping_sub(2);
+        let base = self.get_base_cycles(opcode);
         self.execute(opcode);
+        self.cycles = self.cycles.wrapping_add(base as u64);
+        if self.frc_shift <= 7 {
+            self.frt_exec(base);
+        }
         self.pc = self.pc.wrapping_add(2);
     }
 
@@ -1925,10 +2541,10 @@ impl Sh2 {
         let d12 = (opcode & 0xFFF) as u32;
         let imm8 = (opcode & 0xFF) as u8;
 
-
         // 0xFFFF and other illegal instructions will fall through to the common exception handler at the end of execute()
 
-        if opcode & 0xFF00 == 0xC300 { // TRAPA #imm
+        if opcode & 0xFF00 == 0xC300 {
+            // TRAPA #imm
             // No delay slot, so the return address is simply the address
             // right after the TRAPA instruction -- which `self.pc` already
             // is at this point (step() advances it past the fetch before
@@ -1947,36 +2563,52 @@ impl Sh2 {
 
         match opcode & 0xF0FF {
             0x0009 => return, // NOP
-            0x000B => { // RTS
+            0x000B => {
+                // RTS
                 let target = self.pr;
                 self.delay_slot_and_jump(target);
                 return;
             }
-            0x0018 => { self.set_t(true); return; } // SETT
-            0x0008 => { self.set_t(false); return; } // CLRT
-            0x0019 => { self.sr &= !(SR_T | SR_M | SR_Q); return; } // DIV0U: M=Q=T=0
-            0x0028 => { self.mach = 0; self.macl = 0; return; } // CLRMAC
+            0x0018 => {
+                self.set_t(true);
+                return;
+            } // SETT
+            0x0008 => {
+                self.set_t(false);
+                return;
+            } // CLRT
+            0x0019 => {
+                self.sr &= !(SR_T | SR_M | SR_Q);
+                return;
+            } // DIV0U: M=Q=T=0
+            0x0028 => {
+                self.mach = 0;
+                self.macl = 0;
+                return;
+            } // CLRMAC
             0x001B => {
                 // SLEEP: PC is not advanced, wait for interrupt.
                 // Since step() already advanced self.pc by 2, we rewind it.
                 self.pc = self.pc.wrapping_sub(2);
-                self.cycles = self.cycles.wrapping_add(3);
                 return;
             }
-            0x0023 => { // BRAF Rn
+            0x0023 => {
+                // BRAF Rn
                 let val = self.registers[n];
                 let target = self.pc.wrapping_add(2).wrapping_add(val);
                 self.delay_slot_and_jump(target);
                 return;
             }
-            0x0003 => { // BSRF Rn
+            0x0003 => {
+                // BSRF Rn
                 let val = self.registers[n];
                 let target = self.pc.wrapping_add(2).wrapping_add(val);
                 self.pr = self.pc.wrapping_add(2);
                 self.delay_slot_and_jump(target);
                 return;
             }
-            0x002B => { // RTE: pops PC first (lower stack address), then SR -- real
+            0x002B => {
+                // RTE: pops PC first (lower stack address), then SR -- real
                 // hardware pushes SR then PC on exception entry, so PC ends
                 // up on top; see `service_pending_interrupt`.
                 let sp = self.registers[15];
@@ -1987,28 +2619,75 @@ impl Sh2 {
                 self.delay_slot_and_jump(new_pc);
                 return;
             }
-            0x0002 => { self.registers[n] = self.sr; return; } // STC SR,Rn
-            0x0012 => { self.registers[n] = self.gbr; return; } // STC GBR,Rn
-            0x0022 => { self.registers[n] = self.vbr; return; } // STC VBR,Rn
-            0x000A => { self.registers[n] = self.mach; return; } // STS MACH,Rn
-            0x001A => { self.registers[n] = self.macl; return; } // STS MACL,Rn
-            0x002A => { self.registers[n] = self.pr; return; } // STS PR,Rn
-            0x0029 => { self.registers[n] = self.t() as u32; return; } // MOVT Rn
+            0x0002 => {
+                self.registers[n] = self.sr;
+                return;
+            } // STC SR,Rn
+            0x0012 => {
+                self.registers[n] = self.gbr;
+                return;
+            } // STC GBR,Rn
+            0x0022 => {
+                self.registers[n] = self.vbr;
+                return;
+            } // STC VBR,Rn
+            0x000A => {
+                self.registers[n] = self.mach;
+                return;
+            } // STS MACH,Rn
+            0x001A => {
+                self.registers[n] = self.macl;
+                return;
+            } // STS MACL,Rn
+            0x002A => {
+                self.registers[n] = self.pr;
+                return;
+            } // STS PR,Rn
+            0x0029 => {
+                self.registers[n] = self.t() as u32;
+                return;
+            } // MOVT Rn
             _ => {}
         }
 
         match opcode & 0xF00F {
-            0x0004 => { let a = self.registers[0].wrapping_add(self.registers[n]); self.write_byte(a, self.registers[m] as u8); return; }
-            0x0005 => { let a = self.registers[0].wrapping_add(self.registers[n]); self.write_word(a, self.registers[m] as u16); return; }
-            0x0006 => { let a = self.registers[0].wrapping_add(self.registers[n]); self.write_long(a, self.registers[m]); return; }
-            0x0007 => { // MUL.L Rm,Rn
+            0x0004 => {
+                let a = self.registers[0].wrapping_add(self.registers[n]);
+                self.write_byte(a, self.registers[m] as u8);
+                return;
+            }
+            0x0005 => {
+                let a = self.registers[0].wrapping_add(self.registers[n]);
+                self.write_word(a, self.registers[m] as u16);
+                return;
+            }
+            0x0006 => {
+                let a = self.registers[0].wrapping_add(self.registers[n]);
+                self.write_long(a, self.registers[m]);
+                return;
+            }
+            0x0007 => {
+                // MUL.L Rm,Rn
                 self.macl = self.registers[n].wrapping_mul(self.registers[m]);
                 return;
             }
-            0x000C => { let a = self.registers[0].wrapping_add(self.registers[m]); self.registers[n] = self.read_byte(a) as i8 as i32 as u32; return; }
-            0x000D => { let a = self.registers[0].wrapping_add(self.registers[m]); self.registers[n] = self.read_word(a) as i16 as i32 as u32; return; }
-            0x000E => { let a = self.registers[0].wrapping_add(self.registers[m]); self.registers[n] = self.read_long(a); return; }
-            0x000F => { // MAC.L @Rm+,@Rn+
+            0x000C => {
+                let a = self.registers[0].wrapping_add(self.registers[m]);
+                self.registers[n] = self.read_byte(a) as i8 as i32 as u32;
+                return;
+            }
+            0x000D => {
+                let a = self.registers[0].wrapping_add(self.registers[m]);
+                self.registers[n] = self.read_word(a) as i16 as i32 as u32;
+                return;
+            }
+            0x000E => {
+                let a = self.registers[0].wrapping_add(self.registers[m]);
+                self.registers[n] = self.read_long(a);
+                return;
+            }
+            0x000F => {
+                // MAC.L @Rm+,@Rn+
                 let addr_n = self.registers[n];
                 let val_n = self.read_long(addr_n) as i32 as i64;
                 self.registers[n] = addr_n.wrapping_add(4);
@@ -2039,47 +2718,55 @@ impl Sh2 {
         }
 
         match opcode & 0xF000 {
-            0x1000 => { // MOV.L Rm,@(disp4,Rn)
+            0x1000 => {
+                // MOV.L Rm,@(disp4,Rn)
                 let addr = self.registers[n].wrapping_add(d4.wrapping_mul(4));
                 self.write_long(addr, self.registers[m]);
                 return;
             }
-            0x5000 => { // MOV.L @(disp4,Rm),Rn
+            0x5000 => {
+                // MOV.L @(disp4,Rm),Rn
                 let addr = self.registers[m].wrapping_add(d4.wrapping_mul(4));
                 self.registers[n] = self.read_long(addr);
                 return;
             }
-            0x7000 => { // ADD #imm,Rn
+            0x7000 => {
+                // ADD #imm,Rn
                 let imm = (imm8 as i8) as i32 as u32;
                 self.registers[n] = self.registers[n].wrapping_add(imm);
                 return;
             }
-            0x9000 => { // MOV.W @(disp8,PC),Rn
+            0x9000 => {
+                // MOV.W @(disp8,PC),Rn
                 let base = self.pc.wrapping_add(2) & !1u32; // PC of this instr + 4, this instr's PC is self.pc-2
                 let addr = base.wrapping_add(d8.wrapping_mul(2));
                 self.registers[n] = self.read_word(addr) as i16 as i32 as u32;
                 return;
             }
-            0xA000 => { // BRA label
+            0xA000 => {
+                // BRA label
                 let disp = sign_extend12(d12);
                 let target = self.pc.wrapping_add(2).wrapping_add((disp << 1) as u32);
                 self.delay_slot_and_jump(target);
                 return;
             }
-            0xB000 => { // BSR label
+            0xB000 => {
+                // BSR label
                 let disp = sign_extend12(d12);
                 let target = self.pc.wrapping_add(2).wrapping_add((disp << 1) as u32);
                 self.pr = self.pc.wrapping_add(2);
                 self.delay_slot_and_jump(target);
                 return;
             }
-            0xD000 => { // MOV.L @(disp8,PC),Rn
+            0xD000 => {
+                // MOV.L @(disp8,PC),Rn
                 let base = self.pc.wrapping_add(2) & !3u32;
                 let addr = base.wrapping_add(d8.wrapping_mul(4));
                 self.registers[n] = self.read_long(addr);
                 return;
             }
-            0xE000 => { // MOV #imm,Rn
+            0xE000 => {
+                // MOV #imm,Rn
                 self.registers[n] = (imm8 as i8) as i32 as u32;
                 return;
             }
@@ -2087,12 +2774,14 @@ impl Sh2 {
         }
 
         match opcode & 0xFF00 {
-            0x8800 => { // CMP/EQ #imm,R0
+            0x8800 => {
+                // CMP/EQ #imm,R0
                 let imm = (imm8 as i8) as i32 as u32;
                 self.set_t(self.registers[0] == imm);
                 return;
             }
-            0x8900 => { // BT label (no delay slot)
+            0x8900 => {
+                // BT label (no delay slot)
                 // Real formula: target = addr_of_this_instr + 4 + disp*2.
                 // self.pc already holds addr_of_this_instr + 2 at this point
                 // (step() advanced it past the fetch), so add the other +2
@@ -2105,14 +2794,16 @@ impl Sh2 {
                 }
                 return;
             }
-            0x8B00 => { // BF label (no delay slot)
+            0x8B00 => {
+                // BF label (no delay slot)
                 if !self.t() {
                     let disp = sign_extend8(d8);
                     self.pc = self.pc.wrapping_add(2).wrapping_add((disp << 1) as u32);
                 }
                 return;
             }
-            0x8D00 => { // BT/S label (delay slot)
+            0x8D00 => {
+                // BT/S label (delay slot)
                 if self.t() {
                     let disp = sign_extend8(d8);
                     let target = self.pc.wrapping_add(2).wrapping_add((disp << 1) as u32);
@@ -2120,7 +2811,8 @@ impl Sh2 {
                 }
                 return;
             }
-            0x8F00 => { // BF/S label (delay slot)
+            0x8F00 => {
+                // BF/S label (delay slot)
                 if !self.t() {
                     let disp = sign_extend8(d8);
                     let target = self.pc.wrapping_add(2).wrapping_add((disp << 1) as u32);
@@ -2128,40 +2820,81 @@ impl Sh2 {
                 }
                 return;
             }
-            0xC800 => { self.set_t((self.registers[0] & imm8 as u32) == 0); return; } // TST #imm,R0
-            0xC900 => { self.registers[0] &= imm8 as u32; return; } // AND #imm,R0
-            0xCA00 => { self.registers[0] ^= imm8 as u32; return; } // XOR #imm,R0
-            0xCB00 => { self.registers[0] |= imm8 as u32; return; } // OR #imm,R0
-            0xC700 => { // MOVA @(disp8,PC),R0
+            0xC800 => {
+                self.set_t((self.registers[0] & imm8 as u32) == 0);
+                return;
+            } // TST #imm,R0
+            0xC900 => {
+                self.registers[0] &= imm8 as u32;
+                return;
+            } // AND #imm,R0
+            0xCA00 => {
+                self.registers[0] ^= imm8 as u32;
+                return;
+            } // XOR #imm,R0
+            0xCB00 => {
+                self.registers[0] |= imm8 as u32;
+                return;
+            } // OR #imm,R0
+            0xC700 => {
+                // MOVA @(disp8,PC),R0
                 let base = self.pc.wrapping_add(2) & !3u32;
                 self.registers[0] = base.wrapping_add(d8.wrapping_mul(4));
                 return;
             }
-            0xC000 => { let a = self.gbr.wrapping_add(d8); self.write_byte(a, self.registers[0] as u8); return; } // MOV.B R0,@(disp8,GBR)
-            0xC100 => { let a = self.gbr.wrapping_add(d8.wrapping_mul(2)); self.write_word(a, self.registers[0] as u16); return; }
-            0xC200 => { let a = self.gbr.wrapping_add(d8.wrapping_mul(4)); self.write_long(a, self.registers[0]); return; }
-            0xC400 => { let a = self.gbr.wrapping_add(d8); self.registers[0] = self.read_byte(a) as i8 as i32 as u32; return; }
-            0xC500 => { let a = self.gbr.wrapping_add(d8.wrapping_mul(2)); self.registers[0] = self.read_word(a) as i16 as i32 as u32; return; }
-            0xC600 => { let a = self.gbr.wrapping_add(d8.wrapping_mul(4)); self.registers[0] = self.read_long(a); return; }
-            0xCC00 => { // TST.B #imm,@(R0,GBR)
+            0xC000 => {
+                let a = self.gbr.wrapping_add(d8);
+                self.write_byte(a, self.registers[0] as u8);
+                return;
+            } // MOV.B R0,@(disp8,GBR)
+            0xC100 => {
+                let a = self.gbr.wrapping_add(d8.wrapping_mul(2));
+                self.write_word(a, self.registers[0] as u16);
+                return;
+            }
+            0xC200 => {
+                let a = self.gbr.wrapping_add(d8.wrapping_mul(4));
+                self.write_long(a, self.registers[0]);
+                return;
+            }
+            0xC400 => {
+                let a = self.gbr.wrapping_add(d8);
+                self.registers[0] = self.read_byte(a) as i8 as i32 as u32;
+                return;
+            }
+            0xC500 => {
+                let a = self.gbr.wrapping_add(d8.wrapping_mul(2));
+                self.registers[0] = self.read_word(a) as i16 as i32 as u32;
+                return;
+            }
+            0xC600 => {
+                let a = self.gbr.wrapping_add(d8.wrapping_mul(4));
+                self.registers[0] = self.read_long(a);
+                return;
+            }
+            0xCC00 => {
+                // TST.B #imm,@(R0,GBR)
                 let a = self.gbr.wrapping_add(self.registers[0]);
                 let val = self.read_byte(a);
                 self.set_t((val & imm8) == 0);
                 return;
             }
-            0xCD00 => { // AND.B #imm,@(R0,GBR)
+            0xCD00 => {
+                // AND.B #imm,@(R0,GBR)
                 let a = self.gbr.wrapping_add(self.registers[0]);
                 let val = self.read_byte(a);
                 self.write_byte(a, val & imm8);
                 return;
             }
-            0xCE00 => { // XOR.B #imm,@(R0,GBR)
+            0xCE00 => {
+                // XOR.B #imm,@(R0,GBR)
                 let a = self.gbr.wrapping_add(self.registers[0]);
                 let val = self.read_byte(a);
                 self.write_byte(a, val ^ imm8);
                 return;
             }
-            0xCF00 => { // OR.B #imm,@(R0,GBR)
+            0xCF00 => {
+                // OR.B #imm,@(R0,GBR)
                 let a = self.gbr.wrapping_add(self.registers[0]);
                 let val = self.read_byte(a);
                 self.write_byte(a, val | imm8);
@@ -2171,28 +2904,69 @@ impl Sh2 {
         }
 
         match opcode & 0xF0FF {
-            0x4000 => { let msb = self.registers[n] & 0x8000_0000 != 0; self.registers[n] <<= 1; self.set_t(msb); return; } // SHLL
-            0x4001 => { let lsb = self.registers[n] & 1 != 0; self.registers[n] >>= 1; self.set_t(lsb); return; } // SHLR
-            0x4004 => { let msb = self.registers[n] & 0x8000_0000 != 0; self.registers[n] = self.registers[n].rotate_left(1); self.set_t(msb); return; } // ROTL
-            0x4005 => { let lsb = self.registers[n] & 1 != 0; self.registers[n] = self.registers[n].rotate_right(1); self.set_t(lsb); return; } // ROTR
-            0x4008 => { self.registers[n] <<= 2; return; } // SHLL2
-            0x4009 => { self.registers[n] >>= 2; return; } // SHLR2
-            0x400B => { // JSR @Rn
+            0x4000 => {
+                let msb = self.registers[n] & 0x8000_0000 != 0;
+                self.registers[n] <<= 1;
+                self.set_t(msb);
+                return;
+            } // SHLL
+            0x4001 => {
+                let lsb = self.registers[n] & 1 != 0;
+                self.registers[n] >>= 1;
+                self.set_t(lsb);
+                return;
+            } // SHLR
+            0x4004 => {
+                let msb = self.registers[n] & 0x8000_0000 != 0;
+                self.registers[n] = self.registers[n].rotate_left(1);
+                self.set_t(msb);
+                return;
+            } // ROTL
+            0x4005 => {
+                let lsb = self.registers[n] & 1 != 0;
+                self.registers[n] = self.registers[n].rotate_right(1);
+                self.set_t(lsb);
+                return;
+            } // ROTR
+            0x4008 => {
+                self.registers[n] <<= 2;
+                return;
+            } // SHLL2
+            0x4009 => {
+                self.registers[n] >>= 2;
+                return;
+            } // SHLR2
+            0x400B => {
+                // JSR @Rn
                 let target = self.registers[n];
                 self.pr = self.pc.wrapping_add(2);
                 self.delay_slot_and_jump(target);
                 return;
             }
-            0x4010 => { // DT Rn
+            0x4010 => {
+                // DT Rn
                 self.registers[n] = self.registers[n].wrapping_sub(1);
                 self.set_t(self.registers[n] == 0);
                 return;
             }
-            0x4011 => { self.set_t((self.registers[n] as i32) >= 0); return; } // CMP/PZ
-            0x4015 => { self.set_t((self.registers[n] as i32) > 0); return; } // CMP/PL
-            0x4018 => { self.registers[n] <<= 8; return; } // SHLL8
-            0x4019 => { self.registers[n] >>= 8; return; } // SHLR8
-            0x401B => { // TAS.B @Rn
+            0x4011 => {
+                self.set_t((self.registers[n] as i32) >= 0);
+                return;
+            } // CMP/PZ
+            0x4015 => {
+                self.set_t((self.registers[n] as i32) > 0);
+                return;
+            } // CMP/PL
+            0x4018 => {
+                self.registers[n] <<= 8;
+                return;
+            } // SHLL8
+            0x4019 => {
+                self.registers[n] >>= 8;
+                return;
+            } // SHLR8
+            0x401B => {
+                // TAS.B @Rn
                 self.bus_wait();
                 let a = self.registers[n];
                 let val = if let Some(v) = self.work_ram.tas_byte(a) {
@@ -2205,35 +2979,46 @@ impl Sh2 {
                 self.set_t(val == 0);
                 return;
             }
-            0x4020 => { // SHAL
+            0x4020 => {
+                // SHAL
                 let msb = self.registers[n] & 0x8000_0000 != 0;
                 self.registers[n] = ((self.registers[n] as i32) << 1) as u32;
                 self.set_t(msb);
                 return;
             }
-            0x4021 => { // SHAR
+            0x4021 => {
+                // SHAR
                 let lsb = self.registers[n] & 1 != 0;
                 self.registers[n] = ((self.registers[n] as i32) >> 1) as u32;
                 self.set_t(lsb);
                 return;
             }
-            0x4024 => { // ROTCL
+            0x4024 => {
+                // ROTCL
                 let old_t = self.t();
                 let msb = self.registers[n] & 0x8000_0000 != 0;
                 self.registers[n] = (self.registers[n] << 1) | (old_t as u32);
                 self.set_t(msb);
                 return;
             }
-            0x4025 => { // ROTCR
+            0x4025 => {
+                // ROTCR
                 let old_t = self.t();
                 let lsb = self.registers[n] & 1 != 0;
                 self.registers[n] = (self.registers[n] >> 1) | ((old_t as u32) << 31);
                 self.set_t(lsb);
                 return;
             }
-            0x4028 => { self.registers[n] <<= 16; return; } // SHLL16
-            0x4029 => { self.registers[n] >>= 16; return; } // SHLR16
-            0x402B => { // JMP @Rn
+            0x4028 => {
+                self.registers[n] <<= 16;
+                return;
+            } // SHLL16
+            0x4029 => {
+                self.registers[n] >>= 16;
+                return;
+            } // SHLR16
+            0x402B => {
+                // JMP @Rn
                 let target = self.registers[n];
                 self.delay_slot_and_jump(target);
                 return;
@@ -2244,55 +3029,146 @@ impl Sh2 {
                 self.sr = self.registers[n] & SR_WRITE_MASK;
                 return;
             } // LDC Rn,SR
-            0x401E => { self.gbr = self.registers[n]; return; } // LDC Rn,GBR
-            0x402E => { self.vbr = self.registers[n]; return; } // LDC Rn,VBR
-            0x400A => { self.mach = self.registers[n]; return; } // LDS Rn,MACH
-            0x401A => { self.macl = self.registers[n]; return; } // LDS Rn,MACL
-            0x402A => { self.pr = self.registers[n]; return; } // LDS Rn,PR
+            0x401E => {
+                self.gbr = self.registers[n];
+                return;
+            } // LDC Rn,GBR
+            0x402E => {
+                self.vbr = self.registers[n];
+                return;
+            } // LDC Rn,VBR
+            0x400A => {
+                self.mach = self.registers[n];
+                return;
+            } // LDS Rn,MACH
+            0x401A => {
+                self.macl = self.registers[n];
+                return;
+            } // LDS Rn,MACL
+            0x402A => {
+                self.pr = self.registers[n];
+                return;
+            } // LDS Rn,PR
             // Memory-indirect LDS.L/STS.L/LDC.L/STC.L forms -- extremely
             // common in real function prologues/epilogues (save/restore PR
             // and friends around a call), found missing while running the
             // actual Saturn BIOS: it hit LDS.L @R15+,PR (a PR pop right
             // before RTS) and, since it wasn't decoded, PR stayed stale and
             // RTS returned to the wrong place.
-            0x4006 => { let a = self.registers[n]; self.mach = self.read_long(a); self.registers[n] = a.wrapping_add(4); return; } // LDS.L @Rn+,MACH
-            0x4016 => { let a = self.registers[n]; self.macl = self.read_long(a); self.registers[n] = a.wrapping_add(4); return; } // LDS.L @Rn+,MACL
-            0x4026 => { let a = self.registers[n]; self.pr = self.read_long(a); self.registers[n] = a.wrapping_add(4); return; } // LDS.L @Rn+,PR
-            0x4002 => { let a = self.registers[n].wrapping_sub(4); self.write_long(a, self.mach); self.registers[n] = a; return; } // STS.L MACH,@-Rn
-            0x4012 => { let a = self.registers[n].wrapping_sub(4); self.write_long(a, self.macl); self.registers[n] = a; return; } // STS.L MACL,@-Rn
-            0x4022 => { let a = self.registers[n].wrapping_sub(4); self.write_long(a, self.pr); self.registers[n] = a; return; } // STS.L PR,@-Rn
-            0x4007 => { let a = self.registers[n]; self.sr = self.read_long(a) & SR_WRITE_MASK; self.registers[n] = a.wrapping_add(4); return; } // LDC.L @Rn+,SR
-            0x4017 => { let a = self.registers[n]; self.gbr = self.read_long(a); self.registers[n] = a.wrapping_add(4); return; } // LDC.L @Rn+,GBR
-            0x4027 => { let a = self.registers[n]; self.vbr = self.read_long(a); self.registers[n] = a.wrapping_add(4); return; } // LDC.L @Rn+,VBR
-            0x4003 => { let a = self.registers[n].wrapping_sub(4); self.write_long(a, self.sr); self.registers[n] = a; return; } // STC.L SR,@-Rn
-            0x4013 => { let a = self.registers[n].wrapping_sub(4); self.write_long(a, self.gbr); self.registers[n] = a; return; } // STC.L GBR,@-Rn
-            0x4023 => { let a = self.registers[n].wrapping_sub(4); self.write_long(a, self.vbr); self.registers[n] = a; return; } // STC.L VBR,@-Rn
+            0x4006 => {
+                let a = self.registers[n];
+                self.mach = self.read_long(a);
+                self.registers[n] = a.wrapping_add(4);
+                return;
+            } // LDS.L @Rn+,MACH
+            0x4016 => {
+                let a = self.registers[n];
+                self.macl = self.read_long(a);
+                self.registers[n] = a.wrapping_add(4);
+                return;
+            } // LDS.L @Rn+,MACL
+            0x4026 => {
+                let a = self.registers[n];
+                self.pr = self.read_long(a);
+                self.registers[n] = a.wrapping_add(4);
+                return;
+            } // LDS.L @Rn+,PR
+            0x4002 => {
+                let a = self.registers[n].wrapping_sub(4);
+                self.write_long(a, self.mach);
+                self.registers[n] = a;
+                return;
+            } // STS.L MACH,@-Rn
+            0x4012 => {
+                let a = self.registers[n].wrapping_sub(4);
+                self.write_long(a, self.macl);
+                self.registers[n] = a;
+                return;
+            } // STS.L MACL,@-Rn
+            0x4022 => {
+                let a = self.registers[n].wrapping_sub(4);
+                self.write_long(a, self.pr);
+                self.registers[n] = a;
+                return;
+            } // STS.L PR,@-Rn
+            0x4007 => {
+                let a = self.registers[n];
+                self.sr = self.read_long(a) & SR_WRITE_MASK;
+                self.registers[n] = a.wrapping_add(4);
+                return;
+            } // LDC.L @Rn+,SR
+            0x4017 => {
+                let a = self.registers[n];
+                self.gbr = self.read_long(a);
+                self.registers[n] = a.wrapping_add(4);
+                return;
+            } // LDC.L @Rn+,GBR
+            0x4027 => {
+                let a = self.registers[n];
+                self.vbr = self.read_long(a);
+                self.registers[n] = a.wrapping_add(4);
+                return;
+            } // LDC.L @Rn+,VBR
+            0x4003 => {
+                let a = self.registers[n].wrapping_sub(4);
+                self.write_long(a, self.sr);
+                self.registers[n] = a;
+                return;
+            } // STC.L SR,@-Rn
+            0x4013 => {
+                let a = self.registers[n].wrapping_sub(4);
+                self.write_long(a, self.gbr);
+                self.registers[n] = a;
+                return;
+            } // STC.L GBR,@-Rn
+            0x4023 => {
+                let a = self.registers[n].wrapping_sub(4);
+                self.write_long(a, self.vbr);
+                self.registers[n] = a;
+                return;
+            } // STC.L VBR,@-Rn
             _ => {}
         }
 
         match opcode & 0xF00F {
-            0x2000 => { let a = self.registers[n]; self.write_byte(a, self.registers[m] as u8); return; } // MOV.B Rm,@Rn
-            0x2001 => { let a = self.registers[n]; self.write_word(a, self.registers[m] as u16); return; }
-            0x2002 => { let a = self.registers[n]; self.write_long(a, self.registers[m]); return; }
-            0x2004 => { // MOV.B Rm,@-Rn
+            0x2000 => {
+                let a = self.registers[n];
+                self.write_byte(a, self.registers[m] as u8);
+                return;
+            } // MOV.B Rm,@Rn
+            0x2001 => {
+                let a = self.registers[n];
+                self.write_word(a, self.registers[m] as u16);
+                return;
+            }
+            0x2002 => {
+                let a = self.registers[n];
+                self.write_long(a, self.registers[m]);
+                return;
+            }
+            0x2004 => {
+                // MOV.B Rm,@-Rn
                 let a = self.registers[n].wrapping_sub(1);
                 self.write_byte(a, self.registers[m] as u8);
                 self.registers[n] = a;
                 return;
             }
-            0x2005 => { // MOV.W Rm,@-Rn
+            0x2005 => {
+                // MOV.W Rm,@-Rn
                 let a = self.registers[n].wrapping_sub(2);
                 self.write_word(a, self.registers[m] as u16);
                 self.registers[n] = a;
                 return;
             }
-            0x2006 => { // MOV.L Rm,@-Rn
+            0x2006 => {
+                // MOV.L Rm,@-Rn
                 let a = self.registers[n].wrapping_sub(4);
                 self.write_long(a, self.registers[m]);
                 self.registers[n] = a;
                 return;
             }
-            0x2007 => { // DIV0S Rm,Rn -- seeds Q/M/T for a following DIV1 chain.
+            0x2007 => {
+                // DIV0S Rm,Rn -- seeds Q/M/T for a following DIV1 chain.
                 let q = self.registers[n] & 0x8000_0000 != 0;
                 let m_bit = self.registers[m] & 0x8000_0000 != 0;
                 self.set_q(q);
@@ -2300,26 +3176,62 @@ impl Sh2 {
                 self.set_t(q != m_bit);
                 return;
             }
-            0x2008 => { self.set_t((self.registers[n] & self.registers[m]) == 0); return; } // TST Rm,Rn
-            0x2009 => { self.registers[n] &= self.registers[m]; return; } // AND Rm,Rn
-            0x200A => { self.registers[n] ^= self.registers[m]; return; } // XOR Rm,Rn
-            0x200B => { self.registers[n] |= self.registers[m]; return; } // OR Rm,Rn
-            0x200C => { // CMP/STR Rm,Rn: T=1 if any byte matches
+            0x2008 => {
+                self.set_t((self.registers[n] & self.registers[m]) == 0);
+                return;
+            } // TST Rm,Rn
+            0x2009 => {
+                self.registers[n] &= self.registers[m];
+                return;
+            } // AND Rm,Rn
+            0x200A => {
+                self.registers[n] ^= self.registers[m];
+                return;
+            } // XOR Rm,Rn
+            0x200B => {
+                self.registers[n] |= self.registers[m];
+                return;
+            } // OR Rm,Rn
+            0x200C => {
+                // CMP/STR Rm,Rn: T=1 if any byte matches
                 let x = self.registers[n] ^ self.registers[m];
-                let matches = (x & 0xFF) == 0 || (x & 0xFF00) == 0 || (x & 0xFF_0000) == 0 || (x & 0xFF00_0000) == 0;
+                let matches = (x & 0xFF) == 0
+                    || (x & 0xFF00) == 0
+                    || (x & 0xFF_0000) == 0
+                    || (x & 0xFF00_0000) == 0;
                 self.set_t(matches);
                 return;
             }
-            0x200D => { // XTRCT Rm,Rn
+            0x200D => {
+                // XTRCT Rm,Rn
                 self.registers[n] = (self.registers[n] >> 16) | (self.registers[m] << 16);
                 return;
             }
-            0x200E => { self.macl = (self.registers[n] as u16 as u32).wrapping_mul(self.registers[m] as u16 as u32); return; } // MULU.W
-            0x200F => { self.macl = ((self.registers[n] as i16 as i32).wrapping_mul(self.registers[m] as i16 as i32)) as u32; return; } // MULS.W
-            0x3000 => { self.set_t(self.registers[n] == self.registers[m]); return; } // CMP/EQ Rm,Rn
-            0x3002 => { self.set_t(self.registers[n] >= self.registers[m]); return; } // CMP/HS (unsigned)
-            0x3003 => { self.set_t((self.registers[n] as i32) >= (self.registers[m] as i32)); return; } // CMP/GE
-            0x3004 => { // DIV1 Rm,Rn -- one step of the bit-serial division
+            0x200E => {
+                self.macl =
+                    (self.registers[n] as u16 as u32).wrapping_mul(self.registers[m] as u16 as u32);
+                return;
+            } // MULU.W
+            0x200F => {
+                self.macl = ((self.registers[n] as i16 as i32)
+                    .wrapping_mul(self.registers[m] as i16 as i32))
+                    as u32;
+                return;
+            } // MULS.W
+            0x3000 => {
+                self.set_t(self.registers[n] == self.registers[m]);
+                return;
+            } // CMP/EQ Rm,Rn
+            0x3002 => {
+                self.set_t(self.registers[n] >= self.registers[m]);
+                return;
+            } // CMP/HS (unsigned)
+            0x3003 => {
+                self.set_t((self.registers[n] as i32) >= (self.registers[m] as i32));
+                return;
+            } // CMP/GE
+            0x3004 => {
+                // DIV1 Rm,Rn -- one step of the bit-serial division
                 // algorithm; Q/M/T persist across successive calls (a real
                 // divide is built from N of these in a row, one per bit).
                 // Faithfully ported from a real, working SH-2 interpreter's
@@ -2369,49 +3281,69 @@ impl Sh2 {
                 self.set_t(self.q() == self.m());
                 return;
             }
-            0x3006 => { self.set_t(self.registers[n] > self.registers[m]); return; } // CMP/HI (unsigned)
-            0x3007 => { self.set_t((self.registers[n] as i32) > (self.registers[m] as i32)); return; } // CMP/GT
-            0x3008 => { self.registers[n] = self.registers[n].wrapping_sub(self.registers[m]); return; } // SUB
-            0x300A => { // SUBC Rm,Rn
+            0x3006 => {
+                self.set_t(self.registers[n] > self.registers[m]);
+                return;
+            } // CMP/HI (unsigned)
+            0x3007 => {
+                self.set_t((self.registers[n] as i32) > (self.registers[m] as i32));
+                return;
+            } // CMP/GT
+            0x3008 => {
+                self.registers[n] = self.registers[n].wrapping_sub(self.registers[m]);
+                return;
+            } // SUB
+            0x300A => {
+                // SUBC Rm,Rn
                 let (r1, c1) = self.registers[n].overflowing_sub(self.registers[m]);
                 let (r2, c2) = r1.overflowing_sub(self.t() as u32);
                 self.registers[n] = r2;
                 self.set_t(c1 || c2);
                 return;
             }
-            0x300B => { // SUBV Rm,Rn
+            0x300B => {
+                // SUBV Rm,Rn
                 let (r, ov) = (self.registers[n] as i32).overflowing_sub(self.registers[m] as i32);
                 self.registers[n] = r as u32;
                 self.set_t(ov);
                 return;
             }
-            0x300C => { self.registers[n] = self.registers[n].wrapping_add(self.registers[m]); return; } // ADD
-            0x300D => { // DMULS.L Rm,Rn
-                let r = (self.registers[n] as i32 as i64).wrapping_mul(self.registers[m] as i32 as i64);
+            0x300C => {
+                self.registers[n] = self.registers[n].wrapping_add(self.registers[m]);
+                return;
+            } // ADD
+            0x300D => {
+                // DMULS.L Rm,Rn
+                let r =
+                    (self.registers[n] as i32 as i64).wrapping_mul(self.registers[m] as i32 as i64);
                 self.mach = (r >> 32) as u32;
                 self.macl = r as u32;
                 return;
             }
-            0x300E => { // ADDC Rm,Rn
+            0x300E => {
+                // ADDC Rm,Rn
                 let (r1, c1) = self.registers[n].overflowing_add(self.registers[m]);
                 let (r2, c2) = r1.overflowing_add(self.t() as u32);
                 self.registers[n] = r2;
                 self.set_t(c1 || c2);
                 return;
             }
-            0x300F => { // ADDV Rm,Rn
+            0x300F => {
+                // ADDV Rm,Rn
                 let (r, ov) = (self.registers[n] as i32).overflowing_add(self.registers[m] as i32);
                 self.registers[n] = r as u32;
                 self.set_t(ov);
                 return;
             }
-            0x3005 => { // DMULU.L Rm,Rn
+            0x3005 => {
+                // DMULU.L Rm,Rn
                 let r = (self.registers[n] as u64).wrapping_mul(self.registers[m] as u64);
                 self.mach = (r >> 32) as u32;
                 self.macl = r as u32;
                 return;
             }
-            0x400F => { // MAC.W @Rm+,@Rn+
+            0x400F => {
+                // MAC.W @Rm+,@Rn+
                 let addr_m = self.registers[m];
                 let val_m = self.read_word(addr_m) as i16 as i32;
                 self.registers[m] = addr_m.wrapping_add(2);
@@ -2428,10 +3360,18 @@ impl Sh2 {
                     const SAT_MIN: i64 = -0x80000000;
                     if sum > SAT_MAX {
                         self.mach |= 1;
-                        self.macl = if mul < 0 { SAT_MIN as u32 } else { SAT_MAX as u32 };
+                        self.macl = if mul < 0 {
+                            SAT_MIN as u32
+                        } else {
+                            SAT_MAX as u32
+                        };
                     } else if sum < SAT_MIN {
                         self.mach |= 1;
-                        self.macl = if mul < 0 { SAT_MIN as u32 } else { SAT_MAX as u32 };
+                        self.macl = if mul < 0 {
+                            SAT_MIN as u32
+                        } else {
+                            SAT_MAX as u32
+                        };
                     } else {
                         self.macl = sum as u32;
                     }
@@ -2442,51 +3382,119 @@ impl Sh2 {
                 }
                 return;
             }
-            0x6000 => { let a = self.registers[m]; self.registers[n] = self.read_byte(a) as i8 as i32 as u32; return; }
-            0x6001 => { let a = self.registers[m]; self.registers[n] = self.read_word(a) as i16 as i32 as u32; return; }
-            0x6002 => { let a = self.registers[m]; self.registers[n] = self.read_long(a); return; }
-            0x6003 => { self.registers[n] = self.registers[m]; return; } // MOV Rm,Rn
-            0x6004 => { // MOV.B @Rm+,Rn
+            0x6000 => {
                 let a = self.registers[m];
                 self.registers[n] = self.read_byte(a) as i8 as i32 as u32;
-                if n != m { self.registers[m] = a.wrapping_add(1); }
                 return;
             }
-            0x6005 => { // MOV.W @Rm+,Rn
+            0x6001 => {
                 let a = self.registers[m];
                 self.registers[n] = self.read_word(a) as i16 as i32 as u32;
-                if n != m { self.registers[m] = a.wrapping_add(2); }
                 return;
             }
-            0x6006 => { // MOV.L @Rm+,Rn
+            0x6002 => {
                 let a = self.registers[m];
                 self.registers[n] = self.read_long(a);
-                if n != m { self.registers[m] = a.wrapping_add(4); }
                 return;
             }
-            0x6007 => { self.registers[n] = !self.registers[m]; return; } // NOT
-            0x6008 => { // SWAP.B
+            0x6003 => {
+                self.registers[n] = self.registers[m];
+                return;
+            } // MOV Rm,Rn
+            0x6004 => {
+                // MOV.B @Rm+,Rn
+                let a = self.registers[m];
+                self.registers[n] = self.read_byte(a) as i8 as i32 as u32;
+                if n != m {
+                    self.registers[m] = a.wrapping_add(1);
+                }
+                return;
+            }
+            0x6005 => {
+                // MOV.W @Rm+,Rn
+                let a = self.registers[m];
+                self.registers[n] = self.read_word(a) as i16 as i32 as u32;
+                if n != m {
+                    self.registers[m] = a.wrapping_add(2);
+                }
+                return;
+            }
+            0x6006 => {
+                // MOV.L @Rm+,Rn
+                let a = self.registers[m];
+                self.registers[n] = self.read_long(a);
+                if n != m {
+                    self.registers[m] = a.wrapping_add(4);
+                }
+                return;
+            }
+            0x6007 => {
+                self.registers[n] = !self.registers[m];
+                return;
+            } // NOT
+            0x6008 => {
+                // SWAP.B
                 let v = self.registers[m];
                 self.registers[n] = (v & 0xFFFF_0000) | ((v & 0xFF) << 8) | ((v >> 8) & 0xFF);
                 return;
             }
-            0x6009 => { self.registers[n] = self.registers[m].rotate_left(16); return; } // SWAP.W
-            0x600A => { let (r, c) = 0u32.overflowing_sub(self.registers[m]); let (r2, c2) = r.overflowing_sub(self.t() as u32); self.registers[n] = r2; self.set_t(c || c2); return; } // NEGC
-            0x600B => { self.registers[n] = 0u32.wrapping_sub(self.registers[m]); return; } // NEG
-            0x600C => { self.registers[n] = self.registers[m] & 0xFF; return; } // EXTU.B
-            0x600D => { self.registers[n] = self.registers[m] & 0xFFFF; return; } // EXTU.W
-            0x600E => { self.registers[n] = self.registers[m] as i8 as i32 as u32; return; } // EXTS.B
-            0x600F => { self.registers[n] = self.registers[m] as i16 as i32 as u32; return; } // EXTS.W
+            0x6009 => {
+                self.registers[n] = self.registers[m].rotate_left(16);
+                return;
+            } // SWAP.W
+            0x600A => {
+                let (r, c) = 0u32.overflowing_sub(self.registers[m]);
+                let (r2, c2) = r.overflowing_sub(self.t() as u32);
+                self.registers[n] = r2;
+                self.set_t(c || c2);
+                return;
+            } // NEGC
+            0x600B => {
+                self.registers[n] = 0u32.wrapping_sub(self.registers[m]);
+                return;
+            } // NEG
+            0x600C => {
+                self.registers[n] = self.registers[m] & 0xFF;
+                return;
+            } // EXTU.B
+            0x600D => {
+                self.registers[n] = self.registers[m] & 0xFFFF;
+                return;
+            } // EXTU.W
+            0x600E => {
+                self.registers[n] = self.registers[m] as i8 as i32 as u32;
+                return;
+            } // EXTS.B
+            0x600F => {
+                self.registers[n] = self.registers[m] as i16 as i32 as u32;
+                return;
+            } // EXTS.W
             _ => {}
         }
 
         // MOV.B/W R0,@(disp4,Rm) and @(disp4,Rm),R0 -- share the 0x8000 nibble
         // with BT/BF/CMP-EQ-imm above, disambiguated by the next nibble.
         match opcode & 0xFF00 {
-            0x8000 => { let a = self.registers[m].wrapping_add(d4); self.write_byte(a, self.registers[0] as u8); return; }
-            0x8100 => { let a = self.registers[m].wrapping_add(d4.wrapping_mul(2)); self.write_word(a, self.registers[0] as u16); return; }
-            0x8400 => { let a = self.registers[m].wrapping_add(d4); self.registers[0] = self.read_byte(a) as i8 as i32 as u32; return; }
-            0x8500 => { let a = self.registers[m].wrapping_add(d4.wrapping_mul(2)); self.registers[0] = self.read_word(a) as i16 as i32 as u32; return; }
+            0x8000 => {
+                let a = self.registers[m].wrapping_add(d4);
+                self.write_byte(a, self.registers[0] as u8);
+                return;
+            }
+            0x8100 => {
+                let a = self.registers[m].wrapping_add(d4.wrapping_mul(2));
+                self.write_word(a, self.registers[0] as u16);
+                return;
+            }
+            0x8400 => {
+                let a = self.registers[m].wrapping_add(d4);
+                self.registers[0] = self.read_byte(a) as i8 as i32 as u32;
+                return;
+            }
+            0x8500 => {
+                let a = self.registers[m].wrapping_add(d4.wrapping_mul(2));
+                self.registers[0] = self.read_word(a) as i16 as i32 as u32;
+                return;
+            }
             _ => {}
         }
 
@@ -2528,7 +3536,13 @@ impl Sh2 {
 
             // FRT
             0x012 => Some(self.onchip.frc),
-            0x014 => Some(self.onchip.ocra),
+            0x014 => {
+                if (self.onchip.tocr & 0x10) == 0 {
+                    Some(self.onchip.ocra)
+                } else {
+                    Some(self.onchip.ocrb)
+                }
+            }
             0x018 => Some(self.onchip.ficr),
 
             // UBC
@@ -2539,7 +3553,11 @@ impl Sh2 {
     }
 
     fn get_onchip_32(&self, off: usize) -> Option<u32> {
-        let normalized = if off >= 0x120 && off <= 0x13F { off - 0x20 } else { off };
+        let normalized = if off >= 0x120 && off <= 0x13F {
+            off - 0x20
+        } else {
+            off
+        };
         match normalized {
             // DIVU
             0x100 => Some(self.onchip.dvsr),
@@ -2652,10 +3670,34 @@ impl Sh2 {
             0x005 => {} // RDR is read-only
 
             // FRT (0x010 - 0x019)
-            0x010 => self.onchip.tier = val,
-            0x011 => self.onchip.ftcsr = val,
-            0x016 => self.onchip.tcr = val,
-            0x017 => self.onchip.tocr = val,
+            0x010 => {
+                self.onchip.tier = (val & 0x8E) | 0x01;
+                if (val & 0x80) != 0 && (self.onchip.ftcsr & 0x80) != 0 {
+                    // ICI interrupt immediately
+                    let vector = ((self.onchip.vcrc >> 8) & 0x7F) as u8;
+                    let level = ((self.onchip.iprb >> 8) & 0xF) as u8;
+                    self.queue_send(vector, level);
+                }
+            }
+            0x011 => {
+                self.onchip.ftcsr = (self.onchip.ftcsr & (val & 0xFE)) | (val & 0x01);
+            }
+            0x016 => {
+                self.onchip.tcr = val & 0x83;
+                match val & 3 {
+                    0 => self.frc_shift = 3,
+                    1 => self.frc_shift = 5,
+                    2 => self.frc_shift = 7,
+                    3 => {
+                        // Log not implemented, leave frc_shift unchanged
+                        println!("[FRT] External clock prescaler select not implemented");
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            0x017 => {
+                self.onchip.tocr = 0xE0 | (val & 0x13);
+            }
 
             // INTC destructive byte write quirks (P4-T3)
             0x060 => self.onchip.iprb = ((val as u16) << 8) & 0xFF00,
@@ -2717,11 +3759,18 @@ impl Sh2 {
             0x0E4 | 0x0E5 => self.onchip.vcrwdt = val & 0x7F7F,
             // FRT
             0x012 => self.onchip.frc = val,
-            0x014 => self.onchip.ocra = val,
+            0x014 => {
+                if (self.onchip.tocr & 0x10) == 0 {
+                    self.onchip.ocra = val;
+                } else {
+                    self.onchip.ocrb = val;
+                }
+            }
             0x018 => {} // FICR is read-only
 
             // BSC
-            0x1E0 | 0x1E2 | 0x1E4 | 0x1E6 | 0x1E8 | 0x1EA | 0x1EC | 0x1EE | 0x1F0 | 0x1F2 | 0x1F4 | 0x1F6 | 0x1F8 | 0x1FA => {
+            0x1E0 | 0x1E2 | 0x1E4 | 0x1E6 | 0x1E8 | 0x1EA | 0x1EC | 0x1EE | 0x1F0 | 0x1F2
+            | 0x1F4 | 0x1F6 | 0x1F8 | 0x1FA => {
                 // Word-only writes to BSC registers are ignored or logged
             }
 
@@ -2770,11 +3819,19 @@ impl Sh2 {
             0x180 => self.onchip.sar0,
             0x184 => self.onchip.dar0,
             0x188 => self.onchip.tcr0,
-            0x18C => self.onchip.chcr0,
+            0x18C => {
+                let val = self.onchip.chcr0;
+                self.onchip.chcr0m.set(0);
+                val
+            }
             0x190 => self.onchip.sar1,
             0x194 => self.onchip.dar1,
             0x198 => self.onchip.tcr1,
-            0x19C => self.onchip.chcr1,
+            0x19C => {
+                let val = self.onchip.chcr1;
+                self.onchip.chcr1m.set(0);
+                val
+            }
             0x1A0 => self.onchip.vcrdma0,
             0x1A8 => self.onchip.vcrdma1,
             0x1B0 => self.onchip.dmaor,
@@ -2865,7 +3922,7 @@ impl Sh2 {
                     } else {
                         (dividend / (divisor as i64), dividend % (divisor as i64))
                     };
-                    
+
                     if quotient > 0x7FFF_FFFF {
                         self.onchip.dvcr |= 1;
                         self.onchip.dvdntl = 0x7FFF_FFFF;
@@ -2924,15 +3981,57 @@ impl Sh2 {
             // DMA
             0x180 => self.onchip.sar0 = val,
             0x184 => self.onchip.dar0 = val,
-            0x188 => self.onchip.tcr0 = val,
-            0x18C => self.onchip.chcr0 = val,
+            0x188 => self.onchip.tcr0 = val & 0xFFFFFF,
+            0x18C => {
+                if self.onchip.tcr0 != 0 {
+                    self.dma_proc(0x7FFFFFFF);
+                }
+                let val = val & 0xFFFF;
+                let chcr0m_val = self.onchip.chcr0m.get();
+                let old_chcr0 = self.onchip.chcr0;
+                let new_chcr0 = (val & !2) | (old_chcr0 & (val | chcr0m_val) & 2);
+                self.onchip.chcr0 = new_chcr0;
+
+                // DEVIATION: Channel-0 arm uses raw written val & 3
+                if (self.onchip.dmaor & 7) == 1 && (val & 3) == 1 {
+                    self.onchip.ch0_copy_clock = 0;
+                    self.dma_exec();
+                }
+            }
             0x190 => self.onchip.sar1 = val,
             0x194 => self.onchip.dar1 = val,
-            0x198 => self.onchip.tcr1 = val,
-            0x19C => self.onchip.chcr1 = val,
-            0x1A0 => self.onchip.vcrdma0 = val,
-            0x1A8 => self.onchip.vcrdma1 = val,
-            0x1B0 => self.onchip.dmaor = val,
+            0x198 => self.onchip.tcr1 = val & 0xFFFFFF,
+            0x19C => {
+                if self.onchip.tcr1 != 0 {
+                    self.dma_proc(0x7FFFFFFF);
+                }
+                let val = val & 0xFFFF;
+                let chcr1m_val = self.onchip.chcr1m.get();
+                let old_chcr1 = self.onchip.chcr1;
+                let new_chcr1 = (val & !2) | (old_chcr1 & (val | chcr1m_val) & 2);
+                self.onchip.chcr1 = new_chcr1;
+
+                if (self.onchip.dmaor & 7) == 1 && (new_chcr1 & 3) == 1 {
+                    self.onchip.ch1_copy_clock = 0;
+                    self.dma_exec();
+                }
+            }
+            0x1A0 => self.onchip.vcrdma0 = val & 0xFFFF,
+            0x1A8 => self.onchip.vcrdma1 = val & 0xFFFF,
+            0x1B0 => {
+                let old_dmaor = self.onchip.dmaor;
+                let new_dmaor = val & 0xF;
+                self.onchip.dmaor = new_dmaor;
+                if (new_dmaor & 7) == 1 && (old_dmaor & 7) != 1 {
+                    if (self.onchip.chcr0 & 3) == 1 {
+                        self.onchip.ch0_copy_clock = 0;
+                    }
+                    if (self.onchip.chcr1 & 3) == 1 {
+                        self.onchip.ch1_copy_clock = 0;
+                    }
+                    self.dma_exec();
+                }
+            }
 
             _ => {
                 // Fall back to writing two words
@@ -2945,11 +4044,25 @@ impl Sh2 {
     fn execute_scu_dma(&mut self, channel: usize) {
         let base = channel * 0x20;
         let scu = self.work_ram.scu_regs.read().unwrap();
-        let read_addr = u32::from_be_bytes([scu[base], scu[base+1], scu[base+2], scu[base+3]]);
-        let write_addr = u32::from_be_bytes([scu[base+4], scu[base+5], scu[base+6], scu[base+7]]);
-        let count = u32::from_be_bytes([scu[base+8], scu[base+9], scu[base+10], scu[base+11]]) & 0x00FFFFFF;
-        let add_val = u32::from_be_bytes([scu[base+12], scu[base+13], scu[base+14], scu[base+15]]);
-        let mode = u32::from_be_bytes([scu[base+20], scu[base+21], scu[base+22], scu[base+23]]);
+        let read_addr =
+            u32::from_be_bytes([scu[base], scu[base + 1], scu[base + 2], scu[base + 3]]);
+        let write_addr =
+            u32::from_be_bytes([scu[base + 4], scu[base + 5], scu[base + 6], scu[base + 7]]);
+        let count =
+            u32::from_be_bytes([scu[base + 8], scu[base + 9], scu[base + 10], scu[base + 11]])
+                & 0x00FFFFFF;
+        let add_val = u32::from_be_bytes([
+            scu[base + 12],
+            scu[base + 13],
+            scu[base + 14],
+            scu[base + 15],
+        ]);
+        let mode = u32::from_be_bytes([
+            scu[base + 20],
+            scu[base + 21],
+            scu[base + 22],
+            scu[base + 23],
+        ]);
         drop(scu);
 
         let indirect = (mode & 0x01_0000) != 0;
@@ -2972,7 +4085,7 @@ impl Sh2 {
                 }
                 let end = (size & 0x80000000) != 0;
                 let len = (size & 0x00FFFFFF) as usize;
-                
+
                 let dst = {
                     let b0 = self.raw_read_byte(desc_addr + 4) as u32;
                     let b1 = self.raw_read_byte(desc_addr + 5) as u32;
@@ -2980,7 +4093,7 @@ impl Sh2 {
                     let b3 = self.raw_read_byte(desc_addr + 7) as u32;
                     (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
                 };
-                
+
                 let src = {
                     let b0 = self.raw_read_byte(desc_addr + 8) as u32;
                     let b1 = self.raw_read_byte(desc_addr + 9) as u32;
@@ -3059,7 +4172,8 @@ impl Sh2 {
 
         let cmd = (cr1 >> 8) as u8;
         match cmd {
-            0x00 => { // Get Status
+            0x00 => {
+                // Get Status
                 let mut ram = self.work_ram.cs2_regs.write().unwrap();
                 // CR1 = 0x0400 (Status: open/closed, busy, etc.)
                 ram[0] = 0x04;
@@ -3068,7 +4182,8 @@ impl Sh2 {
                 ram[8] = 0x00;
                 ram[9] = 0x01;
             }
-            0x02 => { // Get Play Status
+            0x02 => {
+                // Get Play Status
                 let mut ram = self.work_ram.cs2_regs.write().unwrap();
                 ram[0] = 0x04;
                 ram[1] = 0x00;
@@ -3086,7 +4201,9 @@ impl Sh2 {
         // Real wall-clock CPU throttle -- `None` (plain unit tests, and
         // anything that never wires `self.speed` in) means run exactly as
         // fast as this interpreter manages, same as before this existed.
-        let mut throttle = self.speed.clone()
+        let mut throttle = self
+            .speed
+            .clone()
             .map(|speed| crate::throttle::ClockThrottle::new(crate::throttle::SH2_CLOCK_HZ, speed));
         while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
             if let Some(ref sync) = self.sync {
@@ -3115,17 +4232,26 @@ impl Sh2 {
             }
             let cycles_before = self.cycles;
             self.step();
+            let delta = self.cycles.wrapping_sub(cycles_before) as u32;
             if let Some(ref mut t) = throttle {
-                t.advance(self.cycles.wrapping_sub(cycles_before));
+                t.advance(delta as u64);
             }
             if let Some(ref reporter) = self.pc_reporter {
                 reporter.store(self.pc, std::sync::atomic::Ordering::Relaxed);
             }
             if let Some(ref sync) = self.sync {
                 let limit = sync.slack_limit();
-                let batch_mask = if limit > 100 { 0x1F } else if limit > 10 { 0x03 } else { 0x00 };
-                if batch_mask == 0 || (self.cycles & !batch_mask) != (cycles_before & !batch_mask) {
+                let batch = if limit > 100 {
+                    32
+                } else if limit > 10 {
+                    4
+                } else {
+                    1
+                };
+                self.pending_sync += delta;
+                if self.pending_sync >= batch {
                     sync.sync_core(self.core_id, self.cycles);
+                    self.pending_sync = 0;
                 }
             }
             std::thread::yield_now();
@@ -3246,7 +4372,10 @@ mod opcode_tests {
         cpu.write_word(0x0600_0000, bra_opcode);
         cpu.write_word(0x0600_0002, 0xE0_2A); // delay slot: MOV #0x2A,R0
         cpu.step();
-        assert_eq!(cpu.registers[0], 0x2A, "delay slot instruction did not execute");
+        assert_eq!(
+            cpu.registers[0], 0x2A,
+            "delay slot instruction did not execute"
+        );
         assert_eq!(cpu.pc, 0x0600_0006, "branch target incorrect");
     }
 
@@ -3307,8 +4436,14 @@ mod opcode_tests {
         cpu.step(); // MOV.L R0,@R3
         cpu.step(); // DT R4 -> R4=0x3F, T=0
         cpu.step(); // BF/S -> must land back on MOV.L (0x3BA), not on the setup (0x3B8)
-        assert_eq!(cpu.pc, 0x0600_03BA, "BF/S landed 2 bytes short of the real loop body");
-        assert_eq!(cpu.registers[4], 0x3F, "loop counter must not have been reset by re-running the setup instruction");
+        assert_eq!(
+            cpu.pc, 0x0600_03BA,
+            "BF/S landed 2 bytes short of the real loop body"
+        );
+        assert_eq!(
+            cpu.registers[4], 0x3F,
+            "loop counter must not have been reset by re-running the setup instruction"
+        );
     }
 
     #[test]
@@ -3351,7 +4486,10 @@ mod opcode_tests {
         cpu.write_word(0x0600_0004, 0x0009); // RTS delay slot: NOP
         cpu.step(); // LDS.L @R15+,PR
         assert_eq!(cpu.pr, 0x0000_1234, "PR was not popped from the stack");
-        assert_eq!(cpu.registers[15], 0x0601_0004, "R15 was not post-incremented");
+        assert_eq!(
+            cpu.registers[15], 0x0601_0004,
+            "R15 was not post-incremented"
+        );
         cpu.step(); // RTS
         assert_eq!(cpu.pc, 0x0000_1234, "RTS did not return to the popped PR");
     }
@@ -3390,11 +4528,30 @@ mod opcode_tests {
         let base = 0x0010_0000u32;
         cpu.write_byte(base + SMPC_COMREG_OFFSET as u32, SMPC_CMD_INTBACK);
 
-        assert_eq!(cpu.read_byte(base + SMPC_OREG_BASE_OFFSET as u32), 0x80, "OREG0: normal startup, resd=0");
-        assert_eq!(cpu.read_byte(base + (SMPC_OREG_BASE_OFFSET + 9 * 2) as u32), 0x01, "OREG9: region defaults to Japan");
-        assert_eq!(cpu.read_byte(base + (SMPC_OREG_BASE_OFFSET + 10 * 2) as u32), 0x34, "OREG10: flags all clear");
-        assert_eq!(cpu.read_byte(base + SMPC_SR_OFFSET as u32), 0x6F, "SR: no peripheral data requested (IREG1 bit3 unset)");
-        assert!(cpu.smpc_irq_pending, "INTBACK completion must raise the System Manager interrupt");
+        assert_eq!(
+            cpu.read_byte(base + SMPC_OREG_BASE_OFFSET as u32),
+            0x80,
+            "OREG0: normal startup, resd=0"
+        );
+        assert_eq!(
+            cpu.read_byte(base + (SMPC_OREG_BASE_OFFSET + 9 * 2) as u32),
+            0x01,
+            "OREG9: region defaults to Japan"
+        );
+        assert_eq!(
+            cpu.read_byte(base + (SMPC_OREG_BASE_OFFSET + 10 * 2) as u32),
+            0x34,
+            "OREG10: flags all clear"
+        );
+        assert_eq!(
+            cpu.read_byte(base + SMPC_SR_OFFSET as u32),
+            0x6F,
+            "SR: no peripheral data requested (IREG1 bit3 unset)"
+        );
+        assert!(
+            cpu.smpc_irq_pending,
+            "INTBACK completion must raise the System Manager interrupt"
+        );
 
         // Servicing it must jump through VBR + vector*4 at the documented
         // level, exactly like VBLANK-IN (see vblank_interrupt_enters_and_returns).
@@ -3406,9 +4563,19 @@ mod opcode_tests {
         cpu.write_word(0x0600_0000, 0x0009); // NOP, preempted by the interrupt
         cpu.write_word(0x0600_3000, 0x0009); // handler entry
         cpu.step();
-        assert_eq!(cpu.pc, 0x0600_3002, "did not jump through the System Manager vector");
-        assert!(!cpu.smpc_irq_pending, "pending flag must clear once serviced");
-        assert_eq!((cpu.sr >> SR_IMASK_SHIFT) & 0xF, SMPC_IRQ_LEVEL, "mask must raise to this interrupt's own level");
+        assert_eq!(
+            cpu.pc, 0x0600_3002,
+            "did not jump through the System Manager vector"
+        );
+        assert!(
+            !cpu.smpc_irq_pending,
+            "pending flag must clear once serviced"
+        );
+        assert_eq!(
+            (cpu.sr >> SR_IMASK_SHIFT) & 0xF,
+            SMPC_IRQ_LEVEL,
+            "mask must raise to this interrupt's own level"
+        );
     }
 
     #[test]
@@ -3417,7 +4584,11 @@ mod opcode_tests {
         let base = 0x0010_0000u32;
         cpu.write_byte(base + SMPC_IREG1_OFFSET as u32, 0x08); // bit3: peripheral data wanted
         cpu.write_byte(base + SMPC_COMREG_OFFSET as u32, SMPC_CMD_INTBACK);
-        assert_eq!(cpu.read_byte(base + SMPC_SR_OFFSET as u32), 0x6F, "SR bit5 set when IREG1 bit3 requests peripheral data");
+        assert_eq!(
+            cpu.read_byte(base + SMPC_SR_OFFSET as u32),
+            0x6F,
+            "SR bit5 set when IREG1 bit3 requests peripheral data"
+        );
     }
 
     #[test]
@@ -3436,10 +4607,16 @@ mod opcode_tests {
         let base = 0x0010_0000u32;
 
         cpu.write_byte(base + SMPC_COMREG_OFFSET as u32, SMPC_CMD_SNDON);
-        assert!(flag.load(std::sync::atomic::Ordering::Acquire), "SNDON must set the flag");
+        assert!(
+            flag.load(std::sync::atomic::Ordering::Acquire),
+            "SNDON must set the flag"
+        );
 
         cpu.write_byte(base + SMPC_COMREG_OFFSET as u32, SMPC_CMD_SNDOFF);
-        assert!(!flag.load(std::sync::atomic::Ordering::Acquire), "SNDOFF must clear the flag");
+        assert!(
+            !flag.load(std::sync::atomic::Ordering::Acquire),
+            "SNDOFF must clear the flag"
+        );
     }
 
     #[test]
@@ -3462,9 +4639,19 @@ mod opcode_tests {
         cpu.write_word(0x0600_4000, 0x0009); // handler entry
 
         cpu.step();
-        assert_eq!(cpu.pc, 0x0600_4002, "did not jump through the Sound Request vector");
-        assert!(!flag.load(std::sync::atomic::Ordering::Relaxed), "flag must clear once serviced");
-        assert_eq!((cpu.sr >> SR_IMASK_SHIFT) & 0xF, SOUND_REQ_IRQ_LEVEL, "mask must raise to this interrupt's own level");
+        assert_eq!(
+            cpu.pc, 0x0600_4002,
+            "did not jump through the Sound Request vector"
+        );
+        assert!(
+            !flag.load(std::sync::atomic::Ordering::Relaxed),
+            "flag must clear once serviced"
+        );
+        assert_eq!(
+            (cpu.sr >> SR_IMASK_SHIFT) & 0xF,
+            SOUND_REQ_IRQ_LEVEL,
+            "mask must raise to this interrupt's own level"
+        );
     }
 
     #[test]
@@ -3489,8 +4676,14 @@ mod opcode_tests {
         cpu.write_word(0x0600_0000, 0x0009); // NOP
         cpu.request_vblank_interrupt();
         cpu.step();
-        assert!(cpu.vblank_pending, "a masked interrupt must stay pending, not fire");
-        assert_eq!(cpu.pc, 0x0600_0002, "masked interrupt must not have diverted execution");
+        assert!(
+            cpu.vblank_pending,
+            "a masked interrupt must stay pending, not fire"
+        );
+        assert_eq!(
+            cpu.pc, 0x0600_0002,
+            "masked interrupt must not have diverted execution"
+        );
     }
 
     #[test]
@@ -3501,7 +4694,7 @@ mod opcode_tests {
         cpu.registers[15] = 0x0601_1000;
         cpu.pc = 0x0600_0000;
         cpu.write_word(0x0600_0000, 0x0009); // NOP -- never actually fetched; interrupt preempts it
-        // Vector table entry for VBLANK-IN (vector 0x40) points at the handler.
+                                             // Vector table entry for VBLANK-IN (vector 0x40) points at the handler.
         cpu.write_long(cpu.vbr.wrapping_add(VBLANK_IN_VECTOR * 4), 0x0600_2000);
         // Handler: a NOP first (so the first step() can be observed landing
         // here instead of also completing the return in the same call),
@@ -3515,14 +4708,27 @@ mod opcode_tests {
         // table) and then fetches+executes whatever is now at that new PC --
         // that's the handler's leading NOP here, landing us at vector+2.
         cpu.step();
-        assert_eq!(cpu.pc, 0x0600_2002, "did not jump through the VBR vector table");
+        assert_eq!(
+            cpu.pc, 0x0600_2002,
+            "did not jump through the VBR vector table"
+        );
         assert!(!cpu.vblank_pending, "pending flag must clear once serviced");
-        assert_eq!((cpu.sr >> SR_IMASK_SHIFT) & 0xF, VBLANK_IN_LEVEL, "mask must raise to the interrupt's own level while it runs");
+        assert_eq!(
+            (cpu.sr >> SR_IMASK_SHIFT) & 0xF,
+            VBLANK_IN_LEVEL,
+            "mask must raise to the interrupt's own level while it runs"
+        );
 
         cpu.step(); // RTE (+ delay slot)
-        assert_eq!(cpu.pc, 0x0600_0000, "RTE did not return to the interrupted PC");
+        assert_eq!(
+            cpu.pc, 0x0600_0000,
+            "RTE did not return to the interrupted PC"
+        );
         assert_eq!(cpu.sr, 0, "RTE did not restore the original SR");
-        assert_eq!(cpu.registers[15], 0x0601_1000, "R15 must be back where it started after the push/pop pair");
+        assert_eq!(
+            cpu.registers[15], 0x0601_1000,
+            "R15 must be back where it started after the push/pop pair"
+        );
     }
 
     #[test]
@@ -3533,8 +4739,14 @@ mod opcode_tests {
         cpu.write_word(0x0600_0000, 0x0009); // NOP
         cpu.request_vblank_out_interrupt();
         cpu.step();
-        assert!(cpu.vblank_out_pending, "a masked interrupt must stay pending, not fire");
-        assert_eq!(cpu.pc, 0x0600_0002, "masked interrupt must not have diverted execution");
+        assert!(
+            cpu.vblank_out_pending,
+            "a masked interrupt must stay pending, not fire"
+        );
+        assert_eq!(
+            cpu.pc, 0x0600_0002,
+            "masked interrupt must not have diverted execution"
+        );
     }
 
     #[test]
@@ -3552,7 +4764,7 @@ mod opcode_tests {
         cpu.registers[15] = 0x0601_1000;
         cpu.pc = 0x0600_0000;
         cpu.write_word(0x0600_0000, 0x0009); // NOP -- never actually fetched; interrupt preempts it
-        // Vector table entry for VBLANK-OUT (vector 0x41) points at the handler.
+                                             // Vector table entry for VBLANK-OUT (vector 0x41) points at the handler.
         cpu.write_long(cpu.vbr.wrapping_add(VBLANK_OUT_VECTOR * 4), 0x0600_2000);
         cpu.write_word(0x0600_2000, 0x0009); // NOP
         cpu.write_word(0x0600_2002, 0x002B); // RTE
@@ -3560,14 +4772,30 @@ mod opcode_tests {
 
         cpu.request_vblank_out_interrupt();
         cpu.step();
-        assert_eq!(cpu.pc, 0x0600_2002, "did not jump through the VBR vector table");
-        assert!(!cpu.vblank_out_pending, "pending flag must clear once serviced");
-        assert_eq!((cpu.sr >> SR_IMASK_SHIFT) & 0xF, VBLANK_OUT_LEVEL, "mask must raise to the interrupt's own level while it runs");
+        assert_eq!(
+            cpu.pc, 0x0600_2002,
+            "did not jump through the VBR vector table"
+        );
+        assert!(
+            !cpu.vblank_out_pending,
+            "pending flag must clear once serviced"
+        );
+        assert_eq!(
+            (cpu.sr >> SR_IMASK_SHIFT) & 0xF,
+            VBLANK_OUT_LEVEL,
+            "mask must raise to the interrupt's own level while it runs"
+        );
 
         cpu.step(); // RTE (+ delay slot)
-        assert_eq!(cpu.pc, 0x0600_0000, "RTE did not return to the interrupted PC");
+        assert_eq!(
+            cpu.pc, 0x0600_0000,
+            "RTE did not return to the interrupted PC"
+        );
         assert_eq!(cpu.sr, 0, "RTE did not restore the original SR");
-        assert_eq!(cpu.registers[15], 0x0601_1000, "R15 must be back where it started after the push/pop pair");
+        assert_eq!(
+            cpu.registers[15], 0x0601_1000,
+            "R15 must be back where it started after the push/pop pair"
+        );
     }
 
     #[test]
@@ -3581,8 +4809,14 @@ mod opcode_tests {
         cpu.request_vblank_out_interrupt();
         cpu.request_vblank_interrupt();
         cpu.step();
-        assert!(!cpu.vblank_pending, "the higher-priority interrupt must be serviced first");
-        assert!(cpu.vblank_out_pending, "the lower-priority interrupt must stay pending behind it");
+        assert!(
+            !cpu.vblank_pending,
+            "the higher-priority interrupt must be serviced first"
+        );
+        assert!(
+            cpu.vblank_out_pending,
+            "the lower-priority interrupt must stay pending behind it"
+        );
         assert_eq!((cpu.sr >> SR_IMASK_SHIFT) & 0xF, VBLANK_IN_LEVEL);
     }
 
@@ -3604,7 +4838,8 @@ mod opcode_tests {
             "must read VBLANK set right after the frame period starts"
         );
 
-        cpu.next_vblank_due = Some(std::time::Instant::now() + VBLANK_DURATION + std::time::Duration::from_millis(5));
+        cpu.next_vblank_due =
+            Some(std::time::Instant::now() + VBLANK_DURATION + std::time::Duration::from_millis(5));
         assert_eq!(
             cpu.tvstat_word() & TVSTAT_VBLANK_BIT,
             0,
@@ -3620,8 +4855,16 @@ mod opcode_tests {
         // split backwards would silently hand it a permanently-zero bit.
         let mut cpu = make_cpu();
         cpu.next_vblank_due = Some(std::time::Instant::now() + VBLANK_INTERVAL);
-        assert_eq!(cpu.read_byte(0x25F8_0004), 0x00, "TVSTAT high byte has no bits we model");
-        assert_eq!(cpu.read_byte(0x25F8_0005), 0x08, "TVSTAT low byte carries the VBLANK bit");
+        assert_eq!(
+            cpu.read_byte(0x25F8_0004),
+            0x00,
+            "TVSTAT high byte has no bits we model"
+        );
+        assert_eq!(
+            cpu.read_byte(0x25F8_0005),
+            0x08,
+            "TVSTAT low byte carries the VBLANK bit"
+        );
     }
 
     #[test]
@@ -3679,11 +4922,23 @@ mod opcode_tests {
         cpu.write_long(cpu.vbr.wrapping_add(0x2A * 4), 0x0600_3000);
         cpu.step();
         assert_eq!(cpu.pc, 0x0600_3000, "did not jump through VBR + imm*4");
-        assert_eq!(cpu.registers[15], 0x0601_1000 - 8, "must push exactly 2 longwords");
+        assert_eq!(
+            cpu.registers[15],
+            0x0601_1000 - 8,
+            "must push exactly 2 longwords"
+        );
         // Popped back in RTE order (PC first, then SR) to confirm the push
         // order matches: PC (return addr) at the lower/top address.
-        assert_eq!(cpu.read_long(0x0601_1000 - 8), 0x0600_0002, "pushed return address must be right after TRAPA");
-        assert_eq!(cpu.read_long(0x0601_1000 - 4), 0x55, "pushed SR must be the pre-trap value");
+        assert_eq!(
+            cpu.read_long(0x0601_1000 - 8),
+            0x0600_0002,
+            "pushed return address must be right after TRAPA"
+        );
+        assert_eq!(
+            cpu.read_long(0x0601_1000 - 4),
+            0x55,
+            "pushed SR must be the pre-trap value"
+        );
     }
 
     #[test]
@@ -3706,7 +4961,11 @@ mod opcode_tests {
         ];
         for &(addr, name) in probes {
             cpu.write_long(addr, 0x1234_5678);
-            assert_eq!(cpu.read_long(addr), 0x1234_5678, "{name} at {addr:#010X} is not real read/write memory");
+            assert_eq!(
+                cpu.read_long(addr),
+                0x1234_5678,
+                "{name} at {addr:#010X} is not real read/write memory"
+            );
         }
     }
 
@@ -3727,7 +4986,7 @@ mod opcode_tests {
         cpu.write_long(0xFFFFFF00, 3); // DVSR = 3
         cpu.write_long(0xFFFFFF04, 100); // DVDNT = 100 -> triggers division
         assert_eq!(cpu.read_long(0xFFFFFF04), 33); // Quotient DVDNTL = 33
-        assert_eq!(cpu.read_long(0xFFFFFF10), 1);  // Remainder DVDNTH = 1
+        assert_eq!(cpu.read_long(0xFFFFFF10), 1); // Remainder DVDNTH = 1
 
         // Division by zero
         cpu.write_long(0xFFFFFF00, 0); // DVSR = 0
@@ -3752,17 +5011,17 @@ mod opcode_tests {
         // Configure Channel 0 SCU DMA registers
         cpu.write_long(0x05FE0000, 0x00200000); // D0R (Read Addr)
         cpu.write_long(0x05FE0004, 0x00201000); // D0W (Write Addr)
-        cpu.write_long(0x05FE0008, 8);          // D0C (Count = 8 bytes)
-        cpu.write_long(0x05FE000C, 1);          // D0AD (Address increment mode)
-        cpu.write_long(0x05FE0014, 0);          // D0MD (Direct Mode)
-        
+        cpu.write_long(0x05FE0008, 8); // D0C (Count = 8 bytes)
+        cpu.write_long(0x05FE000C, 1); // D0AD (Address increment mode)
+        cpu.write_long(0x05FE0014, 0); // D0MD (Direct Mode)
+
         // Trigger DMA by writing 1 to D0EN
         cpu.write_long(0x05FE0010, 1);
 
         // Verify data was copied
         assert_eq!(cpu.read_long(0x00201000), 0x11223344);
         assert_eq!(cpu.read_long(0x00201004), 0x55667788);
-        
+
         // D0EN register must be cleared automatically
         assert_eq!(cpu.read_long(0x05FE0010), 0);
     }
@@ -3770,13 +5029,13 @@ mod opcode_tests {
     #[test]
     fn test_cdrom_handshake() {
         let mut cpu = make_cpu();
-        
+
         // Write CR1 = 0x0000, CR2 = 0x0000, CR3 = 0x0000, CR4 = 0x0000 (Get Status command)
         cpu.write_word(0x05800000, 0x0000); // CR1
         cpu.write_word(0x05800002, 0x0000); // CR2
         cpu.write_word(0x05800004, 0x0000); // CR3
         cpu.write_word(0x05800006, 0x0000); // CR4 (triggers command)
-        
+
         // Verify response CR1 = 0x0400
         assert_eq!(cpu.read_word(0x05800000), 0x0400);
         // Verify HIRQ = 0x0001
@@ -3799,12 +5058,19 @@ mod opcode_tests {
         let cycles_before = cpu.cycles;
         cpu.step(); // executes SLEEP
         assert_eq!(cpu.pc, 0x0600_0000, "SLEEP must not advance PC");
-        assert_eq!(cpu.cycles, cycles_before.wrapping_add(2).wrapping_add(3), "SLEEP must charge 3 extra cycles");
+        assert_eq!(
+            cpu.cycles,
+            cycles_before.wrapping_add(3),
+            "SLEEP must charge 3 cycles"
+        );
 
         // Now request interrupt and step
         cpu.request_vblank_interrupt();
         cpu.step(); // takes interrupt and executes handler first instruction
-        assert_eq!(cpu.pc, 0x0600_2002, "PC must have diverged to interrupt vector handler + 2");
+        assert_eq!(
+            cpu.pc, 0x0600_2002,
+            "PC must have diverged to interrupt vector handler + 2"
+        );
     }
 
     #[test]
@@ -3817,7 +5083,10 @@ mod opcode_tests {
         cpu.registers[1] = 0x40;
         cpu.step();
         assert_eq!(cpu.registers[2], 0x12, "delay slot must execute");
-        assert_eq!(cpu.pc, 0x0600_1044, "BRAF target must be PC_br + Rn + 4 (0x0600_1000 + 0x40 + 4)");
+        assert_eq!(
+            cpu.pc, 0x0600_1044,
+            "BRAF target must be PC_br + Rn + 4 (0x0600_1000 + 0x40 + 4)"
+        );
 
         // BSRF R1
         cpu.pc = 0x0600_1000;
@@ -3835,7 +5104,7 @@ mod opcode_tests {
         let mut cpu = make_cpu();
         cpu.registers[1] = 0x0020_0000; // Rn
         cpu.registers[2] = 0x0020_0010; // Rm
-        // Write memory operands
+                                        // Write memory operands
         cpu.write_long(0x0020_0000, 0x1000);
         cpu.write_long(0x0020_0010, 0x2000);
 
@@ -3896,8 +5165,6 @@ mod opcode_tests {
         assert_eq!(cpu.read_byte(addr), 0xFA);
     }
 
-
-
     #[test]
     fn test_cache_purge_behavior() {
         let mut cpu = make_cpu();
@@ -3948,7 +5215,7 @@ mod opcode_tests {
         let cycles_before = cpu.cycles;
         cpu.step();
         assert_eq!(cpu.pc, 0xC000_0002);
-        assert_eq!(cpu.cycles, cycles_before + 2); // NOP cycles
+        assert_eq!(cpu.cycles, cycles_before + 1); // NOP cycles
         assert!(!cpu.illegal_instruction_flag);
     }
 
@@ -4040,8 +5307,8 @@ mod opcode_tests {
 
     #[test]
     fn test_torn_read_stress() {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
         use std::thread;
         use std::time::{Duration, Instant};
 
@@ -4124,7 +5391,11 @@ mod opcode_tests {
     #[test]
     fn test_onchip_p4_t1_reset_values() {
         let mut cpu_master = make_cpu();
-        let mut cpu_slave = Sh2::new(true, cpu_master.arbiter.clone(), cpu_master.work_ram.clone());
+        let mut cpu_slave = Sh2::new(
+            true,
+            cpu_master.arbiter.clone(),
+            cpu_master.work_ram.clone(),
+        );
 
         // SCI
         assert_eq!(cpu_master.read_byte(0xFFFFFE00), 0x00); // SMR
@@ -4301,7 +5572,7 @@ mod opcode_tests {
     #[test]
     fn test_bus_miss_logging() {
         std::env::set_var("MIMAS_BUS_TRACE", "1");
-        
+
         let mut cpu = make_cpu();
 
         // 1. Synthetic access at 0xC000_0000 (Area 6)
@@ -4387,11 +5658,17 @@ mod opcode_tests {
         cpu.registers[15] = 0x0600_1000;
         cpu.pc = 0x0600_0100;
         cpu.write_word(0x0600_0100, 0x0009); // NOP
-        
-        cpu.write_long(cpu.vbr.wrapping_add(SMPC_IRQ_VECTOR as u32 * 4), 0x0600_2000);
+
+        cpu.write_long(
+            cpu.vbr.wrapping_add(SMPC_IRQ_VECTOR as u32 * 4),
+            0x0600_2000,
+        );
         cpu.write_word(0x0600_2000, 0x0009);
-        
-        cpu.write_long(cpu.vbr.wrapping_add(SOUND_REQ_IRQ_VECTOR as u32 * 4), 0x0600_3000);
+
+        cpu.write_long(
+            cpu.vbr.wrapping_add(SOUND_REQ_IRQ_VECTOR as u32 * 4),
+            0x0600_3000,
+        );
         cpu.write_word(0x0600_3000, 0x0009);
 
         cpu.queue_send(SMPC_IRQ_VECTOR as u8, SMPC_IRQ_LEVEL as u8); // level 8: must not deliver
@@ -4412,7 +5689,7 @@ mod opcode_tests {
         // Two pending interrupts
         cpu.queue_send(0x47, 8);
         cpu.queue_send(0x41, 14);
-        
+
         cpu.write_long(cpu.vbr.wrapping_add(0x41 * 4), 0x0600_2000);
         cpu.write_long(cpu.vbr.wrapping_add(0x47 * 4), 0x0600_3000);
         cpu.write_word(0x0600_2000, 0x0009); // NOP inside handler
@@ -4420,7 +5697,7 @@ mod opcode_tests {
 
         cpu.step(); // Steps the first (highest priority: 0x41 level 14)
         assert_eq!(cpu.pc, 0x0600_2002);
-        
+
         // Assert the second interrupt (0x47 level 8) is still queued
         let q = if let Some(ref q_ref) = cpu.irq_in {
             q_ref.lock().unwrap().clone()
@@ -4453,9 +5730,12 @@ mod opcode_tests {
         cpu.sr = 15 << SR_IMASK_SHIFT; // Mask 15: VBLANK-IN is masked
         cpu.vbr = 0x0600_0000;
         cpu.registers[15] = 0x0600_1000;
-        
+
         // Interrupt vector points to 0x0600_2000
-        cpu.write_long(cpu.vbr.wrapping_add(VBLANK_IN_VECTOR as u32 * 4), 0x0600_2000);
+        cpu.write_long(
+            cpu.vbr.wrapping_add(VBLANK_IN_VECTOR as u32 * 4),
+            0x0600_2000,
+        );
         cpu.write_word(0x0600_2000, 0x0009);
 
         // Branch instruction: BRA 0x0600_0020
@@ -4464,20 +5744,20 @@ mod opcode_tests {
         cpu.pc = 0x0600_0000;
         cpu.write_word(0x0600_0000, 0xA00E); // BRA + 0x10 -> 0x0600_0020
         cpu.write_word(0x0600_0002, 0x410E); // delay slot: LDC R1, SR
-        
+
         // Unmasked interrupt pending
         cpu.queue_send(VBLANK_IN_VECTOR as u8, VBLANK_IN_LEVEL as u8);
 
         cpu.step(); // Steps BRA + delay slot (LDC R1, SR).
-        // Assert: delay slot ran, lowered SR mask to 0
+                    // Assert: delay slot ran, lowered SR mask to 0
         assert_eq!((cpu.sr >> SR_IMASK_SHIFT) & 0xF, 0);
         // Assert: PC is now at branch target (0x0600_0020) and interrupt has not been taken yet
         assert_eq!(cpu.pc, 0x0600_0020);
 
         cpu.step(); // Now we step starting at target, which services the unmasked VBLANK-IN
-        // Assert: interrupt was taken, redirecting to the handler
+                    // Assert: interrupt was taken, redirecting to the handler
         assert_eq!(cpu.pc, 0x0600_2002);
-        
+
         // Read pushed PC from stack, it should point to the target of the branch (0x0600_0020)
         let pushed_pc = cpu.read_long(cpu.registers[15]);
         assert_eq!(pushed_pc, 0x0600_0020);
@@ -4497,7 +5777,7 @@ mod opcode_tests {
         cpu.write_long(0xFFFFFF00, 0xFFFF_FFFF); // DVSR = -1
         cpu.write_long(0xFFFFFF10, 0x8000_0000); // DVDNTH = i32::MIN
         cpu.write_long(0xFFFFFF14, 0x0000_0000); // DVDNTL = 0 -> triggers 64-bit division
-        // Quotient overflows, so it should trigger overflow
+                                                 // Quotient overflows, so it should trigger overflow
         assert_eq!(cpu.read_long(0xFFFFFF08) & 1, 1); // DVCR overflow flag set
     }
 
@@ -4528,5 +5808,523 @@ mod opcode_tests {
 
         // PC should be at the vector handler
         assert_eq!(cpu.pc, 0x0600_2002);
+    }
+
+    #[test]
+    fn test_frt_p7_t1_prescaler() {
+        let mut cpu = make_cpu();
+        // Test TCR selects prescalers
+        cpu.write_byte(0xFFFFFE16, 0); // TCR = 0
+        assert_eq!(cpu.frc_shift, 3);
+        assert_eq!(cpu.read_byte(0xFFFFFE16), 0);
+
+        cpu.write_byte(0xFFFFFE16, 1); // TCR = 1
+        assert_eq!(cpu.frc_shift, 5);
+        assert_eq!(cpu.read_byte(0xFFFFFE16), 1);
+
+        cpu.write_byte(0xFFFFFE16, 2); // TCR = 2
+        assert_eq!(cpu.frc_shift, 7);
+        assert_eq!(cpu.read_byte(0xFFFFFE16), 2);
+
+        cpu.write_byte(0xFFFFFE16, 3); // TCR = 3 -> external, frc_shift unchanged/disabled
+        assert_eq!(cpu.frc_shift, 7);
+        assert_eq!(cpu.read_byte(0xFFFFFE16), 3);
+    }
+
+    #[test]
+    fn test_frt_p7_t2_counter_advance() {
+        let mut cpu = make_cpu();
+        cpu.frc_shift = 3;
+        cpu.frc_leftover = 0;
+        cpu.onchip.frc = 0;
+
+        // 8 * 5 + 3 = 43 cycles -> FRC should be 5, leftover should be 3
+        cpu.frt_exec(43);
+        assert_eq!(cpu.onchip.frc, 5);
+        assert_eq!(cpu.frc_leftover, 3);
+
+        // 8 * 10 + 7 = 87 cycles -> total FRC = 5 + 11 = 16, leftover = (3 + 87) & 7 = 2
+        cpu.frt_exec(87);
+        assert_eq!(cpu.onchip.frc, 16);
+        assert_eq!(cpu.frc_leftover, 2);
+    }
+
+    #[test]
+    fn test_frt_p7_t3_ftcsr_write_clear() {
+        let mut cpu = make_cpu();
+        cpu.onchip.ftcsr = 0x0E;
+        cpu.write_byte(0xFFFFFE11, 0x0A);
+        assert_eq!(cpu.onchip.ftcsr, 0x0A);
+
+        cpu.write_byte(0xFFFFFE11, 0x01);
+        assert_eq!(cpu.onchip.ftcsr, 0x01);
+    }
+
+    #[test]
+    fn test_frt_p7_t4_ocra_ocrb_selector() {
+        let mut cpu = make_cpu();
+        cpu.write_byte(0xFFFFFE17, 0x00);
+        cpu.write_word(0xFFFFFE14, 0x1234);
+        assert_eq!(cpu.onchip.ocra, 0x1234);
+        assert_eq!(cpu.onchip.ocrb, 0xFFFF);
+
+        cpu.write_byte(0xFFFFFE17, 0x10);
+        cpu.write_word(0xFFFFFE14, 0x5678);
+        assert_eq!(cpu.onchip.ocra, 0x1234);
+        assert_eq!(cpu.onchip.ocrb, 0x5678);
+    }
+
+    #[test]
+    fn test_frt_p7_t5_compare_match_cclra() {
+        let mut cpu = make_cpu();
+        cpu.sr = 0;
+        cpu.vbr = 0x0600_0000;
+        cpu.registers[15] = 0x0600_1000;
+        cpu.frc_shift = 0;
+
+        cpu.onchip.ocra = 0x100;
+        cpu.onchip.ocrb = 0xFFFF;
+        cpu.onchip.tier = 0x08;
+        cpu.onchip.ftcsr = 0x01;
+        cpu.onchip.vcrc = 0x50;
+        cpu.onchip.iprb = 0x0A00;
+
+        cpu.write_long(cpu.vbr.wrapping_add(0x50 * 4), 0x0600_2000);
+        cpu.write_word(0x0600_2000, 0x0009);
+
+        cpu.onchip.frc = 0x0FF;
+        cpu.frt_exec(1);
+
+        assert_eq!(cpu.onchip.ftcsr & 0x08, 0x08);
+        assert_eq!(cpu.onchip.frc, 0);
+
+        cpu.step();
+        assert_eq!(cpu.pc, 0x0600_2002);
+
+        let mut cpu2 = make_cpu();
+        cpu2.frc_shift = 0;
+        cpu2.onchip.ocra = 0x100;
+        cpu2.onchip.ocrb = 0xFFFF;
+        cpu2.onchip.tier = 0x00;
+        cpu2.onchip.ftcsr = 0x00;
+        cpu2.onchip.frc = 0x0FF;
+        cpu2.frt_exec(1);
+        assert_eq!(cpu2.onchip.frc, 0x100);
+    }
+
+    #[test]
+    fn test_frt_p7_t6_missed_compare_deviation() {
+        let mut cpu = make_cpu();
+        cpu.frc_shift = 0;
+        cpu.onchip.ocra = 0x0100;
+        cpu.onchip.ocrb = 0xFFFF;
+        cpu.onchip.frc = 0;
+
+        // Jump from 0 past 0xFFFF in one call to miss compare (HR §11.3)
+        cpu.frt_exec(0x10050);
+
+        assert_eq!(cpu.onchip.ftcsr & 0x08, 0);
+        assert_eq!(cpu.onchip.ftcsr & 0x02, 0x02);
+    }
+
+    #[test]
+    fn test_frt_p7_t7_tier_ici_rearm() {
+        let mut cpu = make_cpu();
+        cpu.sr = 0;
+        cpu.vbr = 0x0600_0000;
+        cpu.registers[15] = 0x0600_1000;
+        cpu.onchip.vcrc = 0x5100;
+        cpu.onchip.iprb = 0x0A00;
+
+        cpu.write_long(cpu.vbr.wrapping_add(0x51 * 4), 0x0600_2000);
+        cpu.write_word(0x0600_2000, 0x0009);
+
+        cpu.onchip.ftcsr = 0x80;
+        cpu.write_byte(0xFFFFFE10, 0x80);
+
+        cpu.step();
+        assert_eq!(cpu.pc, 0x0600_2002);
+    }
+
+    #[test]
+    fn test_cycles_p8_t1_base_costs() {
+        let mut cpu = make_cpu();
+
+        // NOP (0x0009): 1 cycle
+        cpu.write_word(0x0600_1000, 0x0009);
+        cpu.pc = 0x0600_1000;
+        let c = cpu.cycles;
+        cpu.step();
+        assert_eq!(cpu.cycles - c, 1);
+
+        // RTS (0x000B): 2 cycles (plus NOP in delay slot = 1 cycle, total = 3)
+        cpu.write_word(0x0600_1000, 0x000B);
+        cpu.write_word(0x0600_1002, 0x0009);
+        cpu.pr = 0x0600_1004;
+        cpu.pc = 0x0600_1000;
+        let c = cpu.cycles;
+        cpu.step();
+        assert_eq!(cpu.cycles - c, 3); // 2 base + 1 delay slot NOP
+
+        // SLEEP (0x001B): 3 cycles
+        cpu.write_word(0x0600_1000, 0x001B);
+        cpu.pc = 0x0600_1000;
+        let c = cpu.cycles;
+        cpu.step();
+        assert_eq!(cpu.cycles - c, 3);
+    }
+
+    #[test]
+    fn test_cycles_p8_t2_wait_states() {
+        let mut cpu = make_cpu();
+
+        // High WRAM: 0 read wait states
+        let c = cpu.cycles;
+        cpu.read_byte(0x0600_0000);
+        assert_eq!(cpu.cycles - c, 0);
+
+        // Low WRAM: 12 read wait states
+        let c = cpu.cycles;
+        cpu.read_byte(0x0020_0000);
+        assert_eq!(cpu.cycles - c, 12);
+
+        // BIOS: 16 read wait states
+        let c = cpu.cycles;
+        cpu.read_byte(0x0000_0000);
+        assert_eq!(cpu.cycles - c, 16);
+
+        // Sound RAM: 50 read wait states
+        let c = cpu.cycles;
+        cpu.read_byte(0x05A0_0000);
+        assert_eq!(cpu.cycles - c, 50);
+
+        // High WRAM write: 2 wait states
+        let c = cpu.cycles;
+        cpu.write_byte(0x0600_0000, 0);
+        assert_eq!(cpu.cycles - c, 2);
+
+        // Low WRAM write: 7 wait states
+        let c = cpu.cycles;
+        cpu.write_byte(0x0020_0000, 0);
+        assert_eq!(cpu.cycles - c, 7);
+    }
+
+    #[test]
+    fn test_cycles_p8_t3_conditional_branch() {
+        let mut cpu = make_cpu();
+
+        // BT taken (T=1): 3 cycles
+        cpu.set_t(true);
+        cpu.write_word(0x0600_1000, 0x8900); // BT to relative offset +0
+        cpu.pc = 0x0600_1000;
+        let c = cpu.cycles;
+        cpu.step();
+        assert_eq!(cpu.cycles - c, 3);
+
+        // BT not taken (T=0): 1 cycle
+        cpu.set_t(false);
+        cpu.write_word(0x0600_1000, 0x8900);
+        cpu.pc = 0x0600_1000;
+        let c = cpu.cycles;
+        cpu.step();
+        assert_eq!(cpu.cycles - c, 1);
+    }
+
+    #[test]
+    fn test_cycles_p8_t5_throttle_end_to_end() {
+        let mut cpu = make_cpu();
+        let speed = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::throttle::ThrottleSpeed::Multiplier(1.0),
+        ));
+        cpu.speed = Some(speed.clone());
+        let mut throttle =
+            crate::throttle::ClockThrottle::new(crate::throttle::SH2_CLOCK_HZ, speed);
+
+        // Just verify advance can accept delta cycles without panicking
+        throttle.advance(100);
+    }
+
+    #[test]
+    fn test_dmac_p9_t1_transfer_modes() {
+        // Usable src modes x dst modes x 4 sizes
+        let src_modes = [0, 1, 2]; // fixed, increment, decrement
+        let dst_modes = [0, 1, 2];
+        let sizes = [0, 1, 2, 3]; // byte, word, longword, burst
+
+        for &src_mode in &src_modes {
+            for &dst_mode in &dst_modes {
+                for &size in &sizes {
+                    let mut cpu = make_cpu();
+
+                    // Pre-fill source buffer
+                    let src_base = 0x0600_1000;
+                    for i in 0..64 {
+                        cpu.write_byte(src_base + i, (i + 1) as u8);
+                    }
+
+                    // Pre-fill destination buffer with zeroes
+                    let dst_base = 0x0600_2000;
+                    for i in 0..64 {
+                        cpu.write_byte(dst_base + i, 0);
+                    }
+
+                    let stride = match size {
+                        0 => 1,
+                        1 => 2,
+                        2 | 3 => 4,
+                        _ => 1,
+                    } as u32;
+
+                    let count = 4;
+                    // Compute starting address based on mode
+                    let sar = if src_mode == 2 {
+                        src_base + 32
+                    } else {
+                        src_base
+                    };
+
+                    let dar = if dst_mode == 2 {
+                        dst_base + 32
+                    } else {
+                        dst_base
+                    };
+
+                    // Setup DMA
+                    cpu.write_long(0xFFFF_FF80, sar); // SAR0
+                    cpu.write_long(0xFFFF_FF84, dar); // DAR0
+                    cpu.write_long(0xFFFF_FF88, count); // TCR0
+                    cpu.write_long(
+                        0xFFFF_FF8C,
+                        (dst_mode << 14) | (src_mode << 12) | (size << 10) | 1,
+                    ); // CHCR0: DE=1
+                    cpu.write_long(0xFFFF_FFB0, 1); // DMAOR: DME=1
+
+                    // Execute DMA
+                    cpu.dma_proc(1000);
+
+                    // Assert TE set
+                    assert_ne!(
+                        cpu.read_long(0xFFFF_FF8C) & 2,
+                        0,
+                        "TE bit must be set upon completion"
+                    );
+
+                    // Compute expected destination state locally
+                    let mut expected_dst = vec![0u8; 64];
+                    let mut temp_sar = sar;
+                    let mut temp_dar = dar;
+                    for _ in 0..count {
+                        let offset_s = (temp_sar - src_base) as usize;
+                        let offset_d = (temp_dar - dst_base) as usize;
+                        for b in 0..stride {
+                            expected_dst[offset_d + b as usize] = (offset_s + b as usize + 1) as u8;
+                        }
+                        match src_mode {
+                            1 => temp_sar += stride,
+                            2 => temp_sar -= stride,
+                            _ => {}
+                        }
+                        match dst_mode {
+                            1 => temp_dar += stride,
+                            2 => temp_dar -= stride,
+                            _ => {}
+                        }
+                    }
+
+                    // Verify against destination buffer
+                    for i in 0..64 {
+                        let actual = cpu.read_byte(dst_base + i as u32);
+                        assert_eq!(
+                            actual, expected_dst[i],
+                            "Mismatch at offset {} for mode src={}, dst={}, size={}",
+                            i, src_mode, dst_mode, size
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_dmac_p9_t2_te_clear() {
+        let mut cpu = make_cpu();
+        cpu.write_byte(0x0600_1000, 42);
+        cpu.write_long(0xFFFF_FF80, 0x0600_1000); // SAR0
+        cpu.write_long(0xFFFF_FF84, 0x0600_2000); // DAR0
+        cpu.write_long(0xFFFF_FF88, 1); // TCR0
+        cpu.write_long(0xFFFF_FF8C, 1); // CHCR0: DE=1
+        cpu.write_long(0xFFFF_FFB0, 1); // DMAOR: DME=1
+
+        cpu.dma_proc(1000);
+
+        // TE must be set
+        let chcr = cpu.read_long(0xFFFF_FF8C);
+        assert_ne!(chcr & 2, 0, "TE must be set");
+
+        // Write with bit 1 = 1 (TE=1), TE should survive
+        cpu.write_long(0xFFFF_FF8C, chcr | 2);
+        assert_ne!(
+            cpu.read_long(0xFFFF_FF8C) & 2,
+            0,
+            "TE must survive when written with 1"
+        );
+
+        // Write with bit 1 = 0, but without reading first, TE survives because shadow chcr0m is still set
+        cpu.onchip.chcr0m.set(2);
+        cpu.write_long(0xFFFF_FF8C, chcr & !2);
+        assert_ne!(
+            cpu.read_long(0xFFFF_FF8C) & 2,
+            0,
+            "TE must survive writing 0 if shadow register has TE set"
+        );
+
+        // Read to clear shadow
+        let _ = cpu.read_long(0xFFFF_FF8C);
+        assert_eq!(
+            cpu.onchip.chcr0m.get(),
+            0,
+            "Shadow register must clear on read"
+        );
+
+        // Set DME=0 to prevent TCR0=0 from re-arming upon DE=1 write
+        cpu.write_long(0xFFFF_FFB0, 0);
+
+        // Now write with bit 1 = 0, TE clears
+        cpu.write_long(0xFFFF_FF8C, chcr & !2);
+        assert_eq!(
+            cpu.read_long(0xFFFF_FF8C) & 2,
+            0,
+            "TE must clear when writing 0 after reading"
+        );
+    }
+
+    #[test]
+    fn test_dmac_p9_t3_arming_gate() {
+        let mut cpu = make_cpu();
+        cpu.write_byte(0x0600_1000, 99);
+
+        // 1. DMAOR = 0 (DME clear)
+        cpu.write_long(0xFFFF_FFB0, 0); // DMAOR = 0
+        cpu.write_long(0xFFFF_FF80, 0x0600_1000); // SAR0
+        cpu.write_long(0xFFFF_FF84, 0x0600_2000); // DAR0
+        cpu.write_long(0xFFFF_FF88, 1); // TCR0
+        cpu.write_long(0xFFFF_FF8C, 1); // CHCR0: DE=1
+
+        cpu.dma_proc(200);
+        assert_eq!(
+            cpu.read_long(0xFFFF_FF88),
+            1,
+            "Transfer must not occur when DME=0"
+        );
+
+        // 2. DMAOR = 1 (DME set)
+        cpu.write_long(0xFFFF_FFB0, 1); // DMAOR = 1
+                                        // Rewrite CHCR0 to arm
+        cpu.write_long(0xFFFF_FF8C, 1); // CHCR0: DE=1
+        cpu.dma_proc(200);
+        assert_eq!(
+            cpu.read_long(0xFFFF_FF88),
+            0,
+            "Transfer must occur when DME=1"
+        );
+
+        // 3. Test NMIF (DMAOR = 3) - Write DMAOR to 3 first so that write to CHCR0 is blocked
+        cpu.write_long(0xFFFF_FF88, 1);
+        cpu.write_long(0xFFFF_FF8C, 0); // Clear TE
+        let _ = cpu.read_long(0xFFFF_FF8C); // Clear shadow
+        cpu.write_long(0xFFFF_FFB0, 3); // DMAOR = 3 (DME=1, NMIF=1)
+        cpu.write_long(0xFFFF_FF8C, 1); // CHCR0: DE=1
+
+        cpu.dma_proc(200);
+        assert_eq!(
+            cpu.read_long(0xFFFF_FF88),
+            1,
+            "Transfer must not occur when NMIF=1"
+        );
+        assert_eq!(
+            cpu.read_long(0xFFFF_FFB0) & 1,
+            0,
+            "DME must be cleared on NMIF/AE abort"
+        );
+    }
+
+    #[test]
+    fn test_dmac_p9_t4_completion_interrupt() {
+        let mut cpu = make_cpu();
+        cpu.write_byte(0x0600_1000, 77);
+
+        cpu.write_long(0xFFFF_FF80, 0x0600_1000); // SAR0
+        cpu.write_long(0xFFFF_FF84, 0x0600_2000); // DAR0
+        cpu.write_long(0xFFFF_FF88, 1); // TCR0
+        cpu.write_long(0xFFFF_FF8C, 5); // CHCR0: DE=1, IE=1 (bit 2)
+        cpu.write_long(0xFFFF_FFA0, 0x1234); // VCRDMA0
+        cpu.write_word(0xFFFF_FEE2, 0x0500); // IPRA: DMAC level = 5
+
+        cpu.write_long(0xFFFF_FFB0, 1); // DMAOR: DME=1
+
+        cpu.dma_proc(200);
+
+        let pending = &cpu.local_irq_in.pending;
+        assert_eq!(pending.len(), 1, "Interrupt must be queued");
+        assert_eq!(pending[0].vector, 0x34, "Vector must be VCRDMA0 & 0xFF");
+        assert_eq!(pending[0].level, 5, "Level must match IPRA bits 11-8");
+    }
+
+    #[test]
+    fn test_dmac_p9_t5_eat_table() {
+        let mut cpu = make_cpu();
+
+        // 14 cycles (WRAM -> WRAM)
+        assert_eq!(cpu.get_eat_clock(0x0600_1000, 0x0600_2000), 14);
+        // 570 cycles (VDP1-RAM -> VDP1-RAM)
+        assert_eq!(cpu.get_eat_clock(0x05C0_1000, 0x05C0_2000), 570);
+
+        // Drive engine with budgeted cycles.
+        //
+        // Arming below (the DMAOR write, transitioning DME 0->1 while CHCR0's
+        // DE is already set) itself fires a real, HR-documented DMAExec() ==
+        // DMAProc(200) burst (HR sh2-cpu.md:1327 / real `sh2core.c:2140`), so
+        // the channel always gets a free 200-cycle head start before this
+        // test ever calls `dma_proc` explicitly. TCR0 must be large enough
+        // (20 units * 14 cycles = 280 total) that the free burst can't finish
+        // it alone, so the boundary this test actually cares about -- one
+        // cycle short vs. exactly enough -- lands on the explicit calls
+        // below, not on arming. (A smaller TCR0, e.g. 10, made this test
+        // flaky-looking: the 200-cycle arm burst alone finishes a 140-cycle
+        // transfer, so TCR0 already read 0 before `dma_proc` was ever called
+        // explicitly.)
+        cpu.write_long(0xFFFF_FF80, 0x0600_1000); // SAR0
+        cpu.write_long(0xFFFF_FF84, 0x0600_2000); // DAR0
+        cpu.write_long(0xFFFF_FF88, 20); // TCR0
+        cpu.write_long(0xFFFF_FF8C, 9); // CHCR0: DE=1, size=0, "dual channel" bit set (bit 3 = 1, no budget doubling)
+        cpu.write_long(0xFFFF_FFB0, 1); // DMAOR: DME=1 -- this write alone burns the 200-cycle arm burst (14 units done, 4 cycles banked)
+
+        // 6 units remain (84 cycles), minus the 4 cycles already banked by
+        // the arm-time burst = 80 more needed. Feed 79 -> should NOT finish.
+        cpu.dma_proc(79);
+        assert_ne!(cpu.read_long(0xFFFF_FF88), 0);
+
+        // Add the last cycle -> should finish.
+        cpu.dma_proc(1);
+        assert_eq!(cpu.read_long(0xFFFF_FF88), 0);
+    }
+
+    #[test]
+    fn test_dmac_p9_t6_arbiter_interaction() {
+        let arbiter = std::sync::Arc::new(BusArbiter::new());
+        let ram = std::sync::Arc::new(WorkRam::new());
+        let mut cpu = Sh2::new(false, arbiter.clone(), ram);
+
+        arbiter.lock_for_dma();
+
+        // CPU read_byte should block because the arbiter is locked
+        let handle = std::thread::spawn(move || {
+            cpu.read_byte(0x0600_1000);
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(arbiter.is_locked());
+        arbiter.unlock_from_dma();
+        handle.join().unwrap();
     }
 }
