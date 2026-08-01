@@ -99,3 +99,93 @@ fn real_smpc_sf_reflects_the_real_busy_flag_when_a_real_smpc_is_wired_in() {
     const SMPC_BASE: u32 = 0x0010_0000;
     assert_eq!(cpu.read_byte(SMPC_BASE + 0x63) & 1, 0x01, "SF bit 0");
 }
+
+#[test]
+fn real_smpc_post_regs_readback() {
+    let fixture = load_fixture("bios_post_smpc_regs.bin");
+    assert_eq!(fixture.len(), 0x80);
+
+    let arbiter = Arc::new(BusArbiter::new());
+    let work_ram = Arc::new(WorkRam::new());
+    {
+        let mut regs = work_ram.smpc_regs.write().unwrap();
+        regs.copy_from_slice(&fixture);
+    }
+    let mut cpu = Sh2::new(false, arbiter, work_ram);
+
+    const SMPC_BASE: u32 = 0x0010_0000;
+    // OREG0 shows real connected digital pad, port status 0xF1/id 0x02/idle buttons 0xFF 0xFF
+    assert_eq!(cpu.read_byte(SMPC_BASE + 0x21), 0xF1, "OREG0 (port status)");
+    assert_eq!(cpu.read_byte(SMPC_BASE + 0x23), 0x02, "OREG1 (pad id)");
+    assert_eq!(cpu.read_byte(SMPC_BASE + 0x25), 0xFF, "OREG2 (button status high)");
+    assert_eq!(cpu.read_byte(SMPC_BASE + 0x27), 0xFF, "OREG3 (button status low)");
+}
+
+#[test]
+fn real_vdp2_regs_fixture_loads_and_reads_back() {
+    let fixture = load_fixture("bios_post_vdp2_regs.bin");
+    assert_eq!(fixture.len(), 512, "VDP2 regs fixture should be 512 bytes");
+
+    let arbiter = Arc::new(BusArbiter::new());
+    let work_ram = Arc::new(WorkRam::new());
+    {
+        let mut regs = work_ram.vdp2_regs.write().unwrap();
+        regs[..512].copy_from_slice(&fixture);
+    }
+    let mut cpu = Sh2::new(false, arbiter, work_ram);
+
+    // TVMD is at offset 0x000 (0x05F80000 physical)
+    let tvmd = cpu.read_word(0x05F8_0000);
+    assert_eq!(tvmd, 0x8000, "TVMD display enabled");
+}
+
+#[test]
+fn real_vdp2_vram_fixture_loads() {
+    let fixture = load_fixture("bios_post_vdp2_vram.bin");
+    assert_eq!(fixture.len(), 0x80000, "VDP2 VRAM fixture should be 512KB");
+
+    let arbiter = Arc::new(BusArbiter::new());
+    let work_ram = Arc::new(WorkRam::new());
+    {
+        let mut vram = work_ram.vdp2_vram.write().unwrap();
+        vram.copy_from_slice(&fixture);
+    }
+    let mut cpu = Sh2::new(false, arbiter, work_ram);
+
+    // Verify that we read back some non-zero data from VRAM.
+    let mut non_zero_count = 0;
+    for addr in (0x05E0_0000..0x05E8_0000).step_by(1024) {
+        if cpu.read_byte(addr) != 0 {
+            non_zero_count += 1;
+        }
+    }
+    assert!(non_zero_count > 0, "Should read back some non-zero bytes from real VDP2 VRAM");
+}
+
+#[test]
+fn real_high_wram_fixture_loads() {
+    let fixture = load_fixture("bios_post_smpc_wram_high.bin");
+    assert_eq!(fixture.len(), 0x100000, "High WRAM fixture should be 1MB");
+
+    let arbiter = Arc::new(BusArbiter::new());
+    let work_ram = Arc::new(WorkRam::new());
+    
+    // Copy the 1MB fixture into the first 16 stripes of 64KB
+    for stripe in 0..16 {
+        let start = stripe * 0x10000;
+        let end = start + 0x10000;
+        let mut stripe_lock = work_ram.high_ram[stripe].write().unwrap();
+        stripe_lock.copy_from_slice(&fixture[start..end]);
+    }
+
+    let mut cpu = Sh2::new(false, arbiter, work_ram);
+
+    // Verify that we read back some non-zero data from High Work RAM
+    let mut non_zero_count = 0;
+    for addr in (0x0600_0000..0x0610_0000).step_by(2048) {
+        if cpu.read_byte(addr) != 0 {
+            non_zero_count += 1;
+        }
+    }
+    assert!(non_zero_count > 0, "Should read back some non-zero bytes from real High Work RAM");
+}

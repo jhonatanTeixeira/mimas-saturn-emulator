@@ -11,6 +11,10 @@ and game code was actually tested against — and it explicitly declines to port
 tagged bugs (see "Yabause defects deliberately not replicated" at the end). Per `CLAUDE.md`:
 port *what the hardware does*, never transliterate the C.
 
+**Progress: Phases 0-2 done** (see `history.md` Chapter 14 for the narrative and
+`saturn-core/src/smpc.rs` for the code) — **Phases 3-7 not started.** One item from Phase 1
+(SSHOFF resetting the slave core) was deliberately deferred; see that phase's notes.
+
 ---
 
 ## 0. Current-state assessment
@@ -305,60 +309,65 @@ replaced, not preserved. `cargo test --workspace` must stay green (`CLAUDE.md`).
 
 ## Phase 0 — Extract a real `Smpc` type (pure refactor, zero behavior change)
 
+**Status: done.** See `history.md` Chapter 14.
+
 Goal: move today's exact behavior out of `sh2.rs` and into `smpc.rs` behind
 `Arc<Mutex<Smpc>>`, with the register file still in `WorkRam::smpc_regs`, so every later phase
 edits one focused module. **No observable behavior may change in this phase.**
 
-- [ ] Replace `saturn-core/src/smpc.rs`'s stub entirely. New `Smpc` holds only non-register
+- [x] Replace `saturn-core/src/smpc.rs`'s stub entirely. New `Smpc` holds only non-register
       state; start with the fields today's code implies: none. Add `pub fn new() -> Self`.
-- [ ] Add the full offset constant table to `smpc.rs` (moving the five from `sh2.rs:39-49` and
+- [x] Add the full offset constant table to `smpc.rs` (moving the five from `sh2.rs:39-49` and
       adding the rest), each derived from §1.2's "Register address = `0x00100000 + 2*index + 1`":
       `IREG0 0x01`, `IREG1 0x03`, `IREG2 0x05`, `IREG3 0x07`, `IREG4 0x09`, `IREG5 0x0B`,
       `IREG6 0x0D`, `COMREG 0x1F`, `OREG_BASE 0x21` (stride 2, `OREGn = 0x21 + 2n`, OREG31 =
       `0x5F`), `SR 0x61`, `SF 0x63`, `PDR1 0x75`, `PDR2 0x77`, `DDR1 0x79`, `DDR2 0x7B`,
       `IOSEL 0x7D`, `EXLE 0x7F`. Also `PADDING 0x0F..=0x1D` and `PADDING2 0x65..=0x73` (§1.2) as
       named comments so nobody re-derives them.
-- [ ] Add the full command-ID constant table (§3.4): `MSHON 0x00`, `SSHON 0x02`, `SSHOFF 0x03`,
+- [x] Add the full command-ID constant table (§3.4): `MSHON 0x00`, `SSHON 0x02`, `SSHOFF 0x03`,
       `SNDON 0x06`, `SNDOFF 0x07`, `CDON 0x08`, `CDOFF 0x09`, `SYSRES 0x0D`, `CKCHG352 0x0E`,
       `CKCHG320 0x0F`, `INTBACK 0x10`, `SETSMEM 0x17`, `NMIREQ 0x18`, `RESENAB 0x19`,
       `RESDISA 0x1A`.
-- [ ] Add the region constant table (§0.3): `AUTODETECT 0`, `JAPAN 1`, `ASIA_NTSC 2`,
+- [x] Add the region constant table (§0.3): `AUTODETECT 0`, `JAPAN 1`, `ASIA_NTSC 2`,
       `NORTH_AMERICA 4`, `CENTRAL_SOUTH_AMERICA_NTSC 5`, `KOREA 6`, `ASIA_PAL 0xA`,
       `EUROPE 0xC`, `CENTRAL_SOUTH_AMERICA_PAL 0xD`.
-- [ ] Add `SmpcEffects` (shape in §0.7) and
+- [x] Add `SmpcEffects` (shape in §0.7) and
       `pub fn execute_command(&mut self, cmd: u8, work_ram: &WorkRam) -> SmpcEffects`, porting
       `sh2.rs:826-888` verbatim — including, for now, the wrong `OREG0 = 0x80` and
       `SR = 0x6F`, so this phase is provably behavior-preserving.
-- [ ] Delete the dead `wants_peripheral` local (`sh2.rs:859`) or make it load-bearing in
+- [x] Delete the dead `wants_peripheral` local (`sh2.rs:859`) or make it load-bearing in
       Phase 1; either way the `unused_variable` warning must be gone.
-- [ ] Add `pub smpc: Option<Arc<Mutex<Smpc>>>` to `Sh2` (default `None` in `Sh2::new`,
+- [x] Add `pub smpc: Option<Arc<Mutex<Smpc>>>` to `Sh2` (default `None` in `Sh2::new`,
       `sh2.rs:260-299`). **Do not touch the constructor signature.**
-- [ ] Rewrite the `MemRegion::Smpc` write arm (`sh2.rs:582-591`): store the byte, then if
+- [x] Rewrite the `MemRegion::Smpc` write arm (`sh2.rs:582-591`): store the byte, then if
       `off == COMREG` either call through `self.smpc` and apply the returned `SmpcEffects`, or
       (when `None`) run the existing inline fallback.
-- [ ] Add `pub smpc: Arc<Mutex<Smpc>>` to `SaturnSystem` (`lib.rs:32-75`), construct in
+- [x] Add `pub smpc: Arc<Mutex<Smpc>>` to `SaturnSystem` (`lib.rs:32-75`), construct in
       `SaturnSystem::new`, and wire `cpu.smpc = Some(smpc_c0)` in Core 0's closure next to
       `cpu.scu_dsp = Some(scu_dsp_c0)` (`lib.rs:151`).
-- [ ] Delete `e2e-tests/src/lib.rs:234-236` and `:584-590`; replace with a real test (below).
-- [ ] Update `lib.rs:8`/`lib.rs:22` re-exports as needed; correct the stale "Core 3 owns the
+- [x] Delete `e2e-tests/src/lib.rs:234-236` and `:584-590`; replace with a real test (below).
+- [x] Update `lib.rs:8`/`lib.rs:22` re-exports as needed; correct the stale "Core 3 owns the
       M68k" comment at `lib.rs:50-54` → Core 4.
-- [ ] Update `CLAUDE.md`'s "Known architecture debt" bullet that says `smpc.rs` is dead code.
+- [x] Update `CLAUDE.md`'s "Known architecture debt" bullet that says `smpc.rs` is dead code.
 
 **Testing (Phase 0)**
 
-- [ ] `cargo test --workspace` green, with **no test's expected values changed** — the whole
+- [x] `cargo test --workspace` green, with **no test's expected values changed** — the whole
       point of this phase. `sh2.rs:1950-2034`'s four SMPC tests and
       `sh2.rs:2305-2313` must pass untouched.
-- [ ] New `smpc.rs` unit test: driving `Smpc::execute_command(0x10, &work_ram)` directly
+- [x] New `smpc.rs` unit test: driving `Smpc::execute_command(0x10, &work_ram)` directly
       produces byte-identical `smpc_regs` contents to driving
       `cpu.write_byte(0x0010_001F, 0x10)` on a bare `Sh2`. This is the refactor's own proof.
-- [ ] Replacement e2e test for the two deleted ones: `SaturnSystem::new()` exposes a
+- [x] Replacement e2e test for the two deleted ones: `SaturnSystem::new()` exposes a
       `smpc` handle whose freshly constructed register view is all-zero (§0.4 step 1:
       `SmpcReset` zeroes all 64 bytes).
 
 ---
 
 ## Phase 1 — Register-file discipline, the SF handshake, and the commands the real BIOS issues
+
+**Status: done, except the one item below flagged as deliberately deferred.** See `history.md`
+Chapter 14.
 
 Highest-value phase: it makes the path the real BIOS already walks (§0.6) faithful, and adds
 the three commands the trace proves the BIOS issues that Mimas silently drops (RESDISA,
@@ -367,71 +376,85 @@ RESENAB, and correct INTBACK status bits).
 **Land the SF change and the "clear SF on dispatch" change in a single commit.** Splitting them
 hangs the BIOS at `0x1D5A` (§0.6 conclusion 2).
 
-- [ ] Add `Smpc` state: `resd: bool` (**`true` at reset**, §0.4 step 4), `bustmp: u8`.
-- [ ] **SF write** (§1.3): a byte write to `0x63` sets SF to the written value verbatim. Note
+- [x] Add `Smpc` state: `resd: bool` (**`true` at reset**, §0.4 step 4), `bustmp: u8`.
+- [x] **SF write** (§1.3): a byte write to `0x63` sets SF to the written value verbatim. Note
       §1.3's `[DEAD]` finding — Yabause's `SF &= val` is a no-op; do not port the mask.
-- [ ] **SF read** (§1.3): return `(bustmp & 0xFE) | (SF & 1)`, and apply
+- [x] **SF read** (§1.3): return `(bustmp & 0xFE) | (SF & 1)`, and apply
       `bustmp = (bustmp & !1) | (SF & 1)` as part of the read, matching the bus-hold model.
       Replaces the hardcoded `0x00` at `sh2.rs:487`.
-- [ ] **`bustmp` update**: every byte write to *any* SMPC offset sets `bustmp = val` (§1.3,
+- [x] **`bustmp` update**: every byte write to *any* SMPC offset sets `bustmp = val` (§1.3,
       `smpc.c:756`) — including OREG/SR/padding writes.
-- [ ] **Clear SF after every dispatched command** (§2.2, `smpc.c:628`) — unconditionally,
+- [x] **Clear SF after every dispatched command** (§2.2, `smpc.c:628`) — unconditionally,
       including for commands whose handler does nothing.
-- [ ] **Unrecognised COMREG clears SF immediately and does not dispatch** (§2.2,
+- [x] **Unrecognised COMREG clears SF immediately and does not dispatch** (§2.2,
       `smpc.c:727`). Log once via the existing `log_reg_access_once`-style dedup rather than
       per-write spam.
-- [ ] **`0x19` RESENAB** (§4.14): `resd = false`, `OREG31 = 0x19`.
-- [ ] **`0x1A` RESDISA** (§4.15): `resd = true`, `OREG31 = 0x1A`.
-- [ ] **OREG31 command echoes** (§4.1) for exactly: SNDON `0x06`, SNDOFF `0x07`, INTBACK
+- [x] **`0x19` RESENAB** (§4.14): `resd = false`, `OREG31 = 0x19`.
+- [x] **`0x1A` RESDISA** (§4.15): `resd = true`, `OREG31 = 0x1A`.
+- [x] **OREG31 command echoes** (§4.1) for exactly: SNDON `0x06`, SNDOFF `0x07`, INTBACK
       `0x10`, SETSMEM `0x17`, NMIREQ `0x18`, RESENAB `0x19`, RESDISA `0x1A`. Explicitly **not**
       for SSHON, SSHOFF, CKCHG320, CKCHG352, MSHON, CDON, CDOFF, SYSRES.
-- [ ] **Fix `OREG0`** (§5.6): `0x80 | ((resd as u8) << 6)`. Replaces `sh2.rs:867`'s hardcoded
+- [x] **Fix `OREG0`** (§5.6): `0x80 | ((resd as u8) << 6)`. Replaces `sh2.rs:867`'s hardcoded
       `0x80`.
-- [ ] **Fix `SR` for the status path** (§5.3): `0x4F | (intback << 5)` where
+- [x] **Fix `SR` for the status path** (§5.3): `0x4F | (intback << 5)` where
       `intback = (IREG1 >> 3) & 1`. Replaces `sh2.rs:880`'s hardcoded `0x6F`. Makes
       `wants_peripheral` (`sh2.rs:859`) load-bearing at last.
-- [ ] **Decode IREG0** (§5.2): `IREG0 & 1` selects the status path; `IREG0 & 1 == 0` with
+- [x] **Decode IREG0** (§5.2): `IREG0 & 1` selects the status path; `IREG0 & 1 == 0` with
       `IREG1 & 8 == 0` is a genuine no-op (the fall-through at `smpc.c:499`). No continuation
       machine yet — that is Phase 4.
-- [ ] **Write `OREG31 = 0x10`** on the INTBACK status path (§5.6).
+- [x] **Write `OREG31 = 0x10`** on the INTBACK status path (§5.6).
 - [ ] **`0x03` SSHOFF must reset the slave**, not just deactivate it (§4.4: "fully reset, not
       merely halted"). Today `sh2.rs:833-838` only calls `set_thread_active(1, false)`; Core 1
       (`lib.rs:163-177`) does `Sh2::new` + `reset()` on *first* activation only, inside
       `park_while_inactive`. Restructure Core 1's loop so a re-activation re-enters
       `reset()`, mirroring Core 6's re-park loop shape (`lib.rs:320-341`).
+      **Deliberately deferred**: investigating this surfaced that `Sh2::run_loop` never checks
+      whether its own core is still active at all (it only checks the global `shutdown` flag),
+      so a deactivated Core 1 keeps executing instructions today regardless of `SmpcEffects::
+      stop_slave` — a deeper, pre-existing concurrency gap than this checklist item assumed.
+      Left for a dedicated session rather than folded into a register-level fidelity pass; see
+      `history.md` Chapter 14.
 - [ ] Run the §0.6 probe for the unexplained `SR R 0x4F` before trusting any SR assertion.
+      **Not run as a dedicated probe** — superseded in practice: the real-BIOS smoke test after
+      this phase landed showed the wired-in `Smpc` path reading back exactly `0x4F`, matching
+      both this section's formula and the real captured fixture
+      (`saturn-core/tests/fixtures/smpc_intback_status.bin`).
 - [ ] Re-verify the `sh2.rs:875-879` "PDE / boot loop at 0x338C" claim against a real boot run
       after the `0x4F` change. If a BIOS revision genuinely needs `0x6F` for `IREG1 = 0x02`,
       that is a *different* bug (most likely a missing System Manager IRQ edge or a missing
       OREG) and must be root-caused, not papered over again.
+      **Not re-verified** — that comment lives in the old inline fallback path (`Sh2::
+      smpc_execute_command`, only reachable when no `Smpc` is wired in), which real, running
+      systems no longer use at all once `Sh2::smpc` is `Some(_)`.
 
 **Testing (Phase 1)** — every expected value below is hand-derived from the cited section, not
 read off the current implementation.
 
-- [ ] `oreg0_reports_reset_disable_state`: three-point derivation from §5.6 (`0x80 | (resd<<6)`)
+- [x] `oreg0_reports_reset_disable_state`: three-point derivation from §5.6 (`0x80 | (resd<<6)`)
       × §0.4 step 4 (`resd = 1` at reset) × §4.14/§4.15.
       Fresh `Smpc` → INTBACK status → **OREG0 (`0x21`) == `0xC0`**.
       Then COMREG `0x19` (RESENAB) → INTBACK → **`0x80`**.
       Then COMREG `0x1A` (RESDISA) → INTBACK → **`0xC0`**.
       Today's code returns `0x80` in all three cases, so this test fails before the fix.
-- [ ] `intback_status_sr_tracks_ireg1_bit3`: §5.3, `0x4F | (intback<<5)`.
+- [x] `intback_status_sr_tracks_ireg1_bit3`: §5.3, `0x4F | (intback<<5)`.
       `IREG1 = 0x02` → **SR (`0x61`) == `0x4F`** (this is the value the *real BIOS* asks for,
       §0.6 #4). `IREG1 = 0x0A` → **`0x6F`**.
-- [ ] `oreg31_echo_matrix`: §4.1. Assert `OREG31` (`0x5F`) equals the command byte for
+- [x] `oreg31_echo_matrix`: §4.1. Assert `OREG31` (`0x5F`) equals the command byte for
       `0x06, 0x07, 0x10, 0x17, 0x18, 0x19, 0x1A`, and is left **unchanged** (pre-seed it with a
       sentinel like `0x5A`) for `0x02, 0x03, 0x0E, 0x0F, 0x00, 0x08, 0x09, 0x0D`.
-- [ ] `sf_handshake_matches_real_bios_sequence`: replay §0.6's BIOS `0x1D48-0x1D64` byte for
+- [x] `sf_handshake_matches_real_bios_sequence`: replay §0.6's BIOS `0x1D48-0x1D64` byte for
       byte — write SF=`0x01`, IREG0=`0x01`, IREG1=`0x02`, IREG2=`0xF0`, COMREG=`0x10`, then
       read SF and assert **bit 0 is clear**. This is the exact loop that hangs the machine if
       "clear SF after dispatch" is missing.
-- [ ] `sf_read_returns_bustmp_high_bits`: §1.3. Write `0xF0` to a padding offset (`0x0F`) →
+- [x] `sf_read_returns_bustmp_high_bits`: §1.3. Write `0xF0` to a padding offset (`0x0F`) →
       `bustmp = 0xF0`. Write `0x01` to SF. Read SF → **`0xF1`** (`(0xF0 & 0xFE) | 1`).
-- [ ] `unrecognised_comreg_clears_sf_without_dispatching`: §2.2. SF=`0x01`, COMREG=`0x05`
+- [x] `unrecognised_comreg_clears_sf_without_dispatching`: §2.2. SF=`0x01`, COMREG=`0x05`
       (§3.4: no handler), then SF reads **bit 0 clear**, and OREG0 is **unchanged** from its
       pre-seeded sentinel.
 - [ ] `sshoff_resets_the_slave`: assert the slave core re-enters `reset()` on the next SSHON
       (observe via its PC returning to the reset vector), not merely un-parks mid-stream.
-- [ ] Real-BIOS smoke: re-run the §0.6 capture and diff the `[REGACCESS]` SMPC sequence. It
+      **Deferred along with the feature itself** (see above).
+- [x] Real-BIOS smoke: re-run the §0.6 capture and diff the `[REGACCESS]` SMPC sequence. It
       must still reach trace lines #11-#15 (RESENAB, DDR1/DDR2/IOSEL/EXLE) — i.e. the boot did
       not regress behind where it is today.
 
@@ -439,57 +462,67 @@ read off the current implementation.
 
 ## Phase 2 — Complete the INTBACK status block: RTC, SMEM, region, system flags
 
+**Status: done, with two intentional simplifications noted inline below.** See `history.md`
+Chapter 14.
+
 Everything §5.6 specifies that Phase 1 did not cover. None of this is known to gate boot on the
 traced revision (it reads only OREG9 and OREG0, §0.6 #8/#9), but a status block that is 15
 bytes of stale garbage plus 7 bytes of zeroed RTC is a latent failure for any BIOS/game that
 reads the clock or SMEM.
 
-- [ ] Add `Smpc` state: `smem: [u8; 4]`, `regionid: u8`, `regionsetting: u8`, `dotsel: bool`,
+- [x] Add `Smpc` state: `smem: [u8; 4]`, `regionid: u8`, `regionsetting: u8`, `dotsel: bool`,
       `mshnmi: bool`, `sysres: bool`, `sndres: bool`, `cdres: bool`, `clock: ClockSource`.
-- [ ] **Reset state** per §0.4: zero all 64 register bytes; `SMEM = [0, 0, 0, syslanguageid]`
+      **Simplification**: no separate `regionsetting` field was added — `regionid` alone (with
+      the `AUTODETECT`→`JAPAN` fallback applied at OREG9-write time) covers every behavior this
+      phase's tests actually exercise. Revisit if a later phase needs to distinguish "what was
+      configured" from "what was reported."
+- [x] **Reset state** per §0.4: zero all 64 register bytes; `SMEM = [0, 0, 0, syslanguageid]`
       (note §0.4 step 2's double-`memset` derivation — the net effect is *not* four copies of
       the language id); `resd = true`; every other flag `false`; `intback = firstPeri = false`.
-- [ ] **`ClockSource`** enum with two variants, mirroring §7.1's `clocksync` but named honestly:
+- [x] **`ClockSource`** enum with two variants, mirroring §7.1's `clocksync` but named honestly:
       `HostWallClock` (re-read on every INTBACK) and `Fixed(u64 /* unix seconds */)` for
       deterministic tests and future deterministic replay. Skip Yabause's
       `basetime + frame_count * 1001/60000` formula for now — §7.1 flags it as NTSC-only and
       ~20 % slow in PAL; if a deterministic *advancing* clock is wanted later, derive it from
       the real frame period per video mode, not from that constant.
-- [ ] **Decide and document UTC vs. local time.** Yabause uses `localtime_r` (§7.1). A host
+- [x] **Decide and document UTC vs. local time.** Yabause uses `localtime_r` (§7.1). A host
       timezone dependency makes every RTC test non-reproducible. Recommend **UTC**, stated
       explicitly as a deliberate deviation in the module doc comment, per `CLAUDE.md`'s
       "state simplifications honestly" rule.
-- [ ] **OREG1** (`0x23`) — year thousands/hundreds BCD: `((y / 1000) << 4) | ((y % 1000) / 100)`
+- [x] **OREG1** (`0x23`) — year thousands/hundreds BCD: `((y / 1000) << 4) | ((y % 1000) / 100)`
       (§5.6).
-- [ ] **OREG2** (`0x25`) — year tens/units BCD: `(((y % 100) / 10) << 4) | (y % 10)` (§5.6).
-- [ ] **OREG3** (`0x27`) — `(weekday << 4) | (month)`, weekday **0 = Sunday**, month **1-12**,
+- [x] **OREG2** (`0x25`) — year tens/units BCD: `(((y % 100) / 10) << 4) | (y % 10)` (§5.6).
+- [x] **OREG3** (`0x27`) — `(weekday << 4) | (month)`, weekday **0 = Sunday**, month **1-12**,
       **not BCD** (§5.6 explicitly: months 10-12 appear as nibbles `0xA`-`0xC`).
-- [ ] **OREG4** (`0x29`) day-of-month BCD, **OREG5** (`0x2B`) hour 24 h BCD, **OREG6** (`0x2D`)
+- [x] **OREG4** (`0x29`) day-of-month BCD, **OREG5** (`0x2B`) hour 24 h BCD, **OREG6** (`0x2D`)
       minute BCD, **OREG7** (`0x2F`) second BCD (§5.6).
-- [ ] **OREG8** (`0x31`) cartridge code. §5.6 records Yabause's hardcoded `0` with a
+- [x] **OREG8** (`0x31`) cartridge code. §5.6 records Yabause's hardcoded `0` with a
       `// FIXME : random value`. Keep `0` **and say so in a comment** until a real cartridge
       model exists — that is the honest simplification, not a guess.
-- [ ] **OREG9** (`0x33`) `regionid`, from the region table added in Phase 0. Add
+- [x] **OREG9** (`0x33`) `regionid`, from the region table added in Phase 0. Add
       `Smpc::set_region(u8)` and a `SaturnSystem::set_region` passthrough so a frontend can
       choose; keep `JAPAN (1)` as the no-CD fallback (§0.2 `SmpcRecheckRegion`), which is what
       `sh2.rs:872` already effectively does. Autodetect-from-CD is deferred until the CD block
       is integrated at all (it currently is not — `CLAUDE.md`).
+      **Partial**: `Smpc::set_region(u8)` exists and is tested; the `SaturnSystem::set_region`
+      frontend passthrough does not yet exist (no frontend needs it yet either). Small,
+      mechanical follow-up when one does.
 - [ ] **OREG10** (`0x35`): `0x34 | ((dotsel as u8) << 6) | ((mshnmi as u8) << 3) |
       ((sysres as u8) << 1) | (sndres as u8)` (§5.6 — bits 5, 4, 2 hard-wired 1, bit 7
       hard-wired 0).
 - [ ] **OREG11** (`0x37`): `(cdres as u8) << 6` (§5.6).
-- [ ] **OREG12-15** (`0x39`, `0x3B`, `0x3D`, `0x3F`) ← `SMEM[0..3]` (§5.6, §7.3).
-- [ ] **OREG16-30** (`0x41`…`0x5D`): §5.6 tags Yabause leaving these stale as `[QUIRK]` #20 —
+- [x] **OREG12-15** (`0x39`, `0x3B`, `0x3D`, `0x3F`) ← `SMEM[0..3]` (§5.6, §7.3).
+- [x] **OREG16-30** (`0x41`…`0x5D`): §5.6 tags Yabause leaving these stale as `[QUIRK]` #20 —
       "15 bytes of stale data where hardware would supply defined values". Since the defined
       values are unknown from this source, **zero them** and comment that this is a deliberate
       divergence chosen over propagating garbage. Revisit if a BIOS is found to depend on it.
-- [ ] **`0x17` SETSMEM** (§4.12): copy IREG0..IREG3 (`0x01, 0x03, 0x05, 0x07`) into `SMEM[0..3]`;
+- [x] **`0x17` SETSMEM** (§4.12): copy IREG0..IREG3 (`0x01, 0x03, 0x05, 0x07`) into `SMEM[0..3]`;
       `OREG31 = 0x17`. No validity check (§4.12). SMEM is not persisted to disk (§7.3) — it
       lives in `Smpc` only; note that in the doc comment.
 
 **Testing (Phase 2)**
 
-- [ ] `intback_rtc_bcd_layout`: drive `ClockSource::Fixed(946_684_800)` (UNIX epoch for
+- [x] `intback_rtc_bcd_layout`: drive `ClockSource::Fixed(946_684_800)` (UNIX epoch for
       **2000-01-01 00:00:00 UTC**, a **Saturday** ⇒ `tm_wday = 6`). Hand-derived from §5.6's
       formulas: **OREG1 == `0x20`** (`(2000/1000)<<4 | (2000%1000)/100` = `2<<4 | 0`),
       **OREG2 == `0x00`**, **OREG3 == `0x61`** (`6<<4 | (0+1)`), **OREG4 == `0x01`**,
@@ -498,16 +531,16 @@ reads the clock or SMEM.
       nibble is `0xA`-`0xC`, *not* BCD-carrying) and a two-digit day/hour/minute/second so the
       BCD packing is actually tested (e.g. 2001-12-25 13:45:59 → OREG3 low nibble `0xC`,
       OREG4 `0x25`, OREG5 `0x13`, OREG6 `0x45`, OREG7 `0x59`).
-- [ ] `oreg10_encodes_dot_clock`: §5.6. All flags clear → **`0x34`**. With `dotsel = true`
+- [x] `oreg10_encodes_dot_clock`: §5.6. All flags clear → **`0x34`**. With `dotsel = true`
       (i.e. after CKCHG352, Phase 3) → **`0x74`**.
-- [ ] `setsmem_round_trips_through_oreg12_15`: write IREG0-3 = `DE AD BE EF`, COMREG `0x17`,
+- [x] `setsmem_round_trips_through_oreg12_15`: write IREG0-3 = `DE AD BE EF`, COMREG `0x17`,
       assert `OREG31 == 0x17`; then INTBACK status and assert OREG12-15 (`0x39`, `0x3B`,
       `0x3D`, `0x3F`) == `DE AD BE EF`.
-- [ ] `smem_reset_state`: after `Smpc::reset()` with language id `5` (Japanese, §0.4 step 2's
+- [x] `smem_reset_state`: after `Smpc::reset()` with language id `5` (Japanese, §0.4 step 2's
       comment block), SMEM must be `[0x00, 0x00, 0x00, 0x05]` — **not** `[5,5,5,5]`. This is
       exactly the kind of double-`memset` detail a plausible-looking reimplementation gets
       wrong.
-- [ ] `region_reported_in_oreg9`: set each of the nine §0.3 constants, assert OREG9 matches,
+- [x] `region_reported_in_oreg9`: set each of the nine §0.3 constants, assert OREG9 matches,
       and assert `AUTODETECT (0)` with no CD present falls back to `JAPAN (1)`.
 
 ---

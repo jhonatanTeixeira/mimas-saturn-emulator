@@ -992,6 +992,138 @@ single sitting should chase, not just to which bug gets priority.
 
 ---
 
+## Chapter 13 — An exhaustive hardware-reference rewrite, and a phased plan for every subsystem
+
+A routine `/init` pass (writing `CLAUDE.md`) surfaced that the four existing architecture docs
+had drifted shallow, and in places outright wrong: address notation that silently dropped a
+digit (`0x5A000000` where the real address is `0x05A00000`), an "SH-2 DIV1" conceptual code
+snippet that had accidentally cross-contaminated an `Sh4Context` type from a *Dreamcast*
+(SH-4) reference into a Saturn (SH-2) document, and an opcode table covering maybe twenty of the
+SH-2's real instructions dressed up as if it were complete. None of this was caught earlier
+because nothing forced a line-by-line check against the actual reference source.
+
+**The fix wasn't editing those docs — it was building a real one first.** Eight parallel agents,
+one per hardware subsystem (SH-2 CPU, memory/bus, SCU, SMPC/peripheral, VDP1, VDP2, SCSP, CD
+block), each read only Yabause's C/C++ source (never prior knowledge, never the shallow docs)
+and wrote an exhaustive register/opcode/DMA/command reference with a `yabause/src/<file>:<line>`
+citation on every claim, closing with a "known deviations" section cataloguing genuine Yabause
+bugs, dead code, and game-specific hacks found along the way — not invented, found. The session
+hit an account-level usage limit mid-run; three of the eight had already written their full
+output before being cut off, and relaunching the other five surfaced a real duplicate-work risk
+(a VDP2 agent from the *first* batch had actually finished and written its file after the
+relaunch was already issued — caught and killed before it could clobber the good copy with a
+second, redundant pass). All eight landed real depth: the SCU DSP's opcode-class encoding, VDP1's
+full 32-byte command-table layout, VDP2's ~100 registers and rotation-parameter math, SCSP's
+discovery that `scsp.c` alone contains *two* complete, independently-selectable synthesis
+engines behind a runtime flag (plus a third in `scsp2.c`), and more.
+
+**Then, and only then, the four old docs got trimmed** to stop duplicating (and getting wrong) facts
+the new `docs/hardware-reference/` now owns authoritatively: addresses fixed, the `Sh4Context`
+mistake removed, aspirational diagrams explicitly labeled as target-design rather than current
+behavior, and `saturn-architecture.md` (which had literally attempted the same job this new
+effort just did properly) reduced to a short index pointing at the real thing.
+
+**The natural next question — how far is the actual Rust code from any of this? — got the same
+treatment.** Eight more parallel agents, same subsystem split, each diffing its
+`hardware-reference/` file against the real `saturn-core` source and writing a phased
+implementation plan in `docs/implementation-plans/`. This diffing exercise alone, before a
+single line of implementation changed, surfaced concrete, confirmed bugs: the SH-2 interpreter's
+`OR`/`XOR`-with-immediate opcodes are swapped (confirmed against `sh2int.c`'s real dispatch
+table, and the code's own comments assert the wrong mapping too, so nothing local would have
+caught it); the SCU DSP masks its opcode field to 4 bits where real hardware's encoding needs the
+full value, so every `JMP` executes a phantom ALU op alongside the branch; VDP1's command-table
+reader is off by whole fields (color and vertex coordinates shifted), and the one existing test
+for it was built on top of that same bug; VDP2's backdrop color has never actually been a color —
+`BKTAL` is half of a VRAM address, and it only looked right because address `0` and color `0` are
+both black; the SCSP's per-voice register reads (start address, pitch, total level) land on the
+wrong bytes, with total level's attenuation sense inverted so maximum volume is silence; the
+memory decoder is missing its top-level area-select stage entirely, so the SH-2's own 4KB cache
+scratchpad at `0xC0000000` silently aliases to BIOS ROM; and the "CD command" path that appears
+to exist in `sh2.rs` is entirely fictional — wrong trigger condition, wrong offsets, and it
+flips a flag by writing into High Work RAM by mistake.
+
+**A concurrent session, discovered mid-effort, not fought.** Multiple of these sixteen agents
+independently flagged dirty files in `git status` they hadn't touched — a `scratch/yabause/`
+clone, a `docs/yabause_test_fixtures_extraction_plan.md`, edits to `scsp.rs`/`sync.rs`/
+`vdp.rs`/`main.rs`. This turned out to be the project's own maintainer running a second Claude
+Code session in parallel on unrelated feature work (a telemetry module, SCSP voice playback,
+fixture-extraction planning) — surfaced, confirmed, and left alone rather than treated as
+corruption to investigate or revert.
+
+---
+
+## Chapter 14 — A real fixture-extraction pipeline, and SMPC's first three phases
+
+The maintainer's own `docs/yabause_test_fixtures_extraction_plan.md` (written during the
+parallel session Chapter 13 surfaced) proposed patching a real Yabause build to dump genuine
+emulator state at chosen execution points, so Mimas's test suite could assert against *captured*
+hardware behavior instead of hand-picked values — directly attacking the weakness the sixteen
+hardware-reference/implementation-plan agents had just exposed: nearly every existing test was
+built on top of Mimas's own (sometimes buggy) behavior, not real hardware's.
+
+**Built the pipeline end to end, on a disposable clone, not the pristine reference.** The
+maintainer's earlier `scratch/yabause/` clone (a fresh, unmodified checkout of
+`libretro/yabause`) became the patch target — never `../yabause/`, which every
+`hardware-reference/*.md` file cites by exact line number and which needs to stay byte-for-byte
+what those citations point at. One dump hook went into `smpc.c`'s `SmpcINTBACK`, right after
+`SmpcINTBACKStatus()` populates the real response, gated by an unset-by-default environment
+variable so it's inert unless explicitly enabled. Rebuilt the libretro core with plain `make`,
+then ran it **headless** — `video_driver`/`audio_driver`/`input_driver`/`menu_driver` all forced
+to `"null"` via an `--appendconfig` override — against a real Saturn BIOS and a real boot-disc
+image, so nothing popped up a window on the maintainer's actual desktop. It captured a genuine
+0x80-byte SMPC register snapshot at the exact instant the real BIOS's first INTBACK call
+finishes, written to `saturn-core/tests/fixtures/smpc_intback_status.bin` with a README
+documenting the exact recipe to regenerate it.
+
+**The fixture found a real bug on first use, before any implementation work started.** A Rust
+test loaded the captured bytes through `Sh2`'s genuine memory-mapped read path. Every register
+matched except one: SF read back `0x00` against the real captured `0x01`, because `Sh2`'s SF read
+was hardcoded regardless of the underlying byte. Rather than leave a failing test in the suite or
+quietly weaken the assertion, it became a passing test (for the registers that already worked)
+plus a second, `#[ignore]`d test carrying the real expected value — a live regression check
+already loaded and waiting, not a TODO comment.
+
+**Then `docs/implementation-plans/smpc-peripheral.md`'s first three phases, executed in order.**
+Phase 0 extracted a real `Smpc` type out of `sh2.rs`'s inline command handling into its own
+module behind `Arc<Mutex<Smpc>>` — mirroring the `scu_dsp` precedent exactly, zero behavior
+change, verified by a test asserting byte-identical output against the old inline path before
+anything else changed. Phase 1 was the highest-value one: a real SF/`bustmp` handshake (real
+hardware's SF sits on a shared internal data bus that other writes also drive — modeled, not
+skipped), RESENAB/RESDISA, and two corrected constants the fixture and the plan's own real-BIOS
+trace had already pinned exactly — `OREG0` from a hardcoded `0x80` to `0x80 | (resd << 6)`
+(`0xC0` at reset), and `SR` from a hardcoded `0x6F` to the spec-correct `0x4F | (intback << 5)`.
+The previously-`#[ignore]`d SF test started passing, unmodified, the moment this phase landed —
+same fixture, same assertion, now true. Phase 2 completed the INTBACK status block: real RTC
+bytes, SMEM, region reporting, and system-state flags. With no `chrono`/`time` dependency in this
+project, the calendar math (days-since-epoch → year/month/day) was implemented from scratch via
+Howard Hinnant's public-domain `civil_from_days` algorithm — verified by hand-deriving a second
+test timestamp (2001-12-25 13:45:59 UTC) independently, cross-checking its implied weekday
+(Tuesday) against the historical record, and confirming every resulting BCD byte matched what the
+plan's own hand-worked formulas had already predicted, before the code ever ran.
+
+**RTC is UTC, not host-local time — checked with the maintainer first**, because it briefly
+looked like it might be introducing a wall-clock dependency into thread synchronization, which it
+explicitly isn't: `ClockSource` only ever supplies the byte content of INTBACK's response,
+nothing touches `LockStepSync` or `ClockThrottle`. Yabause itself reads the host's local
+timezone; a host-timezone dependency would make every RTC-touching test non-reproducible across
+machines, so UTC is a deliberate, stated deviation instead.
+
+**Real-BIOS re-runs after each phase, not just unit tests.** A 240-second boot-watch run
+(matching the window the plan's own live SMPC trace was originally captured over) after Phase 1
+matched the fixture's real values exactly (`OREG0 = 0xC0`, `SR = 0x4F`, `DDR1/DDR2/IOSEL/EXLE =
+0x00`) and reached noticeably further than that original trace — into code copied to High Work
+RAM, rather than stalling in BIOS ROM. After Phase 2, the same run showed OREG1 tracking the
+real host year, with no regression anywhere else in the sequence.
+
+**Deliberately not chased this session: SSHOFF actually resetting the slave core.** Implementing
+it exposed that `Sh2::run_loop` never checks whether its own core is still marked active in
+`LockStepSync` at all — only the global shutdown flag — so a "deactivated" Core 1 keeps executing
+instructions regardless. That's a real, deeper concurrency gap than the plan assumed going in,
+not a same-tier fix to bolt onto a register-fidelity pass; left for a session that can give it
+proper attention, exactly the "one wall at a time" discipline Chapter 12 also leaned on.
+
+---
+
 ## Working principles that held up across all of the above
 
 - **Never trust a self-consistent test.** Every real bug found this way
@@ -1039,7 +1171,38 @@ retrospective"):
 5. **Zero polling loops**, except the two categories that are exempt by
    nature: a CPU core's own instruction-execution loop, and a
    deterministic wall-clock pacer comparing against a computed target.
-   The subtler violation Chapter 10 found — a `Condvar` shared with an
-   unrelated high-frequency notifier — showed that "blocks on a real
-   `Condvar`" is necessary but not sufficient; what else notifies that
-   same `Condvar`, and how often, matters just as much.
+    The subtler violation Chapter 10 found — a `Condvar` shared with an
+    unrelated high-frequency notifier — showed that "blocks on a real
+    `Condvar`" is necessary but not sufficient; what else notifies that
+    same `Condvar`, and how often, matters just as much.
+
+---
+
+## Chapter 15 — CPU Milestone 1: SH-2 Opcodes, Missing Instructions, Exceptions, and Address-Space Holes
+
+With the SMPC fixtures extracted and the testing pipeline verified green, Milestone 1 of the CPU development plan (`sh2-cpu.md`) was executed across three sequential phases:
+
+### Phase 1 — Fix opcodes that are wrong today
+* **Corrected immediate decodes**: Swapped immediate decodes for XOR and OR (`0xCA00` and `0xCB00`) which were swapped.
+* **Fidelity additions**: Masked SR writes (`& SR_WRITE_MASK`) in `LDC Rn,SR`/`LDC.L @Rn+,SR` to preserve unimplemented/reserved SR bit slots.
+* **Atomic `TAS.B`**: Implemented a thread-safe, locked region atomic byte operation (`WorkRam::tas_byte`) to execute the test-and-set byte instruction (`0x4B12`) atomically under stripe write locks.
+* **Delay Slot Adjustments**: Adjusted PC reporting logic in jumps/branches (`delay_slot_and_jump`) to temporarily subtract 2 from `self.pc` during execution and restore it afterwards, aligning Mimas PC tracking with Yabause's internal convention.
+* **Reset Vector loading**: Extended SH-2 `reset()` to initialize CPU general-purpose registers `R0..=R14`, special registers (`gbr`, `vbr`, `mach`, `macl`, `pr`, `cycles`), clear pending interrupts, and fetch the initial PC and stack pointer (R15) from the vector table at VBR.
+* **Access clamping**: Clamped BIOS reads to `offset & 0x7FFFF` with explicit bounds checking.
+
+### Phase 2 — Add the 9 missing opcodes
+* **Opcode implementations**: Added missing instructions: `SLEEP` (`0x001B`), `BRAF` (`0x0023`), `BSRF` (`0x0003`).
+* **GBR-indirect byte operations**: Implemented GBR-relative logical functions `TST.B`, `AND.B`, `XOR.B`, `OR.B` under `0xCC00` - `0xCF00` decodes.
+* **Signed Saturation Math**: Implemented `MAC.L @Rm+,@Rn+` and `MAC.W @Rm+,@Rn+` using signed multiplication and full saturation checks governed by the CPU `S` (Saturation) status flag.
+* **Verification**: Wrote comprehensive unit tests (`test_sleep`, `test_braf_bsrf`, `test_mac_l_mac_w`, `test_gbr_byte_ops`) confirming arithmetic edge cases.
+
+### Phase 3 — Exceptions and the address-space holes
+* **Illegal-Instruction Exceptions**: Replaced silent no-op fall-throughs for illegal opcodes with a hardware-accurate exception sequence: pushes `SR` and `PC` to stack (decrementing `R15` twice), jumps through vector 4 (`[VBR + 16]`), increments elapsed cycle counts, and flags `illegal_instruction_flag = true`.
+* **Diagnostic logging**: Implemented `log_illegal_once` to track and report every distinct illegal opcode-at-PC occurrence exactly once in stderr (`[ILLOP] pc=... opcode=...`) to help easily diagnose gaps during boot.
+* **Address Partitioning**: Added memory regions for Cache Purge (`address >> 29` equal to 2), Cache Address Array (`address >> 29 == 3`), and Cache Data Array (`address >> 29 == 6`).
+* **Cache execution support**: Supported flat backing arrays `cache_address_array` and `cache_data_array` inside `Sh2` using non-aliased addresses. Enabled `EXEC_FROM_CACHE` checking in `step()`, decoding opcodes directly from `cache_data_array` whenever `(pc & 0xC0000000) == 0xC0000000` is hit.
+* **E2E test alignment**: Updated existing test vectors in `e2e-tests` (e.g. pc increment, max pc overflow, lockstep sync) to load valid NOP loop BIOS/Cache blocks rather than executing `0x0000` memory holes, verifying that the entire workspace compiles and tests pass 100% green.
+* **Critical Bug Fixes**:
+  1. **Area 5 CachePurge Fix**: Removed Area 5 (`0xA000_0000`) from the `CachePurge` translation match, restoring it to its correct hardware behavior as a cache-through mirror of physical memory.
+  2. **TAS.B Non-RAM Fallback**: Modified the `TAS.B` execution path to fall back to a non-atomic read-modify-write (`raw_read_byte` followed by `raw_write_byte`) for addresses outside Low RAM and High RAM (e.g. SMPC registers), avoiding silent failures/no-ops. Wrote unit test (`test_tas_b_fallback`) confirming correctness.
+  3. **Address 7 Cache Range**: Noted that the cache data array is strictly for area 6, but area 7 (`0xE...`/`0xF...`) fetches match the cache-execution boundary as designed.

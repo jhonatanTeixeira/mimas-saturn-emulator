@@ -33,6 +33,9 @@ enum MemRegion {
     ScuRegs(usize),
     Cs2Regs(usize),
     OnChip(usize),
+    CachePurge(usize),
+    CacheAddressArray(usize),
+    CacheDataArray(usize),
     Unmapped,
 }
 
@@ -177,6 +180,8 @@ pub struct Sh2 {
     pub dvdntl: u32,
     pub dvdntuh: u32,
     pub dvdntul: u32,
+    pub cache_address_array: [u32; 0x100],
+    pub cache_data_array: [u8; 0x1000],
 }
 
 // SR bit positions actually used by this subset of the ISA. Layout (T, S,
@@ -184,6 +189,7 @@ pub struct Sh2 {
 // SR_WRITE_MASK (0x3F3), which a real, working interpreter (Yabause) uses
 // at every site that writes SR from an external value.
 const SR_T: u32 = 1 << 0;
+const SR_S: u32 = 1 << 1;
 const SR_M: u32 = 1 << 8;
 const SR_Q: u32 = 1 << 9;
 // SR bits 4-7: current interrupt mask level (0-15). An interrupt is
@@ -245,6 +251,7 @@ const TVSTAT_VBLANK_BIT: u16 = 0x0008;
 /// registers the BIOS actually touches without hand-decoding raw opcodes.
 /// Remove once the current wall is diagnosed.
 static REG_ACCESS_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+static ILLEGAL_OP_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 fn log_reg_access_once(region: &MemRegion, is_write: bool, val: u8) {
     let interesting = matches!(
@@ -259,6 +266,15 @@ fn log_reg_access_once(region: &MemRegion, is_write: bool, val: u8) {
     let mut log = REG_ACCESS_LOG.lock().unwrap();
     if !log.contains(&key) {
         eprintln!("[REGACCESS] {}", key);
+        log.push(key);
+    }
+}
+
+fn log_illegal_once(pc: u32, opcode: u16) {
+    let key = format!("pc={:#010X} opcode={:#06X}", pc, opcode);
+    let mut log = ILLEGAL_OP_LOG.lock().unwrap();
+    if !log.contains(&key) {
+        eprintln!("[ILLOP] {}", key);
         log.push(key);
     }
 }
@@ -303,6 +319,8 @@ impl Sh2 {
             dvdntl: 0,
             dvdntuh: 0,
             dvdntul: 0,
+            cache_address_array: [0; 0x100],
+            cache_data_array: [0; 0x1000],
         }
     }
 
@@ -323,29 +341,47 @@ impl Sh2 {
     /// physical address 0x00000000), which lives in BIOS ROM. Must be called
     /// after `load_bios()` for this to do anything meaningful.
     pub fn reset(&mut self) {
-        self.pc = self.read_long(0x00000000);
-        self.registers[15] = self.read_long(0x00000004);
-        // Real SH-2 reset value: interrupt mask level 15 (I3-I0 = 1111),
-        // blocking every maskable interrupt until the BIOS explicitly lowers
-        // it -- important once real interrupts exist, since accepting one
-        // before the vector table / stack are set up would jump through
-        // garbage.
+        // Zero R0..R14 (not R15)
+        for i in 0..15 {
+            self.registers[i] = 0;
+        }
+        self.gbr = 0;
+        self.vbr = 0;
+        self.mach = 0;
+        self.macl = 0;
+        self.pr = 0;
+        self.cycles = 0;
+
+        self.pc = self.read_long(self.vbr + 0);
+        self.registers[15] = self.read_long(self.vbr + 4);
+
+        // Real SH-2 reset value: interrupt mask level 15 (I3-I0 = 1111)
         self.sr = 0x0000_00F0;
         self.illegal_instruction_flag = false;
         self.unaligned_access_flag = false;
-        self.dvsr = 0;
-        self.dvdnt = 0;
+
+        // Reset pending flags
+        self.vblank_pending = false;
+        self.vblank_out_pending = false;
+        self.smpc_irq_pending = false;
+        if let Some(ref f) = self.sound_req_irq {
+            f.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        // DIVU: Reset only dvcr and vcrdiv per HR §11.1
         self.dvcr = 0;
         self.vcrdiv = 0;
-        self.dvdnth = 0;
-        self.dvdntl = 0;
-        self.dvdntuh = 0;
-        self.dvdntul = 0;
     }
 
     fn translate(&self, address: u32) -> MemRegion {
         if address >= 0xFFFF_FE00 {
             return MemRegion::OnChip((address & 0x1FF) as usize);
+        }
+        match address >> 29 {
+            2 => return MemRegion::CachePurge(address as usize),
+            3 => return MemRegion::CacheAddressArray(address as usize),
+            6 => return MemRegion::CacheDataArray(address as usize),
+            _ => {}
         }
         // Strip the SH-2 cache-control/partition bits (bit 29 selects the
         // "cache-through" mirror of the same physical space) -- we don't
@@ -413,10 +449,11 @@ impl Sh2 {
     fn raw_read_byte_region(&self, region: MemRegion) -> u8 {
         match region {
             MemRegion::Bios(off) => {
-                if self.bios.is_empty() {
-                    0
+                let index = off & 0x7FFFF;
+                if index < self.bios.len() {
+                    self.bios[index]
                 } else {
-                    self.bios[off & (self.bios.len() - 1)]
+                    0
                 }
             }
             MemRegion::LowRam(off) => {
@@ -510,6 +547,16 @@ impl Sh2 {
             MemRegion::Smpc(off) => {
                 let ram = self.work_ram.smpc_regs.read().unwrap();
                 ram[off & (ram.len() - 1)]
+            }
+            MemRegion::CachePurge(_) => 0xFF,
+            MemRegion::CacheAddressArray(off) => {
+                let index = (off & 0x3FC) >> 2;
+                let val = self.cache_address_array[index];
+                let byte_shift = 24 - ((off & 3) * 8);
+                ((val >> byte_shift) & 0xFF) as u8
+            }
+            MemRegion::CacheDataArray(off) => {
+                self.cache_data_array[off & 0xFFF]
             }
             MemRegion::Unmapped | MemRegion::OnChip(_) => 0,
         }
@@ -616,6 +663,21 @@ impl Sh2 {
                     }
                 }
             }
+            MemRegion::CachePurge(off) => {
+                let uncached_addr = (off as u32) & 0x0FFF_FFFF;
+                self.raw_write_byte(uncached_addr, val);
+            }
+            MemRegion::CacheAddressArray(off) => {
+                let index = (off & 0x3FC) >> 2;
+                let mut word = self.cache_address_array[index];
+                let byte_shift = 24 - ((off & 3) * 8);
+                let mask = !(0xFF << byte_shift);
+                word = (word & mask) | ((val as u32) << byte_shift);
+                self.cache_address_array[index] = word;
+            }
+            MemRegion::CacheDataArray(off) => {
+                self.cache_data_array[off & 0xFFF] = val;
+            }
             // BIOS is ROM: writes are silently discarded, matching real hardware.
             MemRegion::Bios(_) | MemRegion::Unmapped | MemRegion::OnChip(_) => {}
         }
@@ -640,7 +702,6 @@ impl Sh2 {
     pub fn read_word(&mut self, address: u32) -> u16 {
         if address % 2 != 0 {
             self.unaligned_access_flag = true;
-            return 0;
         }
         self.bus_wait();
         let hi = self.raw_read_byte(address);
@@ -652,7 +713,6 @@ impl Sh2 {
     pub fn write_word(&mut self, address: u32, val: u16) {
         if address % 2 != 0 {
             self.unaligned_access_flag = true;
-            return;
         }
         self.bus_wait();
         if address == 0x0600_1000 {
@@ -694,6 +754,11 @@ impl Sh2 {
             self.cdrom_command_executed = true;
         }
         let region = self.translate(address);
+        if let MemRegion::CachePurge(_) = region {
+            // Longword write performs the associative cache purge.
+            // Until Phase 11, this is a no-op.
+            return;
+        }
         if let MemRegion::ScuRegs(off) = region {
             if self.write_scu_dsp_port(off, val) {
                 return;
@@ -770,6 +835,18 @@ impl Sh2 {
         }
     }
 
+    fn s(&self) -> bool {
+        self.sr & SR_S != 0
+    }
+
+    fn set_s(&mut self, val: bool) {
+        if val {
+            self.sr |= SR_S;
+        } else {
+            self.sr &= !SR_S;
+        }
+    }
+
     fn t(&self) -> bool {
         self.sr & SR_T != 0
     }
@@ -809,7 +886,14 @@ impl Sh2 {
     /// Run single step of CPU
     pub fn step(&mut self) {
         self.service_pending_interrupt();
-        let opcode = self.read_word(self.pc);
+        let opcode = if (self.pc & 0xC000_0000) == 0xC000_0000 {
+            let off = (self.pc & 0xFFF) as usize;
+            let hi = self.cache_data_array[off];
+            let lo = self.cache_data_array[off.wrapping_add(1) & 0xFFF];
+            (hi as u16) << 8 | (lo as u16)
+        } else {
+            self.read_word(self.pc)
+        };
         self.pc = self.pc.wrapping_add(2);
         self.execute(opcode);
         self.cycles = self.cycles.wrapping_add(2);
@@ -921,8 +1005,14 @@ impl Sh2 {
             return;
         }
         let mut ram = self.work_ram.smpc_regs.write().unwrap();
-        let ireg1 = ram[SMPC_IREG1_OFFSET];
-        let wants_peripheral = (ireg1 & 0x8) != 0;
+        // Real hardware branches on this (see the comment below); this old
+        // fallback path predates that decode and never did -- kept
+        // unused/prefixed rather than removed so the comment below (which
+        // predates Phase 1 and still describes real hardware behavior)
+        // keeps its referent. The *new*, wired-in path (`crate::smpc::Smpc`)
+        // does decode this -- see `docs/implementation-plans/
+        // smpc-peripheral.md` Phase 1.
+        let _wants_peripheral = (ram[SMPC_IREG1_OFFSET] & 0x8) != 0;
 
         // Real `SmpcINTBACKStatus()`: system status + RTC + cartridge/
         // region/reset flags in OREG0-11. RTC bytes are zeroed (BCD-encoded
@@ -1023,9 +1113,9 @@ impl Sh2 {
     fn delay_slot_and_jump(&mut self, target: u32) {
         let slot_pc = self.pc;
         let opcode = self.read_word(slot_pc);
-        self.pc = slot_pc.wrapping_add(2);
+        self.pc = target.wrapping_sub(2);
         self.execute(opcode);
-        self.pc = target;
+        self.pc = self.pc.wrapping_add(2);
     }
 
     /// Execute a fetched SH-2 instruction opcode
@@ -1038,31 +1128,7 @@ impl Sh2 {
         let imm8 = (opcode & 0xFF) as u8;
 
 
-        match opcode {
-            0x0009 => return, // NOP
-            0x000B => { // RTS
-                let target = self.pr;
-                self.delay_slot_and_jump(target);
-                return;
-            }
-            0x0018 => { self.set_t(true); return; } // SETT
-            0x0008 => { self.set_t(false); return; } // CLRT
-            0x0019 => { self.sr &= !(SR_T | SR_M | SR_Q); return; } // DIV0U: M=Q=T=0
-            0x0028 => { self.mach = 0; self.macl = 0; return; } // CLRMAC
-            0x002B => { // RTE: pops PC first (lower stack address), then SR -- real
-                // hardware pushes SR then PC on exception entry, so PC ends
-                // up on top; see `service_pending_interrupt`.
-                let sp = self.registers[15];
-                let new_pc = self.read_long(sp);
-                let new_sr = self.read_long(sp.wrapping_add(4));
-                self.registers[15] = sp.wrapping_add(8);
-                self.sr = new_sr & SR_WRITE_MASK;
-                self.delay_slot_and_jump(new_pc);
-                return;
-            }
-            0xFFFF => { self.illegal_instruction_flag = true; return; }
-            _ => {}
-        }
+        // 0xFFFF and other illegal instructions will fall through to the common exception handler at the end of execute()
 
         if opcode & 0xFF00 == 0xC300 { // TRAPA #imm
             // No delay slot, so the return address is simply the address
@@ -1082,6 +1148,47 @@ impl Sh2 {
         }
 
         match opcode & 0xF0FF {
+            0x0009 => return, // NOP
+            0x000B => { // RTS
+                let target = self.pr;
+                self.delay_slot_and_jump(target);
+                return;
+            }
+            0x0018 => { self.set_t(true); return; } // SETT
+            0x0008 => { self.set_t(false); return; } // CLRT
+            0x0019 => { self.sr &= !(SR_T | SR_M | SR_Q); return; } // DIV0U: M=Q=T=0
+            0x0028 => { self.mach = 0; self.macl = 0; return; } // CLRMAC
+            0x001B => {
+                // SLEEP: PC is not advanced, wait for interrupt.
+                // Since step() already advanced self.pc by 2, we rewind it.
+                self.pc = self.pc.wrapping_sub(2);
+                self.cycles = self.cycles.wrapping_add(3);
+                return;
+            }
+            0x0023 => { // BRAF Rn
+                let val = self.registers[n];
+                let target = self.pc.wrapping_add(2).wrapping_add(val);
+                self.delay_slot_and_jump(target);
+                return;
+            }
+            0x0003 => { // BSRF Rn
+                let val = self.registers[n];
+                let target = self.pc.wrapping_add(2).wrapping_add(val);
+                self.pr = self.pc.wrapping_add(2);
+                self.delay_slot_and_jump(target);
+                return;
+            }
+            0x002B => { // RTE: pops PC first (lower stack address), then SR -- real
+                // hardware pushes SR then PC on exception entry, so PC ends
+                // up on top; see `service_pending_interrupt`.
+                let sp = self.registers[15];
+                let new_pc = self.read_long(sp);
+                let new_sr = self.read_long(sp.wrapping_add(4));
+                self.registers[15] = sp.wrapping_add(8);
+                self.sr = new_sr & SR_WRITE_MASK;
+                self.delay_slot_and_jump(new_pc);
+                return;
+            }
             0x0002 => { self.registers[n] = self.sr; return; } // STC SR,Rn
             0x0012 => { self.registers[n] = self.gbr; return; } // STC GBR,Rn
             0x0022 => { self.registers[n] = self.vbr; return; } // STC VBR,Rn
@@ -1103,6 +1210,33 @@ impl Sh2 {
             0x000C => { let a = self.registers[0].wrapping_add(self.registers[m]); self.registers[n] = self.read_byte(a) as i8 as i32 as u32; return; }
             0x000D => { let a = self.registers[0].wrapping_add(self.registers[m]); self.registers[n] = self.read_word(a) as i16 as i32 as u32; return; }
             0x000E => { let a = self.registers[0].wrapping_add(self.registers[m]); self.registers[n] = self.read_long(a); return; }
+            0x000F => { // MAC.L @Rm+,@Rn+
+                let addr_n = self.registers[n];
+                let val_n = self.read_long(addr_n) as i32 as i64;
+                self.registers[n] = addr_n.wrapping_add(4);
+
+                let addr_m = self.registers[m];
+                let val_m = self.read_long(addr_m) as i32 as i64;
+                self.registers[m] = addr_m.wrapping_add(4);
+
+                let mac = (self.macl as u64 | ((self.mach as u64) << 32)) as i64;
+                let mul = val_n.wrapping_mul(val_m);
+                let mut sum = mac.wrapping_add(mul);
+
+                if self.s() {
+                    const SAT_MAX: i64 = 0x0000_7FFF_FFFF_FFFFi64;
+                    const SAT_MIN: i64 = -0x0000_8000_0000_0000i64;
+                    if sum > SAT_MAX {
+                        sum = if mul < 0 { SAT_MIN } else { SAT_MAX };
+                    } else if sum < SAT_MIN {
+                        sum = if mul < 0 { SAT_MIN } else { SAT_MAX };
+                    }
+                }
+
+                self.mach = (sum >> 32) as u32;
+                self.macl = sum as u32;
+                return;
+            }
             _ => {}
         }
 
@@ -1198,8 +1332,8 @@ impl Sh2 {
             }
             0xC800 => { self.set_t((self.registers[0] & imm8 as u32) == 0); return; } // TST #imm,R0
             0xC900 => { self.registers[0] &= imm8 as u32; return; } // AND #imm,R0
-            0xCA00 => { self.registers[0] |= imm8 as u32; return; } // OR #imm,R0
-            0xCB00 => { self.registers[0] ^= imm8 as u32; return; } // XOR #imm,R0
+            0xCA00 => { self.registers[0] ^= imm8 as u32; return; } // XOR #imm,R0
+            0xCB00 => { self.registers[0] |= imm8 as u32; return; } // OR #imm,R0
             0xC700 => { // MOVA @(disp8,PC),R0
                 let base = self.pc.wrapping_add(2) & !3u32;
                 self.registers[0] = base.wrapping_add(d8.wrapping_mul(4));
@@ -1211,6 +1345,30 @@ impl Sh2 {
             0xC400 => { let a = self.gbr.wrapping_add(d8); self.registers[0] = self.read_byte(a) as i8 as i32 as u32; return; }
             0xC500 => { let a = self.gbr.wrapping_add(d8.wrapping_mul(2)); self.registers[0] = self.read_word(a) as i16 as i32 as u32; return; }
             0xC600 => { let a = self.gbr.wrapping_add(d8.wrapping_mul(4)); self.registers[0] = self.read_long(a); return; }
+            0xCC00 => { // TST.B #imm,@(R0,GBR)
+                let a = self.gbr.wrapping_add(self.registers[0]);
+                let val = self.read_byte(a);
+                self.set_t((val & imm8) == 0);
+                return;
+            }
+            0xCD00 => { // AND.B #imm,@(R0,GBR)
+                let a = self.gbr.wrapping_add(self.registers[0]);
+                let val = self.read_byte(a);
+                self.write_byte(a, val & imm8);
+                return;
+            }
+            0xCE00 => { // XOR.B #imm,@(R0,GBR)
+                let a = self.gbr.wrapping_add(self.registers[0]);
+                let val = self.read_byte(a);
+                self.write_byte(a, val ^ imm8);
+                return;
+            }
+            0xCF00 => { // OR.B #imm,@(R0,GBR)
+                let a = self.gbr.wrapping_add(self.registers[0]);
+                let val = self.read_byte(a);
+                self.write_byte(a, val | imm8);
+                return;
+            }
             _ => {}
         }
 
@@ -1237,26 +1395,16 @@ impl Sh2 {
             0x4018 => { self.registers[n] <<= 8; return; } // SHLL8
             0x4019 => { self.registers[n] >>= 8; return; } // SHLR8
             0x401B => { // TAS.B @Rn
-                // KNOWN GAP, not fixed by the per-field WorkRam lock split:
-                // this is a separate read_byte then write_byte -- two
-                // independent lock acquisitions with a real gap between
-                // them, not a real hardware-style atomic bus cycle. Real
-                // dual-CPU Saturn software's whole reason to use TAS.B is a
-                // spinlock over shared Low/High Work RAM between the Master
-                // and Slave SH-2 -- exactly the scenario this gap breaks.
-                // Dormant today only because Core 1 (Slave SH-2) never
-                // runs (parked, see `SaturnSystem::start`); splitting the
-                // old monolithic WorkRam lock removes incidental over-
-                // serialization between cores, which makes two concurrent
-                // TAS.B's on the same byte MORE likely to actually race the
-                // moment SSHON activates Core 1, not equally dormant. Needs
-                // a real compare-and-swap-style fix (or one write-lock
-                // spanning both the read and the write) before or alongside
-                // SSHON -- see `history.md` Chapter 8.
+                self.bus_wait();
                 let a = self.registers[n];
-                let val = self.read_byte(a);
+                let val = if let Some(v) = self.work_ram.tas_byte(a) {
+                    v
+                } else {
+                    let v = self.raw_read_byte(a);
+                    self.raw_write_byte(a, v | 0x80);
+                    v
+                };
                 self.set_t(val == 0);
-                self.write_byte(a, val | 0x80);
                 return;
             }
             0x4020 => { // SHAL
@@ -1292,7 +1440,12 @@ impl Sh2 {
                 self.delay_slot_and_jump(target);
                 return;
             }
-            0x400E => { self.sr = self.registers[n]; return; } // LDC Rn,SR
+            0x400E => {
+                // Apply SR_WRITE_MASK. Immediate interrupt service is not needed here
+                // because service_pending_interrupt runs at the head of every step().
+                self.sr = self.registers[n] & SR_WRITE_MASK;
+                return;
+            } // LDC Rn,SR
             0x401E => { self.gbr = self.registers[n]; return; } // LDC Rn,GBR
             0x402E => { self.vbr = self.registers[n]; return; } // LDC Rn,VBR
             0x400A => { self.mach = self.registers[n]; return; } // LDS Rn,MACH
@@ -1310,7 +1463,7 @@ impl Sh2 {
             0x4002 => { let a = self.registers[n].wrapping_sub(4); self.write_long(a, self.mach); self.registers[n] = a; return; } // STS.L MACH,@-Rn
             0x4012 => { let a = self.registers[n].wrapping_sub(4); self.write_long(a, self.macl); self.registers[n] = a; return; } // STS.L MACL,@-Rn
             0x4022 => { let a = self.registers[n].wrapping_sub(4); self.write_long(a, self.pr); self.registers[n] = a; return; } // STS.L PR,@-Rn
-            0x4007 => { let a = self.registers[n]; self.sr = self.read_long(a); self.registers[n] = a.wrapping_add(4); return; } // LDC.L @Rn+,SR
+            0x4007 => { let a = self.registers[n]; self.sr = self.read_long(a) & SR_WRITE_MASK; self.registers[n] = a.wrapping_add(4); return; } // LDC.L @Rn+,SR
             0x4017 => { let a = self.registers[n]; self.gbr = self.read_long(a); self.registers[n] = a.wrapping_add(4); return; } // LDC.L @Rn+,GBR
             0x4027 => { let a = self.registers[n]; self.vbr = self.read_long(a); self.registers[n] = a.wrapping_add(4); return; } // LDC.L @Rn+,VBR
             0x4003 => { let a = self.registers[n].wrapping_sub(4); self.write_long(a, self.sr); self.registers[n] = a; return; } // STC.L SR,@-Rn
@@ -1460,6 +1613,37 @@ impl Sh2 {
                 self.macl = r as u32;
                 return;
             }
+            0x400F => { // MAC.W @Rm+,@Rn+
+                let addr_m = self.registers[m];
+                let val_m = self.read_word(addr_m) as i16 as i32;
+                self.registers[m] = addr_m.wrapping_add(2);
+
+                let addr_n = self.registers[n];
+                let val_n = self.read_word(addr_n) as i16 as i32;
+                self.registers[n] = addr_n.wrapping_add(2);
+
+                let mul = val_m.wrapping_mul(val_n);
+                let sum = (self.macl as i32 as i64).wrapping_add(mul as i64);
+
+                if self.s() {
+                    const SAT_MAX: i64 = 0x7FFFFFFF;
+                    const SAT_MIN: i64 = -0x80000000;
+                    if sum > SAT_MAX {
+                        self.mach |= 1;
+                        self.macl = if mul < 0 { SAT_MIN as u32 } else { SAT_MAX as u32 };
+                    } else if sum < SAT_MIN {
+                        self.mach |= 1;
+                        self.macl = if mul < 0 { SAT_MIN as u32 } else { SAT_MAX as u32 };
+                    } else {
+                        self.macl = sum as u32;
+                    }
+                } else {
+                    self.macl = sum as u32;
+                    // DEVIATION: non-accumulating MACH overwrite.
+                    self.mach = (sum >> 32) as u32;
+                }
+                return;
+            }
             0x6000 => { let a = self.registers[m]; self.registers[n] = self.read_byte(a) as i8 as i32 as u32; return; }
             0x6001 => { let a = self.registers[m]; self.registers[n] = self.read_word(a) as i16 as i32 as u32; return; }
             0x6002 => { let a = self.registers[m]; self.registers[n] = self.read_long(a); return; }
@@ -1508,15 +1692,19 @@ impl Sh2 {
             _ => {}
         }
 
-        // Unimplemented opcode: leave CPU state unchanged rather than
-        // guessing. Known real coverage gap as of this writing: the
-        // GBR-indexed byte TST/AND/OR/XOR forms (0xCC00/0xCD00/0xCE00/
-        // 0xCF00 -- TST.B/AND.B/OR.B/XOR.B #imm,@(R0,GBR); not the same as
-        // the already-implemented 0xC800-0xCB00 immediate-only forms).
-        // Not yet hit running the real BIOS -- see `.development/
-        // current_bugs.md` before assuming this list is exhaustive; add
-        // opcodes here the same way as everything else in this file (hit
-        // the wall, decode, cross-check Yabause, implement, test).
+        // Illegal-instruction exception sequence (HR §9.9/D-6)
+        log_illegal_once(self.pc.wrapping_sub(2), opcode);
+        let sr_addr = self.registers[15].wrapping_sub(4);
+        self.write_long(sr_addr, self.sr);
+        let pc_addr = sr_addr.wrapping_sub(4);
+        self.write_long(pc_addr, self.pc);
+        self.registers[15] = pc_addr;
+
+        // UNCERTAIN: HR notes delay-slot cases can use vector 6, but Yabause always
+        // uses vector 4. We match Yabause unconditionally.
+        self.pc = self.read_long(self.vbr.wrapping_add(4 * 4));
+        self.cycles = self.cycles.wrapping_add(1);
+        self.illegal_instruction_flag = true;
     }
 
     fn read_onchip(&self, off: usize) -> u32 {
@@ -2439,5 +2627,235 @@ mod opcode_tests {
         assert_eq!(cpu.read_word(0x05800000), 0x0400);
         // Verify HIRQ = 0x0001
         assert_eq!(cpu.read_word(0x05800008), 0x0001);
+    }
+
+    #[test]
+    fn test_sleep() {
+        let mut cpu = make_cpu();
+        cpu.sr = 0; // mask level 0
+        cpu.vbr = 0x0601_0000;
+        cpu.registers[15] = 0x0601_1000;
+        cpu.pc = 0x0600_0000;
+        // Write SLEEP opcode
+        cpu.write_word(0x0600_0000, 0x001B);
+        // Vector table entry for VBLANK-IN points to 0x0600_2000
+        cpu.write_long(cpu.vbr.wrapping_add(VBLANK_IN_VECTOR * 4), 0x0600_2000);
+        cpu.write_word(0x0600_2000, 0x0009); // NOP inside handler
+
+        let cycles_before = cpu.cycles;
+        cpu.step(); // executes SLEEP
+        assert_eq!(cpu.pc, 0x0600_0000, "SLEEP must not advance PC");
+        assert_eq!(cpu.cycles, cycles_before.wrapping_add(2).wrapping_add(3), "SLEEP must charge 3 extra cycles");
+
+        // Now request interrupt and step
+        cpu.request_vblank_interrupt();
+        cpu.step(); // takes interrupt and executes handler first instruction
+        assert_eq!(cpu.pc, 0x0600_2002, "PC must have diverged to interrupt vector handler + 2");
+    }
+
+    #[test]
+    fn test_braf_bsrf() {
+        let mut cpu = make_cpu();
+        // BRAF R1
+        cpu.pc = 0x0600_1000;
+        cpu.write_word(0x0600_1000, 0x0123); // BRAF R1 (nibble B = 1)
+        cpu.write_word(0x0600_1002, 0xE212); // MOV #0x12, R2 (delay slot)
+        cpu.registers[1] = 0x40;
+        cpu.step();
+        assert_eq!(cpu.registers[2], 0x12, "delay slot must execute");
+        assert_eq!(cpu.pc, 0x0600_1044, "BRAF target must be PC_br + Rn + 4 (0x0600_1000 + 0x40 + 4)");
+
+        // BSRF R1
+        cpu.pc = 0x0600_1000;
+        cpu.write_word(0x0600_1000, 0x0103); // BSRF R1 (nibble B = 1)
+        cpu.write_word(0x0600_1002, 0xE224); // MOV #0x24, R2 (delay slot)
+        cpu.registers[1] = 0x40;
+        cpu.step();
+        assert_eq!(cpu.registers[2], 0x24, "delay slot must execute");
+        assert_eq!(cpu.pc, 0x0600_1044, "BSRF target must be PC_br + Rn + 4");
+        assert_eq!(cpu.pr, 0x0600_1004, "PR must be PC_br + 4");
+    }
+
+    #[test]
+    fn test_mac_l_mac_w() {
+        let mut cpu = make_cpu();
+        cpu.registers[1] = 0x0020_0000; // Rn
+        cpu.registers[2] = 0x0020_0010; // Rm
+        // Write memory operands
+        cpu.write_long(0x0020_0000, 0x1000);
+        cpu.write_long(0x0020_0010, 0x2000);
+
+        // MAC.L @R2+,@R1+
+        cpu.macl = 0x500;
+        cpu.mach = 0;
+        cpu.execute(0x012F); // MAC.L @R2+,@R1+ (n=1, m=2)
+        assert_eq!(cpu.registers[1], 0x0020_0004);
+        assert_eq!(cpu.registers[2], 0x0020_0014);
+        // mul = 0x1000 * 0x2000 = 0x0200_0000. sum = 0x500 + 0x0200_0000 = 0x0200_0500
+        assert_eq!(cpu.macl, 0x0200_0500);
+        assert_eq!(cpu.mach, 0);
+
+        // Test MAC.W
+        cpu.registers[1] = 0x0020_0100;
+        cpu.registers[2] = 0x0020_0110;
+        cpu.write_word(0x0020_0100, 0x1234u16);
+        cpu.write_word(0x0020_0110, 0x5678u16);
+        cpu.macl = 0x1000;
+        cpu.mach = 0xFFFFFFFF; // should be overwritten or modified
+        cpu.set_s(false);
+        cpu.execute(0x412F); // MAC.W @R2+,@R1+ (n=1, m=2)
+        assert_eq!(cpu.registers[1], 0x0020_0102);
+        assert_eq!(cpu.registers[2], 0x0020_0112);
+        // mul = 0x1234 * 0x5678 = 0x0626_0060. sum = 0x1000 + 0x0626_0060 = 0x0626_1060
+        assert_eq!(cpu.macl, 0x0626_1060);
+        // S = 0, MACH is non-accumulating overwrite: sum >> 32 = 0
+        assert_eq!(cpu.mach, 0);
+    }
+
+    #[test]
+    fn test_gbr_byte_ops() {
+        let mut cpu = make_cpu();
+        cpu.gbr = 0x0020_0000;
+        cpu.registers[0] = 0x10;
+        let addr = 0x0020_0010;
+
+        // TST.B
+        cpu.write_byte(addr, 0x5A);
+        cpu.execute(0xCC3C); // TST.B #0x3C,@(R0,GBR) -> 0x5A & 0x3C = 0x18 != 0 -> T = 0
+        assert!(!cpu.t());
+        cpu.execute(0xCC84); // TST.B #0x84,@(R0,GBR) -> 0x5A & 0x84 = 0 -> T = 1
+        assert!(cpu.t());
+
+        // AND.B
+        cpu.write_byte(addr, 0x5A);
+        cpu.execute(0xCD0F); // AND.B #0x0F,@(R0,GBR) -> 0x5A & 0x0F = 0x0A
+        assert_eq!(cpu.read_byte(addr), 0x0A);
+
+        // XOR.B
+        cpu.write_byte(addr, 0x5A);
+        cpu.execute(0xCEAA); // XOR.B #0xAA,@(R0,GBR) -> 0x5A ^ 0xAA = 0xF0
+        assert_eq!(cpu.read_byte(addr), 0xF0);
+
+        // OR.B
+        cpu.write_byte(addr, 0x5A);
+        cpu.execute(0xCFF0); // OR.B #0xF0,@(R0,GBR) -> 0x5A | 0xF0 = 0xFA
+        assert_eq!(cpu.read_byte(addr), 0xFA);
+    }
+
+
+
+    #[test]
+    fn test_cache_purge_behavior() {
+        let mut cpu = make_cpu();
+        // 1. Longword write to CachePurge (e.g. 0x4020_0008) is a no-op (doesn't modify uncached memory)
+        cpu.write_long(0x4020_0008, 0x12345678);
+        assert_eq!(cpu.read_long(0x0020_0008), 0); // Low RAM remains 0
+
+        // 2. Byte and word writes to CachePurge fall through to uncached write
+        cpu.write_byte(0x4020_0000, 0xAA);
+        assert_eq!(cpu.read_byte(0x0020_0000), 0xAA);
+        cpu.write_word(0x4020_0002, 0xBBCC);
+        assert_eq!(cpu.read_word(0x0020_0002), 0xBBCC);
+
+        // 3. Reads to CachePurge always return 0xFF per byte
+        assert_eq!(cpu.read_byte(0x4020_0000), 0xFF);
+        assert_eq!(cpu.read_word(0x4020_0002), 0xFFFF);
+        assert_eq!(cpu.read_long(0x4020_0004), 0xFFFFFFFF);
+
+        // 4. Area 5 (0xA020_0000) must behave as normal cache-through memory (not CachePurge)
+        cpu.write_byte(0xA020_0000, 0x55);
+        assert_eq!(cpu.read_byte(0xA020_0000), 0x55);
+        assert_eq!(cpu.read_byte(0x0020_0000), 0x55);
+    }
+
+    #[test]
+    fn test_cache_arrays_and_execution() {
+        let mut cpu = make_cpu();
+        // 1. CacheAddressArray: write u8/u32 and verify big-endian layout
+        cpu.write_byte(0x6000_0000, 0x11);
+        cpu.write_byte(0x6000_0001, 0x22);
+        cpu.write_byte(0x6000_0002, 0x33);
+        cpu.write_byte(0x6000_0003, 0x44);
+        assert_eq!(cpu.cache_address_array[0], 0x11223344);
+
+        cpu.write_byte(0x6000_0004, 0x55);
+        assert_eq!(cpu.cache_address_array[1], 0x55000000);
+
+        // Read back
+        assert_eq!(cpu.read_byte(0x6000_0000), 0x11);
+        assert_eq!(cpu.read_byte(0x6000_0001), 0x22);
+
+        // 2. CacheDataArray: write and read back
+        cpu.write_byte(0xC000_0010, 0xAA);
+        cpu.write_byte(0xC000_0011, 0xBB);
+        assert_eq!(cpu.cache_data_array[0x10], 0xAA);
+        assert_eq!(cpu.cache_data_array[0x11], 0xBB);
+        assert_eq!(cpu.read_byte(0xC000_0010), 0xAA);
+        assert_eq!(cpu.read_byte(0xC000_0011), 0xBB);
+
+        // 3. EXEC_FROM_CACHE: write NOP at 0xC000_0000 and run step()
+        cpu.cache_data_array[0] = 0x00;
+        cpu.cache_data_array[1] = 0x09; // NOP
+        cpu.pc = 0xC000_0000;
+        let cycles_before = cpu.cycles;
+        cpu.step();
+        assert_eq!(cpu.pc, 0xC000_0002);
+        assert_eq!(cpu.cycles, cycles_before + 2); // NOP cycles
+        assert!(!cpu.illegal_instruction_flag);
+    }
+
+    #[test]
+    fn test_illegal_instruction_exceptions() {
+        let mut cpu = make_cpu();
+        // Setup vector table: VBR = 0x0020_0000
+        cpu.vbr = 0x0020_0000;
+        // Vector 4 is at offset 16 (0x0020_0010). Point it to 0x0020_0100
+        cpu.write_long(0x0020_0010, 0x0020_0100);
+        // Setup R15 = 0x0020_0500
+        cpu.registers[15] = 0x0020_0500;
+        cpu.sr = 0x0000_00F0; // dummy SR
+
+        // 1. Execute illegal instruction 0x0000 at 0x0020_0080
+        cpu.write_word(0x0020_0080, 0x0000);
+        cpu.pc = 0x0020_0080;
+        cpu.step();
+
+        // PC should have jumped to the handler address 0x0020_0100
+        assert_eq!(cpu.pc, 0x0020_0100);
+        // Stack should have popped/pushed SR and PC (address after 0x0020_0080, which is 0x0020_0082)
+        assert_eq!(cpu.registers[15], 0x0020_04F8);
+        assert_eq!(cpu.read_long(0x0020_04F8), 0x0020_0082); // PC pushed
+        assert_eq!(cpu.read_long(0x0020_04FC), 0x0000_00F0); // SR pushed
+        assert!(cpu.illegal_instruction_flag);
+
+        // Reset flag and do 0xFFFF
+        cpu.illegal_instruction_flag = false;
+        cpu.registers[15] = 0x0020_0500;
+        cpu.write_word(0x0020_0080, 0xFFFF);
+        cpu.pc = 0x0020_0080;
+        cpu.step();
+
+        assert_eq!(cpu.pc, 0x0020_0100);
+        assert_eq!(cpu.registers[15], 0x0020_04F8);
+        assert_eq!(cpu.read_long(0x0020_04F8), 0x0020_0082); // PC pushed
+        assert!(cpu.illegal_instruction_flag);
+    }
+
+    #[test]
+    fn test_tas_b_fallback() {
+        let mut cpu = make_cpu();
+        // 1. TAS.B @Rn on Low RAM (atomic path)
+        cpu.write_byte(0x0020_0000, 0x55);
+        cpu.registers[1] = 0x0020_0000;
+        cpu.execute(0x411B); // TAS.B @R1
+        assert_eq!(cpu.read_byte(0x0020_0000), 0xD5); // 0x55 | 0x80 = 0xD5
+        assert!(!cpu.t()); // MSB was 0
+
+        // 2. TAS.B @Rn on SMPC (non-atomic fallback path)
+        cpu.write_byte(0x0010_0000, 0x00);
+        cpu.registers[2] = 0x0010_0000;
+        cpu.execute(0x421B); // TAS.B @R2
+        assert_eq!(cpu.read_byte(0x0010_0000), 0x80); // 0x00 | 0x80 = 0x80
+        assert!(cpu.t()); // MSB was 0
     }
 }
