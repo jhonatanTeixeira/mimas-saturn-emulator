@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use saturn_core::{BusArbiter, LockStepSync, Sh2};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use saturn_core::{BusArbiter, LockStepSync, Sh2};
 
 /// Run `f` on its own thread and wait up to `timeout`, propagating a panic
 /// from inside `f` verbatim or panicking with a clear "deadlock" message if
@@ -18,7 +18,10 @@ fn assert_completes_within<F: FnOnce() + Send + 'static>(timeout: Duration, f: F
     match rx.recv_timeout(timeout) {
         Ok(Ok(())) => {}
         Ok(Err(payload)) => std::panic::resume_unwind(payload),
-        Err(_) => panic!("operation did not complete within {:?} -- likely deadlock", timeout),
+        Err(_) => panic!(
+            "operation did not complete within {:?} -- likely deadlock",
+            timeout
+        ),
     }
 }
 
@@ -111,10 +114,13 @@ fn test_large_thread_drift_inactive() {
     let handle = thread::spawn(move || {
         sync_clone.sync_core(1, 1_000_000);
     });
-    
+
     // It should finish immediately
     thread::sleep(Duration::from_millis(50));
-    assert!(handle.is_finished(), "Reactivated Thread 1 blocked during synchronization catch-up");
+    assert!(
+        handle.is_finished(),
+        "Reactivated Thread 1 blocked during synchronization catch-up"
+    );
     handle.join().unwrap();
 }
 
@@ -131,7 +137,7 @@ fn test_drift_bounds_hold_exactly() {
     let sync_clone = sync.clone();
     let is_blocked = Arc::new(AtomicBool::new(true));
     let is_blocked_clone = is_blocked.clone();
-    
+
     let handle = thread::spawn(move || {
         // Step up to slack_limit + 1
         sync_clone.sync_core(0, slack_limit + 1);
@@ -139,7 +145,10 @@ fn test_drift_bounds_hold_exactly() {
     });
 
     thread::sleep(Duration::from_millis(50));
-    assert!(is_blocked.load(Ordering::Relaxed), "Thread 0 did not block when exceeding the slack limit");
+    assert!(
+        is_blocked.load(Ordering::Relaxed),
+        "Thread 0 did not block when exceeding the slack limit"
+    );
 
     // Clean up
     sync.request_shutdown();
@@ -185,6 +194,12 @@ fn test_drift_limit_bypass_after_dma() {
     let mut cpu2 = Sh2::new(false, arbiter.clone(), work_ram.clone());
     cpu2.sync = Some(sync.clone());
     cpu2.core_id = 2;
+
+    // Write NOP at 0x0600_0000 and point PCs there to avoid illegal instruction exceptions
+    cpu0.write_word(0x0600_0000, 0x0009);
+    cpu0.pc = 0x0600_0000;
+    cpu1.pc = 0x0600_0000;
+    cpu2.pc = 0x0600_0000;
 
     // 1. Lock the bus for DMA (simulating active DMA transfer)
     arbiter.lock_for_dma();
@@ -241,7 +256,11 @@ fn test_drift_limit_bypass_after_dma() {
     assert!(!is_blocked.load(Ordering::Relaxed));
 
     // Check that Core 0 caught up to at least 100 cycles
-    assert!(cpu0.cycles >= 100, "Core 0 local cycles did not catch up! cycles = {}", cpu0.cycles);
+    assert!(
+        cpu0.cycles >= 100,
+        "Core 0 local cycles did not catch up! cycles = {}",
+        cpu0.cycles
+    );
 
     // 6. Verify that subsequent steps keep them within the drift limit (10)
     // If Core 1 steps to 102, it syncs. Since Core 0 is at >= 100 and Core 2 is at 100, it shouldn't block.
@@ -250,10 +269,22 @@ fn test_drift_limit_bypass_after_dma() {
     let drift_0_1 = (cpu0.cycles as i64 - cpu1.cycles as i64).abs();
     let drift_1_2 = (cpu1.cycles as i64 - cpu2.cycles as i64).abs();
     let drift_2_0 = (cpu2.cycles as i64 - cpu0.cycles as i64).abs();
-    
-    assert!(drift_0_1 <= 10, "Drift between Core 0 and Core 1 exceeded limit: {}", drift_0_1);
-    assert!(drift_1_2 <= 10, "Drift between Core 1 and Core 2 exceeded limit: {}", drift_1_2);
-    assert!(drift_2_0 <= 10, "Drift between Core 2 and Core 0 exceeded limit: {}", drift_2_0);
+
+    assert!(
+        drift_0_1 <= 10,
+        "Drift between Core 0 and Core 1 exceeded limit: {}",
+        drift_0_1
+    );
+    assert!(
+        drift_1_2 <= 10,
+        "Drift between Core 1 and Core 2 exceeded limit: {}",
+        drift_1_2
+    );
+    assert!(
+        drift_2_0 <= 10,
+        "Drift between Core 2 and Core 0 exceeded limit: {}",
+        drift_2_0
+    );
 }
 
 /// 3. Complex multi-threaded shutdown scenarios: threads shutting down while blocked in condvars.
@@ -279,7 +310,10 @@ fn test_shutdown_while_blocked_in_sync_condvar() {
     // Verify thread 0 wakes up and exits promptly
     let start = std::time::Instant::now();
     handle.join().unwrap();
-    assert!(start.elapsed() < Duration::from_millis(100), "Thread did not exit promptly after shutdown request");
+    assert!(
+        start.elapsed() < Duration::from_millis(100),
+        "Thread did not exit promptly after shutdown request"
+    );
     assert!(exited.load(Ordering::Relaxed));
 }
 
@@ -299,7 +333,7 @@ fn test_shutdown_deadlock_on_active_dma() {
     let sync_clone = sync.clone();
     let completed = Arc::new(AtomicBool::new(false));
     let completed_clone = completed.clone();
-    
+
     let handle = thread::spawn(move || {
         let _ = arbiter_clone.acquire_bus_sync(0, &sync_clone);
         completed_clone.store(true, Ordering::Relaxed);
@@ -316,7 +350,10 @@ fn test_shutdown_deadlock_on_active_dma() {
     // Verify that the thread unblocks and exits promptly
     let start = std::time::Instant::now();
     handle.join().unwrap();
-    assert!(start.elapsed() < Duration::from_millis(100), "Thread did not exit promptly after abort/shutdown");
+    assert!(
+        start.elapsed() < Duration::from_millis(100),
+        "Thread did not exit promptly after abort/shutdown"
+    );
     assert!(completed.load(Ordering::Relaxed));
 }
 
@@ -327,7 +364,7 @@ fn test_shutdown_deadlock_on_active_dma() {
 fn test_panic_deadlock_vulnerability() {
     let sync = Arc::new(LockStepSync::new(2, 10));
     let arbiter = Arc::new(BusArbiter::new());
-    
+
     // Spawn thread 0 which has a PanicGuard and panics after some steps
     let sync_clone = sync.clone();
     let arbiter_clone = arbiter.clone();
@@ -353,8 +390,14 @@ fn test_panic_deadlock_vulnerability() {
     let start = std::time::Instant::now();
     let _ = handle_panic.join();
     handle_t1.join().unwrap();
-    assert!(completed.load(Ordering::Relaxed), "Thread 1 did not unblock after Thread 0 panicked");
-    assert!(start.elapsed() < Duration::from_millis(200), "Thread 1 took too long to unblock");
+    assert!(
+        completed.load(Ordering::Relaxed),
+        "Thread 1 did not unblock after Thread 0 panicked"
+    );
+    assert!(
+        start.elapsed() < Duration::from_millis(200),
+        "Thread 1 took too long to unblock"
+    );
 }
 
 /// Stress-tests the real SNDON store/load path (`Sh2::smpc_execute_command`

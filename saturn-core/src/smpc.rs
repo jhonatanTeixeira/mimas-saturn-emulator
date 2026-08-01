@@ -405,7 +405,12 @@ impl Smpc {
                 // isn't persisted to disk (§7.3) -- it lives only in this
                 // `Smpc` for the process's lifetime.
                 let ram = work_ram.smpc_regs.read().unwrap();
-                let smem = [ram[reg::IREG0], ram[reg::IREG1], ram[reg::IREG2], ram[reg::IREG3]];
+                let smem = [
+                    ram[reg::IREG0],
+                    ram[reg::IREG1],
+                    ram[reg::IREG2],
+                    ram[reg::IREG3],
+                ];
                 drop(ram);
                 self.smem = smem;
                 Self::echo_oreg31(work_ram, cmd::SETSMEM);
@@ -451,7 +456,10 @@ mod tests {
     fn fresh_register_view_is_all_zero() {
         let work_ram = WorkRam::new();
         let ram = work_ram.smpc_regs.read().unwrap();
-        assert!(ram.iter().all(|&b| b == 0), "SmpcReset zeroes all 64 real registers");
+        assert!(
+            ram.iter().all(|&b| b == 0),
+            "SmpcReset zeroes all 64 real registers"
+        );
     }
 
     /// Wiring proof: a `Sh2` with a real `Smpc` attached (mirroring exactly
@@ -481,15 +489,27 @@ mod tests {
         let (mut cpu, work_ram, _smpc) = wired_cpu();
         cpu.write_byte(SMPC_BASE + reg::IREG0 as u32, 0x01);
         cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::INTBACK);
-        assert_eq!(work_ram.smpc_regs.read().unwrap()[reg::oreg(0)], 0xC0, "fresh resd=true");
+        assert_eq!(
+            work_ram.smpc_regs.read().unwrap()[reg::oreg(0)],
+            0xC0,
+            "fresh resd=true"
+        );
 
         cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::RESENAB);
         cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::INTBACK);
-        assert_eq!(work_ram.smpc_regs.read().unwrap()[reg::oreg(0)], 0x80, "after RESENAB");
+        assert_eq!(
+            work_ram.smpc_regs.read().unwrap()[reg::oreg(0)],
+            0x80,
+            "after RESENAB"
+        );
 
         cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::RESDISA);
         cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::INTBACK);
-        assert_eq!(work_ram.smpc_regs.read().unwrap()[reg::oreg(0)], 0xC0, "after RESDISA");
+        assert_eq!(
+            work_ram.smpc_regs.read().unwrap()[reg::oreg(0)],
+            0xC0,
+            "after RESDISA"
+        );
     }
 
     #[test]
@@ -499,19 +519,44 @@ mod tests {
         cpu.write_byte(SMPC_BASE + reg::IREG1 as u32, 0x02);
         cpu.write_byte(SMPC_BASE + reg::IREG0 as u32, 0x01);
         cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::INTBACK);
-        assert_eq!(work_ram.smpc_regs.read().unwrap()[reg::SR], 0x4F, "IREG1=0x02 -> SR=0x4F");
+        assert_eq!(
+            work_ram.smpc_regs.read().unwrap()[reg::SR],
+            0x4F,
+            "IREG1=0x02 -> SR=0x4F"
+        );
 
         cpu.write_byte(SMPC_BASE + reg::IREG1 as u32, 0x0A);
         cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::INTBACK);
-        assert_eq!(work_ram.smpc_regs.read().unwrap()[reg::SR], 0x6F, "IREG1=0x0A -> SR=0x6F");
+        assert_eq!(
+            work_ram.smpc_regs.read().unwrap()[reg::SR],
+            0x6F,
+            "IREG1=0x0A -> SR=0x6F"
+        );
     }
 
     #[test]
     fn oreg31_echo_matrix() {
         // §4.1: echoed for exactly these seven; left untouched for everyone
         // else (pre-seeded with a sentinel that must survive).
-        let echoed = [cmd::SNDON, cmd::SNDOFF, cmd::INTBACK, cmd::SETSMEM, cmd::NMIREQ, cmd::RESENAB, cmd::RESDISA];
-        let not_echoed = [cmd::SSHON, cmd::SSHOFF, cmd::CKCHG352, cmd::CKCHG320, cmd::MSHON, cmd::CDON, cmd::CDOFF, cmd::SYSRES];
+        let echoed = [
+            cmd::SNDON,
+            cmd::SNDOFF,
+            cmd::INTBACK,
+            cmd::SETSMEM,
+            cmd::NMIREQ,
+            cmd::RESENAB,
+            cmd::RESDISA,
+        ];
+        let not_echoed = [
+            cmd::SSHON,
+            cmd::SSHOFF,
+            cmd::CKCHG352,
+            cmd::CKCHG320,
+            cmd::MSHON,
+            cmd::CDON,
+            cmd::CDOFF,
+            cmd::SYSRES,
+        ];
 
         for &command in &echoed {
             let (mut cpu, work_ram, _smpc) = wired_cpu();
@@ -520,8 +565,10 @@ mod tests {
             cpu.write_byte(SMPC_BASE + reg::IREG0 as u32, 0x01);
             cpu.write_byte(SMPC_BASE + reg::COMREG as u32, command);
             assert_eq!(
-                work_ram.smpc_regs.read().unwrap()[reg::oreg(31)], command,
-                "command {:#04X} must echo into OREG31", command
+                work_ram.smpc_regs.read().unwrap()[reg::oreg(31)],
+                command,
+                "command {:#04X} must echo into OREG31",
+                command
             );
         }
         for &command in &not_echoed {
@@ -529,8 +576,10 @@ mod tests {
             work_ram.smpc_regs.write().unwrap()[reg::oreg(31)] = 0x5A; // sentinel
             cpu.write_byte(SMPC_BASE + reg::COMREG as u32, command);
             assert_eq!(
-                work_ram.smpc_regs.read().unwrap()[reg::oreg(31)], 0x5A,
-                "command {:#04X} must not touch OREG31", command
+                work_ram.smpc_regs.read().unwrap()[reg::oreg(31)],
+                0x5A,
+                "command {:#04X} must not touch OREG31",
+                command
             );
         }
     }
@@ -547,7 +596,11 @@ mod tests {
         cpu.write_byte(SMPC_BASE + reg::IREG2 as u32, 0xF0);
         cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::INTBACK);
         let sf = cpu.read_byte(SMPC_BASE + reg::SF as u32);
-        assert_eq!(sf & 1, 0, "SF bit 0 must clear once INTBACK finishes, or the real BIOS spins forever");
+        assert_eq!(
+            sf & 1,
+            0,
+            "SF bit 0 must clear once INTBACK finishes, or the real BIOS spins forever"
+        );
     }
 
     #[test]
@@ -569,8 +622,16 @@ mod tests {
         work_ram.smpc_regs.write().unwrap()[reg::oreg(0)] = 0x5A; // sentinel
         cpu.write_byte(SMPC_BASE + reg::SF as u32, 0x01);
         cpu.write_byte(SMPC_BASE + reg::COMREG as u32, 0x05); // not in §3.4's table
-        assert_eq!(cpu.read_byte(SMPC_BASE + reg::SF as u32) & 1, 0, "SF must clear");
-        assert_eq!(work_ram.smpc_regs.read().unwrap()[reg::oreg(0)], 0x5A, "OREG0 must be untouched");
+        assert_eq!(
+            cpu.read_byte(SMPC_BASE + reg::SF as u32) & 1,
+            0,
+            "SF must clear"
+        );
+        assert_eq!(
+            work_ram.smpc_regs.read().unwrap()[reg::oreg(0)],
+            0x5A,
+            "OREG0 must be untouched"
+        );
     }
 
     fn wired_cpu_with_clock(clock: ClockSource) -> (crate::sh2::Sh2, Arc<WorkRam>) {
@@ -603,7 +664,11 @@ mod tests {
             let ram = work_ram.smpc_regs.read().unwrap();
             assert_eq!(ram[reg::oreg(1)], 0x20, "OREG1 (year thousands/hundreds)");
             assert_eq!(ram[reg::oreg(2)], 0x00, "OREG2 (year tens/units)");
-            assert_eq!(ram[reg::oreg(3)], 0x61, "OREG3 (weekday<<4 | month), Saturday=6, Jan=1");
+            assert_eq!(
+                ram[reg::oreg(3)],
+                0x61,
+                "OREG3 (weekday<<4 | month), Saturday=6, Jan=1"
+            );
             assert_eq!(ram[reg::oreg(4)], 0x01, "OREG4 (day BCD)");
             assert_eq!(ram[reg::oreg(5)], 0x00, "OREG5 (hour BCD)");
             assert_eq!(ram[reg::oreg(6)], 0x00, "OREG6 (minute BCD)");
@@ -623,8 +688,16 @@ mod tests {
         do_intback_status(&mut cpu);
         {
             let ram = work_ram.smpc_regs.read().unwrap();
-            assert_eq!(ram[reg::oreg(3)] & 0x0F, 0x0C, "OREG3 low nibble: December is nibble 0xC, not BCD");
-            assert_eq!(ram[reg::oreg(3)] >> 4, 0x2, "OREG3 high nibble: Tuesday = 2");
+            assert_eq!(
+                ram[reg::oreg(3)] & 0x0F,
+                0x0C,
+                "OREG3 low nibble: December is nibble 0xC, not BCD"
+            );
+            assert_eq!(
+                ram[reg::oreg(3)] >> 4,
+                0x2,
+                "OREG3 high nibble: Tuesday = 2"
+            );
             assert_eq!(ram[reg::oreg(4)], 0x25, "OREG4 (day 25, BCD)");
             assert_eq!(ram[reg::oreg(5)], 0x13, "OREG5 (hour 13, BCD)");
             assert_eq!(ram[reg::oreg(6)], 0x45, "OREG6 (minute 45, BCD)");
@@ -636,7 +709,11 @@ mod tests {
     fn oreg10_encodes_dot_clock() {
         let (mut cpu, work_ram) = wired_cpu_with_clock(ClockSource::Fixed(0));
         do_intback_status(&mut cpu);
-        assert_eq!(work_ram.smpc_regs.read().unwrap()[reg::oreg(10)], 0x34, "all flags clear");
+        assert_eq!(
+            work_ram.smpc_regs.read().unwrap()[reg::oreg(10)],
+            0x34,
+            "all flags clear"
+        );
         // No CKCHG352 command exists yet (Phase 3) to flip `dotsel` through
         // the public command path -- this pins the OREG10 formula itself
         // against a directly-constructed `Smpc` instead.
@@ -645,7 +722,11 @@ mod tests {
         let work_ram2 = WorkRam::new();
         work_ram2.smpc_regs.write().unwrap()[reg::IREG0] = 0x01;
         smpc.execute_command(cmd::INTBACK, &work_ram2);
-        assert_eq!(work_ram2.smpc_regs.read().unwrap()[reg::oreg(10)], 0x74, "dotsel=true");
+        assert_eq!(
+            work_ram2.smpc_regs.read().unwrap()[reg::oreg(10)],
+            0x74,
+            "dotsel=true"
+        );
     }
 
     #[test]
@@ -656,7 +737,10 @@ mod tests {
         cpu.write_byte(SMPC_BASE + reg::IREG2 as u32, 0xBE);
         cpu.write_byte(SMPC_BASE + reg::IREG3 as u32, 0xEF);
         cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::SETSMEM);
-        assert_eq!(work_ram.smpc_regs.read().unwrap()[reg::oreg(31)], cmd::SETSMEM);
+        assert_eq!(
+            work_ram.smpc_regs.read().unwrap()[reg::oreg(31)],
+            cmd::SETSMEM
+        );
 
         // IREG0's SETSMEM value (0xDE) would otherwise look like a status
         // request on the next INTBACK (bit 0 set) -- clear it first so this
@@ -682,9 +766,14 @@ mod tests {
     #[test]
     fn region_reported_in_oreg9() {
         let regions = [
-            region::JAPAN, region::ASIA_NTSC, region::NORTH_AMERICA,
-            region::CENTRAL_SOUTH_AMERICA_NTSC, region::KOREA, region::ASIA_PAL,
-            region::EUROPE, region::CENTRAL_SOUTH_AMERICA_PAL,
+            region::JAPAN,
+            region::ASIA_NTSC,
+            region::NORTH_AMERICA,
+            region::CENTRAL_SOUTH_AMERICA_NTSC,
+            region::KOREA,
+            region::ASIA_PAL,
+            region::EUROPE,
+            region::CENTRAL_SOUTH_AMERICA_PAL,
         ];
         for &r in &regions {
             let (mut cpu, work_ram) = wired_cpu_with_clock(ClockSource::Fixed(0));
@@ -694,15 +783,29 @@ mod tests {
             // band), so this is a direct API call, not a register write.
             cpu.smpc.as_ref().unwrap().lock().unwrap().set_region(r);
             do_intback_status(&mut cpu);
-            assert_eq!(work_ram.smpc_regs.read().unwrap()[reg::oreg(9)], r, "region {:#04X}", r);
+            assert_eq!(
+                work_ram.smpc_regs.read().unwrap()[reg::oreg(9)],
+                r,
+                "region {:#04X}",
+                r
+            );
         }
 
         // AUTODETECT with no CD present (the only state this codebase can
         // be in -- the CD block isn't integrated at all) falls back to
         // JAPAN, matching what the pre-Phase-0 inline code already did.
         let (mut cpu, work_ram) = wired_cpu_with_clock(ClockSource::Fixed(0));
-        cpu.smpc.as_ref().unwrap().lock().unwrap().set_region(region::AUTODETECT);
+        cpu.smpc
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .set_region(region::AUTODETECT);
         do_intback_status(&mut cpu);
-        assert_eq!(work_ram.smpc_regs.read().unwrap()[reg::oreg(9)], region::JAPAN, "AUTODETECT -> JAPAN fallback");
+        assert_eq!(
+            work_ram.smpc_regs.read().unwrap()[reg::oreg(9)],
+            region::JAPAN,
+            "AUTODETECT -> JAPAN fallback"
+        );
     }
 }

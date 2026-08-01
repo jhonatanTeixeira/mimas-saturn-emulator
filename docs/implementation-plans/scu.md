@@ -379,16 +379,19 @@ Phases 1 and 2 are unaffected by that measurement — start them regardless.
 
 ## Phase 1 — Finish the SCU DSP
 
+**Status:** done except one testing item explicitly deferred below — see
+`history.md` Chapter 26.
+
 Smallest, highest-value, already-scoped gap (`scu_dsp.rs:19-25`). Entirely
 inside `scu_dsp.rs`; touches no threading and no other module.
 
 ### 1a. Interpreter defects (do these first — the DMA variants are built on top)
 
-- [ ] **D-DSP-1**: guard the ALU switch to Operation Commands only. Match §3.3
+- [x] **D-DSP-1**: guard the ALU switch to Operation Commands only. Match §3.3
       exactly: switch on the unmasked `instruction >> 26` so classes
       `01`/`10`/`11` (values ≥ `0x10`) fall through with no ALU effect. Fixes
       phantom ALU ops on every JMP/LPS/BTM/MVI. `scu_dsp.rs:303`.
-- [ ] **D-DSP-2**: adopt the deferred `incFlg` model (§3.5). Add
+- [x] **D-DSP-2**: adopt the deferred `incFlg` model (§3.5). Add
       `inc_flg: [bool; 4]`, cleared at the top of `step()`
       (reference `:1384-1387`), OR-ed by `read_gen_src` for `num` `0x4`-`0x7`,
       set by `write_d1_bus_dest` arms `0x0`-`0x3`, **cleared** by arms
@@ -396,15 +399,20 @@ inside `scu_dsp.rs`; touches no threading and no other module.
       (reference `:1949-1952`) — plus the one early-apply case: `MOV SImm,[d]`
       applies pending increments *before* the store (§3.5, reference
       `:1691-1694`). `scu_dsp.rs:194-230, 259-298`.
-- [ ] **D-DSP-3**: `write_load_im_dest` arms `0x0`-`0x3` must set `inc_flg[n]`
+- [x] **D-DSP-3**: `write_load_im_dest` arms `0x0`-`0x3` must set `inc_flg[n]`
       (§3.7.1). `scu_dsp.rs:237-240`.
-- [ ] **D-DSP-4**: force-complete a pending DSP DMA on entry to `read_gen_src`,
+- [x] **D-DSP-4**: force-complete a pending DSP DMA on entry to `read_gen_src`,
       `write_d1_bus_dest` and `write_load_im_dest` — set `dsp_dma_wait = 0`
       then run the dispatch, per §3.8.7. Also make `start_dma`'s
       "previous DMA still pending" path actually execute it before latching the
       new instruction (§3.8.7 step 1). `scu_dsp.rs:517-522`.
-- [ ] **D-DSP-5**: `END`/`ENDI` writes `P = PC + 1` (§3.12). `scu_dsp.rs:478`.
-- [ ] **D-DSP-6**: widen `read_long`/`write_long`/`write_word`
+- [x] **D-DSP-5**: `END`/`ENDI` writes `P = PC + 1` (§3.12). `scu_dsp.rs:478`.
+      **Clarification**: this is the Program Control Port's `P` field (bits
+      7:0, the PC-reload/readback snapshot), not the DSP's arithmetic `P`
+      accumulator register (`ScuDsp->P`/`self.p`) — same name, two distinct
+      pieces of state in real hardware. Confirmed via `scu.c:1932`
+      (`ScuDsp->ProgControlPort.part.P = ScuDsp->PC+1;`).
+- [x] **D-DSP-6**: widen `read_long`/`write_long`/`write_word`
       (`scu_dsp.rs:664-705`) to the full set of regions `Sh2::translate`
       (`sh2.rs:355-380`) decodes: add SCSP registers `0x05B00000`, VDP1 VRAM
       `0x05C00000`, VDP1 framebuffer `0x05C80000`, VDP1 registers
@@ -414,8 +422,9 @@ inside `scu_dsp.rs`; touches no threading and no other module.
       A-Bus/cartridge space still reads `0` / discards.
       **Preferred**: factor the region decode into one shared helper rather
       than three parallel `if` chains, and re-state in its doc comment that
-      `sh2.rs`'s `translate` remains the source of truth.
-- [ ] **D-DSP-7**: apply §3.8.5's A-Bus branch rule — `dsp_dma03` writes back
+      `sh2.rs`'s `translate` remains the source of truth. Done as a
+      `decode(address) -> Option<(DspRegion, usize)>` helper.
+- [x] **D-DSP-7**: apply §3.8.5's A-Bus branch rule — `dsp_dma03` writes back
       `RA0` only on the non-A-Bus path (`abus_check = (RA0M << 2) & 0x0FF00000`,
       A-Bus iff `0x02000000 ≤ abus_check < 0x05900000`). `scu_dsp.rs:602`.
 
@@ -427,23 +436,23 @@ the eight (bit 11 set, or bit 10 set on variants 01/02/04/06/08) must still
 clear `T0`/`dsp_dma_instruction`/`dsp_dma_wait` and move no data (§3.8.2
 quirk / deviation #2).
 
-- [ ] **`dsp_dma01`** — non-hold, immediate count, D0-bus → `MD[sel]`,
+- [x] **`dsp_dma01`** — non-hold, immediate count, D0-bus → `MD[sel]`,
       `sel = (inst >> 8) & 0x03`. Per-iteration: read long at `RA0M << 2`,
       store to `MD[sel][CT[sel] & 0x3F]`, `CT[sel]` post-increment,
       `RA0M += add >> 2` where `add = (1 << (mode & 0x2)) & ~1` — i.e.
       **instruction bit 16**, not bit 15 (§3.8.4, deviation #1). Afterwards
       `T0 = 0`, `RA0 = RA0M`. Count from `inst & 0xFF`, re-derived in the
       handler (§3.8.3), *not* from `dsp_dma_size`.
-- [ ] **`dsp_dma02`** — non-hold, immediate count, `MD[sel]` → D0-bus, through
+- [x] **`dsp_dma02`** — non-hold, immediate count, `MD[sel]` → D0-bus, through
       the shared write path below. Count from `inst & 0xFF`.
-- [ ] **`dsp_dma05`** — `dsp_dma01` wrapped: save `RA0M`, run `dsp_dma01`,
+- [x] **`dsp_dma05`** — `dsp_dma01` wrapped: save `RA0M`, run `dsp_dma01`,
       restore `RA0 = saved`. Note §3.8.2's quirk: this variant accepts
       `RAMsel == 4` but `dsp_dma01` masks `sel` to 2 bits, so `PRG` degrades to
       `MD0` (deviation #3) — reproduce it, and say so in the code comment.
-- [ ] **`dsp_dma06`** — `dsp_dma02` wrapped, restoring `WA0`.
-- [ ] **`dsp_dma07`** — `dsp_dma03` wrapped, restoring `RA0`.
-- [ ] **`dsp_dma08`** — `dsp_dma04` wrapped, restoring `WA0`.
-- [ ] Extract the existing write body (`scu_dsp.rs:610-648`) into a shared
+- [x] **`dsp_dma06`** — `dsp_dma02` wrapped, restoring `WA0`.
+- [x] **`dsp_dma07`** — `dsp_dma03` wrapped, restoring `RA0`.
+- [x] **`dsp_dma08`** — `dsp_dma04` wrapped, restoring `WA0`.
+- [x] Extract the existing write body (`scu_dsp.rs:610-648`) into a shared
       `dsp_dma_write_d0bus(sel, add, count)` matching §3.8.6, so `dsp_dma02`
       and `dsp_dma04` share it exactly as the reference does. Preserve all
       three destination classes and their differing `add` fixups: A-Bus
@@ -453,17 +462,17 @@ quirk / deviation #2).
       end**), CPU bus (everything else, `WA0M += 1` if `add == 1` else
       `add >> 1`, and the write is redirected into High WRAM with mask
       `0xFFFFC` — deviation #4, already reproduced at `scu_dsp.rs:641-642`).
-- [ ] Keep the write-side `add` table (bits 17:15 → 0/1/2/4/8/16/32/64
+- [x] Keep the write-side `add` table (bits 17:15 → 0/1/2/4/8/16/32/64
       long-words, §3.8.4) distinct from the read-side single-bit rule. They are
       *different decodes of the same field*; a shared helper here would be a
-      bug.
+      bug. Done as separate `dma_read_add`/`dma_write_add` helpers.
 
 ### 1c. Testing (Phase 1)
 
 Independently-derived values only (`CLAUDE.md`: never assert a value you
 haven't derived separately from the code under test).
 
-- [ ] Per variant, one test whose expected result is computed **outside**
+- [x] Per variant, one test whose expected result is computed **outside**
       Mimas: write a throwaway Python script that walks §3.8.4's `add` table
       and §3.8.6's three destination classes to produce the exact
       (address, value) list for a chosen instruction word, seed `WorkRam` /
@@ -471,19 +480,19 @@ haven't derived separately from the code under test).
       the DSP, and assert the full expected image. Keep the script's output as
       a literal table in the test, and cite the instruction word's field
       decomposition in a comment.
-- [ ] **Hold-variant test** (`dsp_dma05`-`08`): assert two things at once —
+- [x] **Hold-variant test** (`dsp_dma05`-`08`): assert two things at once —
       the destination image advanced exactly as the non-hold variant's, *and*
       `RA0`/`WA0` read back their pre-transfer values. A test that only checks
       the register would pass against a no-op implementation.
-- [ ] **D-DSP-1 regression**: a two-instruction program — one that sets `Z`/`S`
+- [x] **D-DSP-1 regression**: a two-instruction program — one that sets `Z`/`S`
       to a known state, then a `JMP` word such as `0xD3400015` — asserting the
       flags are *unchanged* by the JMP. Derive the expected flags by hand from
       §3.3, and add a comment naming the phantom-ADD bug this guards.
-- [ ] **D-DSP-2/3 regression**: a program that reads `MC0` on both X and Y
+- [x] **D-DSP-2/3 regression**: a program that reads `MC0` on both X and Y
       buses in one instruction, asserting both reads returned the *same* Data
       RAM word and `CT[0]` advanced by exactly 1; and an `MVI …,MC0` sequence
       of three immediates asserting they land in `MD[0][0..3]`.
-- [ ] **D-DSP-6 regression**: a DSP DMA writing into VDP2 VRAM, asserting the
+- [x] **D-DSP-6 regression**: a DSP DMA writing into VDP2 VRAM, asserting the
       bytes actually appear in `work_ram.vdp2_vram`. This fails today.
 - [ ] **Strengthen the existing anchor test.** `real_bios_dsp_program_runs_to_
       completion` (`scu_dsp.rs:862-896`) currently only asserts termination.
@@ -492,11 +501,24 @@ haven't derived separately from the code under test).
       extend the test to assert the final `MD[]` contents, `RA0`/`WA0`, and the
       Program Control Port's flag bits. This is the single strongest signal the
       D-DSP-1/2/3 fixes are right, because that program is real BIOS code.
-- [ ] `cargo test --workspace` green; `cargo fmt`.
+      **Deliberately deferred**: decoding the program (`history.md` Chapter 26)
+      showed it exercises conditional `MVI`, conditional `JMP` with the
+      delayed-branch/loop-back timing, and `dsp_dma03`/`dsp_dma04` — a fully
+      independent Python re-implementation of all of that (not just the
+      simpler ALU/DMA-variant mechanics the other new tests cover) is real,
+      separately-scoped work with its own real risk of being a self-
+      consistent-but-wrong replica rather than genuine independent
+      verification. The D-DSP-1/2/3 mechanisms it would exercise are already
+      covered by dedicated regression tests above; the anchor test itself
+      still passes (real BIOS program still reaches End, not stuck).
+- [x] `cargo test --workspace` green; `cargo fmt`.
 
 **Done signal**: all eight variants dispatch, the anchor test asserts real
 state (not just termination), and `scu_dsp.rs`'s module doc comment
 (`:19-25`) is rewritten — it currently advertises the 2-of-8 gap.
+**Partial**: all eight variants dispatch and the module doc comment is
+rewritten; the anchor test's *termination* assertion is unchanged (see the
+deferred item above) rather than strengthened to assert final state.
 
 ---
 

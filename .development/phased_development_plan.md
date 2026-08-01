@@ -62,7 +62,7 @@ Nothing else's correctness claims are trustworthy until this lands — nine phas
 - [x] `sh2-cpu.md` Phase 4 — On-chip register file: storage, reset values, byte/word/long dispatch
 - [x] `sh2-cpu.md` Phase 5 — Real interrupt controller (prerequisite for SCU's own interrupt
       controller in Milestone 2 to signal into something real)
-- [ ] `sh2-cpu.md` Phase 6 — DIVU hardening (fixes the confirmed `i32::MIN / -1` process panic)
+- [x] `sh2-cpu.md` Phase 6 — DIVU hardening (fixes the confirmed `i32::MIN / -1` process panic)
 
 ---
 
@@ -72,7 +72,7 @@ Six phases, in the order `scu.md` itself lays out — its own internal dependenc
 register file → interrupt controller → DMA controller → timers → wiring it all together) is
 already correct and doesn't need reshuffling against the other subsystems.
 
-- [ ] `scu.md` Phase 1 — Finish the SCU DSP (the remaining 6 of 8 DMA addressing modes, and the
+- [x] `scu.md` Phase 1 — Finish the SCU DSP (the remaining 6 of 8 DMA addressing modes, and the
       confirmed opcode-mask bug that makes every `JMP` execute a phantom ALU op)
 - [ ] `scu.md` Phase 2 — Real SCU register file (repurpose `scu.rs`, currently dead code)
 - [ ] `scu.md` Phase 3 — SCU interrupt controller
@@ -194,9 +194,9 @@ matter much.
 - [ ] `memory-bus.md` Phase 7 — Cartridge models
 - [ ] `memory-bus.md` Phase 8 — Access cost model and A-Bus timing *(optional — the plan itself
       says last)*
-- [ ] `sh2-cpu.md` Phase 7 — Free-Running Timer (FRT)
-- [ ] `sh2-cpu.md` Phase 8 — Per-opcode cycle costs and memory wait states
-- [ ] `sh2-cpu.md` Phase 9 — On-chip DMA controller (DMAC)
+- [x] `sh2-cpu.md` Phase 7 — Free-Running Timer (FRT)
+- [x] `sh2-cpu.md` Phase 8 — Per-opcode cycle costs and memory wait states
+- [x] `sh2-cpu.md` Phase 9 — On-chip DMA controller (DMAC)
 - [ ] `sh2-cpu.md` Phase 10 — Watchdog Timer (WDT)
 - [ ] `sh2-cpu.md` Phase 11 — Cache model
 - [ ] `sh2-cpu.md` Phase 12 — Storage-only peripherals: SCI, SBYCR, BSC refresh

@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub static TELEMETRY_ENABLED: AtomicBool = AtomicBool::new(true);
 
@@ -8,8 +8,14 @@ pub static WRAM_WRITES: AtomicU64 = AtomicU64::new(0);
 
 // Array of idle times per thread (0..8)
 pub static THREAD_IDLE_NS: [AtomicU64; 8] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 pub fn record_wram_read() {
@@ -37,7 +43,11 @@ pub fn print_report() {
     eprintln!("WRAM Accesses: Reads={}, Writes={}", reads, writes);
     for i in 0..8 {
         let idle_ns = THREAD_IDLE_NS[i].load(Ordering::Relaxed);
-        eprintln!("  Core {}: Idle Time = {:.3} ms", i, idle_ns as f64 / 1_000_000.0);
+        eprintln!(
+            "  Core {}: Idle Time = {:.3} ms",
+            i,
+            idle_ns as f64 / 1_000_000.0
+        );
     }
     eprintln!("------------------------------");
 }

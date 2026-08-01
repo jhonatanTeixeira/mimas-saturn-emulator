@@ -23,7 +23,7 @@ use std::sync::RwLock;
 /// this split landed) -- but if a future one ever does, acquire them in the
 /// order the fields are declared below, to avoid a lock-ordering deadlock.
 pub struct WorkRam {
-    pub low_ram: RwLock<Box<[u8; 0x100000]>>,  // 1MB Low Work RAM (0x00200000-0x002FFFFF)
+    pub low_ram: RwLock<Box<[u8; 0x100000]>>, // 1MB Low Work RAM (0x00200000-0x002FFFFF)
     pub high_ram: [RwLock<Box<[u8; 0x8000]>>; 32], // 32 stripes of 32KB = 1MB High Work RAM (0x06000000-0x06FFFFFF mirrored)
     /// SCSP Sound RAM, real size 512KB (0x05A00000-0x05AFFFFF).
     pub sound_ram: RwLock<Box<[u8; 0x80000]>>,
@@ -237,8 +237,16 @@ impl WorkRam {
             };
             let lock_first = self.high_ram[first].read().unwrap();
             let lock_second = self.high_ram[second].read().unwrap();
-            let val1 = if first == stripe1 { lock_first[index] } else { lock_second[index] };
-            let val2 = if second == stripe2 { lock_second[0] } else { lock_first[0] };
+            let val1 = if first == stripe1 {
+                lock_first[index]
+            } else {
+                lock_second[index]
+            };
+            let val2 = if second == stripe2 {
+                lock_second[0]
+            } else {
+                lock_first[0]
+            };
             (val1 as u16) << 8 | (val2 as u16)
         }
     }
@@ -306,7 +314,6 @@ impl Vram {
         }
         Ok(())
     }
-
 }
 
 impl Default for Vram {

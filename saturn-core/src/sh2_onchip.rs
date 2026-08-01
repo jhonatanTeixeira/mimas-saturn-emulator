@@ -72,6 +72,11 @@ pub struct Sh2OnChip {
     pub vcrdma0: u32,
     pub vcrdma1: u32,
     pub dmaor: u32,
+    pub chcr0m: std::cell::Cell<u32>,
+    pub chcr1m: std::cell::Cell<u32>,
+    pub ch0_copy_clock: u32,
+    pub ch1_copy_clock: u32,
+    pub dma_round_robin_next: u32,
 
     // BSC
     pub bcr1: u16,
@@ -152,6 +157,11 @@ impl Sh2OnChip {
             vcrdma0: 0,
             vcrdma1: 0,
             dmaor: 0,
+            chcr0m: std::cell::Cell::new(0),
+            chcr1m: std::cell::Cell::new(0),
+            ch0_copy_clock: 0,
+            ch1_copy_clock: 0,
+            dma_round_robin_next: 0,
 
             bcr1: if is_slave { 0x83F0 } else { 0x03F0 },
             bcr2: 0x00FC,

@@ -17,8 +17,8 @@
 //! `sh2.rs` did: implement the common subset real driver code uses, hit a
 //! wall, decode the exact missing opcode, add it, keep going -- see
 //! `mimas/CLAUDE.md`.
-use std::sync::Arc;
 use crate::shared_buffers::WorkRam;
+use std::sync::Arc;
 
 // Status Register bits (standard 68000 layout).
 const SR_C: u16 = 1 << 0;
@@ -30,7 +30,8 @@ const SR_S: u16 = 1 << 13;
 const SR_IMASK_SHIFT: u16 = 8;
 
 static UNIMPL_LOG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-static TRACE_RING: std::sync::Mutex<Vec<(u32, u16, u32, u32, u32)>> = std::sync::Mutex::new(Vec::new());
+static TRACE_RING: std::sync::Mutex<Vec<(u32, u16, u32, u32, u32)>> =
+    std::sync::Mutex::new(Vec::new());
 static LOOP_ENTRY_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// SCSP register offsets for the real main-CPU interrupt handshake
@@ -59,7 +60,15 @@ pub struct M68k {
 
 impl M68k {
     pub fn new(work_ram: Arc<WorkRam>) -> Self {
-        Self { d: [0; 8], a: [0; 8], sr: 0, pc: 0, running: false, work_ram, sound_req_irq: None }
+        Self {
+            d: [0; 8],
+            a: [0; 8],
+            sr: 0,
+            pc: 0,
+            running: false,
+            work_ram,
+            sound_req_irq: None,
+        }
     }
 
     /// Real 68000 RESET exception: fetch initial SSP from address 0,
@@ -129,14 +138,10 @@ impl M68k {
             // also enabled in MCIEB -- see `scsp_main_interrupt` in a
             // real, working SCSP implementation (`scsp.c`).
             if off == SCSP_MCIPD_OFFSET || off == SCSP_MCIPD_OFFSET + 1 {
-                let mcieb = u16::from_be_bytes([
-                    ram[SCSP_MCIEB_OFFSET],
-                    ram[SCSP_MCIEB_OFFSET + 1],
-                ]);
-                let mcipd = u16::from_be_bytes([
-                    ram[SCSP_MCIPD_OFFSET],
-                    ram[SCSP_MCIPD_OFFSET + 1],
-                ]);
+                let mcieb =
+                    u16::from_be_bytes([ram[SCSP_MCIEB_OFFSET], ram[SCSP_MCIEB_OFFSET + 1]]);
+                let mcipd =
+                    u16::from_be_bytes([ram[SCSP_MCIPD_OFFSET], ram[SCSP_MCIPD_OFFSET + 1]]);
                 if mcieb & mcipd != 0 {
                     if let Some(ref flag) = self.sound_req_irq {
                         flag.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -166,18 +171,30 @@ impl M68k {
 
     fn set_nz16(&mut self, val: u16) {
         self.sr &= !(SR_N | SR_Z);
-        if val == 0 { self.sr |= SR_Z; }
-        if val & 0x8000 != 0 { self.sr |= SR_N; }
+        if val == 0 {
+            self.sr |= SR_Z;
+        }
+        if val & 0x8000 != 0 {
+            self.sr |= SR_N;
+        }
     }
     fn set_nz32(&mut self, val: u32) {
         self.sr &= !(SR_N | SR_Z);
-        if val == 0 { self.sr |= SR_Z; }
-        if val & 0x8000_0000 != 0 { self.sr |= SR_N; }
+        if val == 0 {
+            self.sr |= SR_Z;
+        }
+        if val & 0x8000_0000 != 0 {
+            self.sr |= SR_N;
+        }
     }
     fn set_nz8(&mut self, val: u8) {
         self.sr &= !(SR_N | SR_Z);
-        if val == 0 { self.sr |= SR_Z; }
-        if val & 0x80 != 0 { self.sr |= SR_N; }
+        if val == 0 {
+            self.sr |= SR_Z;
+        }
+        if val & 0x80 != 0 {
+            self.sr |= SR_N;
+        }
     }
 
     fn fetch_word(&mut self) -> u16 {
@@ -195,34 +212,44 @@ impl M68k {
     fn ea_addr(&mut self, mode: u8, reg: usize, size: u32) -> u32 {
         match mode {
             2 => self.a[reg], // (An)
-            3 => { // (An)+
+            3 => {
+                // (An)+
                 let addr = self.a[reg];
                 let step = if reg == 7 && size == 1 { 2 } else { size };
                 self.a[reg] = self.a[reg].wrapping_add(step);
                 addr
             }
-            4 => { // -(An)
+            4 => {
+                // -(An)
                 let step = if reg == 7 && size == 1 { 2 } else { size };
                 self.a[reg] = self.a[reg].wrapping_sub(step);
                 self.a[reg]
             }
-            5 => { // (d16,An)
+            5 => {
+                // (d16,An)
                 let disp = self.fetch_word() as i16 as i32 as u32;
                 self.a[reg].wrapping_add(disp)
             }
-            6 => { // (d8,An,Xn)
+            6 => {
+                // (d8,An,Xn)
                 let ext = self.fetch_word();
                 self.indexed_addr(self.a[reg], ext)
             }
             7 => match reg {
                 0 => self.fetch_word() as i16 as i32 as u32, // abs.W (sign-extended)
-                1 => { let hi = self.fetch_word(); let lo = self.fetch_word(); ((hi as u32) << 16) | lo as u32 } // abs.L
-                2 => { // (d16,PC)
+                1 => {
+                    let hi = self.fetch_word();
+                    let lo = self.fetch_word();
+                    ((hi as u32) << 16) | lo as u32
+                } // abs.L
+                2 => {
+                    // (d16,PC)
                     let base = self.pc;
                     let disp = self.fetch_word() as i16 as i32 as u32;
                     base.wrapping_add(disp)
                 }
-                3 => { // (d8,PC,Xn)
+                3 => {
+                    // (d8,PC,Xn)
                     let base = self.pc;
                     let ext = self.fetch_word();
                     self.indexed_addr(base, ext)
@@ -262,14 +289,18 @@ impl M68k {
 
     fn write_ea(&mut self, mode: u8, reg: usize, size: u32, val: u32) {
         match mode {
-            0 => {
-                match size {
-                    1 => self.d[reg] = (self.d[reg] & 0xFFFF_FF00) | (val & 0xFF),
-                    2 => self.d[reg] = (self.d[reg] & 0xFFFF_0000) | (val & 0xFFFF),
-                    _ => self.d[reg] = val,
+            0 => match size {
+                1 => self.d[reg] = (self.d[reg] & 0xFFFF_FF00) | (val & 0xFF),
+                2 => self.d[reg] = (self.d[reg] & 0xFFFF_0000) | (val & 0xFFFF),
+                _ => self.d[reg] = val,
+            },
+            1 => {
+                self.a[reg] = if size == 2 {
+                    val as i16 as i32 as u32
+                } else {
+                    val
                 }
             }
-            1 => self.a[reg] = if size == 2 { val as i16 as i32 as u32 } else { val },
             _ => {
                 let addr = self.ea_addr(mode, reg, size);
                 match size {
@@ -287,22 +318,22 @@ impl M68k {
         let z = self.sr & SR_Z != 0;
         let n = self.sr & SR_N != 0;
         match cc {
-            0x0 => true,             // T
-            0x1 => false,            // F
-            0x2 => !c && !z,         // HI
-            0x3 => c || z,           // LS
-            0x4 => !c,               // CC/HS
-            0x5 => c,                // CS/LO
-            0x6 => !z,               // NE
-            0x7 => z,                // EQ
-            0x8 => true,             // VC (not modeled precisely, rare)
-            0x9 => false,            // VS
-            0xA => !n,               // PL
-            0xB => n,                // MI
-            0xC => n == v,           // GE
-            0xD => n != v,           // LT
-            0xE => !z && (n == v),   // GT
-            0xF => z || (n != v),    // LE
+            0x0 => true,           // T
+            0x1 => false,          // F
+            0x2 => !c && !z,       // HI
+            0x3 => c || z,         // LS
+            0x4 => !c,             // CC/HS
+            0x5 => c,              // CS/LO
+            0x6 => !z,             // NE
+            0x7 => z,              // EQ
+            0x8 => true,           // VC (not modeled precisely, rare)
+            0x9 => false,          // VS
+            0xA => !n,             // PL
+            0xB => n,              // MI
+            0xC => n == v,         // GE
+            0xD => n != v,         // LT
+            0xE => !z && (n == v), // GT
+            0xF => z || (n != v),  // LE
             _ => false,
         }
     }
@@ -324,7 +355,9 @@ impl M68k {
         let opcode = self.fetch_word();
         if std::env::var("MIMAS_DEBUG_M68K").is_ok() {
             let mut ring = TRACE_RING.lock().unwrap();
-            if ring.len() >= 32 { ring.remove(0); }
+            if ring.len() >= 32 {
+                ring.remove(0);
+            }
             ring.push((trace_pc, opcode, self.a[0], self.a[1], self.d[7]));
         }
         self.execute(opcode);
@@ -408,9 +441,15 @@ impl M68k {
                     drop(ram);
                     eprintln!("[M68K] dumped full sound_ram (512KB) to /tmp/claude-1000/sound_ram_dump.bin");
                     let ring = TRACE_RING.lock().unwrap();
-                    eprintln!("[M68K] last {} executed (pc,opcode,a0,a1,d7) tuples:", ring.len());
+                    eprintln!(
+                        "[M68K] last {} executed (pc,opcode,a0,a1,d7) tuples:",
+                        ring.len()
+                    );
                     for (tpc, top, ta0, ta1, td7) in ring.iter() {
-                        eprintln!("  pc={:#010X} op={:#06X} a0={:#010X} a1={:#010X} d7={:#010X}", tpc, top, ta0, ta1, td7);
+                        eprintln!(
+                            "  pc={:#010X} op={:#06X} a0={:#010X} a1={:#010X} d7={:#010X}",
+                            tpc, top, ta0, ta1, td7
+                        );
                     }
                 }
             }
@@ -440,13 +479,21 @@ impl M68k {
             return;
         }
         let size_bits = (opcode >> 6) & 3;
-        let size: u32 = match size_bits { 0 => 1, 1 => 2, _ => 4 };
+        let size: u32 = match size_bits {
+            0 => 1,
+            1 => 2,
+            _ => 4,
+        };
         match sub_op {
-            0 => { // ORI
+            0 => {
+                // ORI
                 if mode == 7 && reg == 4 {
                     let imm = self.fetch_word();
-                    if size_bits == 0 { self.sr = (self.sr & 0xFF00) | ((self.sr | (imm & 0xFF)) & 0xFF); }
-                    else { self.sr |= imm; }
+                    if size_bits == 0 {
+                        self.sr = (self.sr & 0xFF00) | ((self.sr | (imm & 0xFF)) & 0xFF);
+                    } else {
+                        self.sr |= imm;
+                    }
                     return;
                 }
                 let imm = self.fetch_imm(size);
@@ -455,7 +502,8 @@ impl M68k {
                 self.set_nz_sized(val, size);
                 self.sr &= !(SR_V | SR_C);
             }
-            1 => { // ANDI
+            1 => {
+                // ANDI
                 if mode == 7 && reg == 4 {
                     let imm = self.fetch_word();
                     self.sr &= imm;
@@ -467,23 +515,34 @@ impl M68k {
                 self.set_nz_sized(val, size);
                 self.sr &= !(SR_V | SR_C);
             }
-            2 => { // SUBI
+            2 => {
+                // SUBI
                 let imm = self.fetch_imm(size);
                 let old = self.read_ea(mode, reg, size);
                 let val = old.wrapping_sub(imm);
                 self.write_ea(mode, reg, size, val);
                 self.set_nz_sized(val, size);
-                self.sr = if val > old { self.sr | SR_C | SR_X } else { self.sr & !(SR_C | SR_X) };
+                self.sr = if val > old {
+                    self.sr | SR_C | SR_X
+                } else {
+                    self.sr & !(SR_C | SR_X)
+                };
             }
-            3 => { // ADDI
+            3 => {
+                // ADDI
                 let imm = self.fetch_imm(size);
                 let old = self.read_ea(mode, reg, size);
                 let val = old.wrapping_add(imm);
                 self.write_ea(mode, reg, size, val);
                 self.set_nz_sized(val, size);
-                self.sr = if val < old { self.sr | SR_C | SR_X } else { self.sr & !(SR_C | SR_X) };
+                self.sr = if val < old {
+                    self.sr | SR_C | SR_X
+                } else {
+                    self.sr & !(SR_C | SR_X)
+                };
             }
-            5 => { // EORI
+            5 => {
+                // EORI
                 if mode == 7 && reg == 4 {
                     let imm = self.fetch_word();
                     self.sr ^= imm;
@@ -495,12 +554,17 @@ impl M68k {
                 self.set_nz_sized(val, size);
                 self.sr &= !(SR_V | SR_C);
             }
-            6 => { // CMPI
+            6 => {
+                // CMPI
                 let imm = self.fetch_imm(size);
                 let old = self.read_ea(mode, reg, size);
                 let val = old.wrapping_sub(imm);
                 self.set_nz_sized(val, size);
-                self.sr = if old < imm { self.sr | SR_C } else { self.sr & !SR_C };
+                self.sr = if old < imm {
+                    self.sr | SR_C
+                } else {
+                    self.sr & !SR_C
+                };
             }
             _ => {}
         }
@@ -508,15 +572,25 @@ impl M68k {
 
     fn bit_op(&mut self, op: u16, bit_val: u32, mode: u8, reg: usize) {
         let size: u32 = if mode == 0 { 4 } else { 1 };
-        let bit = if mode == 0 { bit_val & 0x1F } else { bit_val & 0x7 };
+        let bit = if mode == 0 {
+            bit_val & 0x1F
+        } else {
+            bit_val & 0x7
+        };
         let val = self.read_ea(mode, reg, size);
         let mask = 1u32 << bit;
-        if val & mask == 0 { self.sr |= SR_Z; } else { self.sr &= !SR_Z; }
+        if val & mask == 0 {
+            self.sr |= SR_Z;
+        } else {
+            self.sr &= !SR_Z;
+        }
         let new_val = match op {
-            1 => val ^ mask,        // BCHG
-            2 => val & !mask,       // BCLR
-            3 => val | mask,        // BSET
-            _ => { return; }        // BTST: read-only
+            1 => val ^ mask,  // BCHG
+            2 => val & !mask, // BCLR
+            3 => val | mask,  // BSET
+            _ => {
+                return;
+            } // BTST: read-only
         };
         self.write_ea(mode, reg, size, new_val);
     }
@@ -542,7 +616,11 @@ impl M68k {
     }
 
     fn execute_move(&mut self, opcode: u16, top4: u16) {
-        let size: u32 = match top4 { 1 => 1, 3 => 2, _ => 4 };
+        let size: u32 = match top4 {
+            1 => 1,
+            3 => 2,
+            _ => 4,
+        };
         let src_mode = ((opcode >> 3) & 7) as u8;
         let src_reg = (opcode & 7) as usize;
         let dst_reg = ((opcode >> 9) & 7) as usize;
@@ -550,7 +628,11 @@ impl M68k {
         let val = self.read_ea(src_mode, src_reg, size);
         if dst_mode == 1 {
             // MOVEA: no flags affected
-            self.a[dst_reg] = if size == 2 { val as i16 as i32 as u32 } else { val };
+            self.a[dst_reg] = if size == 2 {
+                val as i16 as i32 as u32
+            } else {
+                val
+            };
             return;
         }
         self.write_ea(dst_mode, dst_reg, size, val);
@@ -560,7 +642,9 @@ impl M68k {
 
     fn execute_group4(&mut self, opcode: u16) {
         // NOP
-        if opcode == 0x4E71 { return; }
+        if opcode == 0x4E71 {
+            return;
+        }
         // RTS
         if opcode == 0x4E75 {
             self.pc = self.pop_long();
@@ -599,7 +683,11 @@ impl M68k {
         // CLR.size <ea>
         if (opcode & 0xFF00) == 0x4200 {
             let size_bits = (opcode >> 6) & 3;
-            let size: u32 = match size_bits { 0 => 1, 1 => 2, _ => 4 };
+            let size: u32 = match size_bits {
+                0 => 1,
+                1 => 2,
+                _ => 4,
+            };
             let mode = ((opcode >> 3) & 7) as u8;
             let reg = (opcode & 7) as usize;
             self.write_ea(mode, reg, size, 0);
@@ -609,7 +697,11 @@ impl M68k {
         // NOT.size <ea>
         if (opcode & 0xFF00) == 0x4600 {
             let size_bits = (opcode >> 6) & 3;
-            let size: u32 = match size_bits { 0 => 1, 1 => 2, _ => 4 };
+            let size: u32 = match size_bits {
+                0 => 1,
+                1 => 2,
+                _ => 4,
+            };
             let mode = ((opcode >> 3) & 7) as u8;
             let reg = (opcode & 7) as usize;
             let val = (!self.read_ea(mode, reg, size)) & size_mask(size);
@@ -621,20 +713,32 @@ impl M68k {
         // NEG.size <ea>
         if (opcode & 0xFF00) == 0x4400 {
             let size_bits = (opcode >> 6) & 3;
-            let size: u32 = match size_bits { 0 => 1, 1 => 2, _ => 4 };
+            let size: u32 = match size_bits {
+                0 => 1,
+                1 => 2,
+                _ => 4,
+            };
             let mode = ((opcode >> 3) & 7) as u8;
             let reg = (opcode & 7) as usize;
             let old = self.read_ea(mode, reg, size);
             let val = 0u32.wrapping_sub(old) & size_mask(size);
             self.write_ea(mode, reg, size, val);
             self.set_nz_sized(val, size);
-            self.sr = if val != 0 { self.sr | SR_C | SR_X } else { self.sr & !(SR_C | SR_X) };
+            self.sr = if val != 0 {
+                self.sr | SR_C | SR_X
+            } else {
+                self.sr & !(SR_C | SR_X)
+            };
             return;
         }
         // TST.size <ea>
         if (opcode & 0xFF00) == 0x4A00 && (opcode & 0xC0) != 0xC0 {
             let size_bits = (opcode >> 6) & 3;
-            let size: u32 = match size_bits { 0 => 1, 1 => 2, _ => 4 };
+            let size: u32 = match size_bits {
+                0 => 1,
+                1 => 2,
+                _ => 4,
+            };
             let mode = ((opcode >> 3) & 7) as u8;
             let reg = (opcode & 7) as usize;
             let val = self.read_ea(mode, reg, size);
@@ -723,8 +827,16 @@ impl M68k {
             let mut a = addr;
             for i in 0..16 {
                 if mask & (1 << i) != 0 {
-                    let val = if size == 4 { self.read_long(a) } else { self.read_word(a) as i16 as i32 as u32 };
-                    if i < 8 { self.d[i] = val; } else { self.a[i - 8] = val; }
+                    let val = if size == 4 {
+                        self.read_long(a)
+                    } else {
+                        self.read_word(a) as i16 as i32 as u32
+                    };
+                    if i < 8 {
+                        self.d[i] = val;
+                    } else {
+                        self.a[i - 8] = val;
+                    }
                     a = a.wrapping_add(size);
                 }
             }
@@ -738,7 +850,11 @@ impl M68k {
                 if mask & (1 << (15 - i)) != 0 {
                     let val = if i < 8 { self.d[i] } else { self.a[i - 8] };
                     a = a.wrapping_sub(size);
-                    if size == 4 { self.write_long(a, val); } else { self.write_word(a, val as u16); }
+                    if size == 4 {
+                        self.write_long(a, val);
+                    } else {
+                        self.write_word(a, val as u16);
+                    }
                 }
             }
             self.a[reg] = a;
@@ -748,7 +864,11 @@ impl M68k {
             for i in 0..16 {
                 if mask & (1 << i) != 0 {
                     let val = if i < 8 { self.d[i] } else { self.a[i - 8] };
-                    if size == 4 { self.write_long(a, val); } else { self.write_word(a, val as u16); }
+                    if size == 4 {
+                        self.write_long(a, val);
+                    } else {
+                        self.write_word(a, val as u16);
+                    }
                     a = a.wrapping_add(size);
                 }
             }
@@ -782,17 +902,29 @@ impl M68k {
         // ADDQ/SUBQ #imm,<ea>
         let size_bits = (opcode >> 6) & 3;
         if size_bits != 3 {
-            let size: u32 = match size_bits { 0 => 1, 1 => 2, _ => 4 };
+            let size: u32 = match size_bits {
+                0 => 1,
+                1 => 2,
+                _ => 4,
+            };
             let data = ((opcode >> 9) & 7) as u32;
             let data = if data == 0 { 8 } else { data };
             let is_sub = opcode & 0x0100 != 0;
             let old = self.read_ea(mode, reg, size);
-            let val = if is_sub { old.wrapping_sub(data) } else { old.wrapping_add(data) } & size_mask(size);
+            let val = if is_sub {
+                old.wrapping_sub(data)
+            } else {
+                old.wrapping_add(data)
+            } & size_mask(size);
             self.write_ea(mode, reg, size, val);
             if mode != 1 {
                 self.set_nz_sized(val, size);
                 let carry = if is_sub { val > old } else { val < old };
-                self.sr = if carry { self.sr | SR_C | SR_X } else { self.sr & !(SR_C | SR_X) };
+                self.sr = if carry {
+                    self.sr | SR_C | SR_X
+                } else {
+                    self.sr & !(SR_C | SR_X)
+                };
             }
         }
     }
@@ -855,7 +987,11 @@ impl M68k {
             }
             return;
         }
-        let size: u32 = match size_bits { 0 => 1, 1 => 2, _ => 4 };
+        let size: u32 = match size_bits {
+            0 => 1,
+            1 => 2,
+            _ => 4,
+        };
         let to_mem = opcode & 0x0100 != 0;
         if to_mem {
             let val = self.read_ea(mode, ea_reg, size) | (self.d[reg] & size_mask(size));
@@ -892,23 +1028,32 @@ impl M68k {
             return;
         }
         // EXG (register exchange) shares this major opcode: 1100 rrr1 ss01 0 rrr etc.
-        if (opcode & 0x01F0) == 0x0140 { // EXG Dx,Dy
-            let rx = reg; let ry = ea_reg;
+        if (opcode & 0x01F0) == 0x0140 {
+            // EXG Dx,Dy
+            let rx = reg;
+            let ry = ea_reg;
             self.d.swap(rx, ry);
             return;
         }
-        if (opcode & 0x01F0) == 0x0148 { // EXG Ax,Ay
-            let rx = reg; let ry = ea_reg;
+        if (opcode & 0x01F0) == 0x0148 {
+            // EXG Ax,Ay
+            let rx = reg;
+            let ry = ea_reg;
             self.a.swap(rx, ry);
             return;
         }
-        if (opcode & 0x01F0) == 0x0188 { // EXG Dx,Ay
+        if (opcode & 0x01F0) == 0x0188 {
+            // EXG Dx,Ay
             let tmp = self.d[reg];
             self.d[reg] = self.a[ea_reg];
             self.a[ea_reg] = tmp;
             return;
         }
-        let size: u32 = match size_bits { 0 => 1, 1 => 2, _ => 4 };
+        let size: u32 = match size_bits {
+            0 => 1,
+            1 => 2,
+            _ => 4,
+        };
         let to_mem = opcode & 0x0100 != 0;
         if to_mem {
             let val = self.read_ea(mode, ea_reg, size) & (self.d[reg] & size_mask(size));
@@ -931,14 +1076,26 @@ impl M68k {
             // CMPA.w / CMPA.l
             let size: u32 = if size_bits == 3 { 2 } else { 4 };
             let src = self.read_ea(mode, ea_reg, size);
-            let src = if size == 2 { src as i16 as i32 as u32 } else { src };
+            let src = if size == 2 {
+                src as i16 as i32 as u32
+            } else {
+                src
+            };
             let old = self.a[reg];
             let val = old.wrapping_sub(src);
             self.set_nz32(val);
-            self.sr = if old < src { self.sr | SR_C } else { self.sr & !SR_C };
+            self.sr = if old < src {
+                self.sr | SR_C
+            } else {
+                self.sr & !SR_C
+            };
             return;
         }
-        let size: u32 = match size_bits { 0 => 1, 1 => 2, _ => 4 };
+        let size: u32 = match size_bits {
+            0 => 1,
+            1 => 2,
+            _ => 4,
+        };
         let is_eor = opcode & 0x0100 != 0 && mode != 1;
         if is_eor {
             let val = self.read_ea(mode, ea_reg, size) ^ (self.d[reg] & size_mask(size));
@@ -951,7 +1108,11 @@ impl M68k {
             let old = self.d[reg] & size_mask(size);
             let val = old.wrapping_sub(src) & size_mask(size);
             self.set_nz_sized(val, size);
-            self.sr = if old < src { self.sr | SR_C } else { self.sr & !SR_C };
+            self.sr = if old < src {
+                self.sr | SR_C
+            } else {
+                self.sr & !SR_C
+            };
         }
     }
 
@@ -964,28 +1125,56 @@ impl M68k {
             // ADDA/SUBA
             let size: u32 = if size_bits == 3 { 2 } else { 4 };
             let src = self.read_ea(mode, ea_reg, size);
-            let src = if size == 2 { src as i16 as i32 as u32 } else { src };
-            self.a[reg] = if is_add { self.a[reg].wrapping_add(src) } else { self.a[reg].wrapping_sub(src) };
+            let src = if size == 2 {
+                src as i16 as i32 as u32
+            } else {
+                src
+            };
+            self.a[reg] = if is_add {
+                self.a[reg].wrapping_add(src)
+            } else {
+                self.a[reg].wrapping_sub(src)
+            };
             return;
         }
-        let size: u32 = match size_bits { 0 => 1, 1 => 2, _ => 4 };
+        let size: u32 = match size_bits {
+            0 => 1,
+            1 => 2,
+            _ => 4,
+        };
         let to_mem = opcode & 0x0100 != 0;
         if to_mem {
             let old = self.read_ea(mode, ea_reg, size);
             let operand = self.d[reg] & size_mask(size);
-            let val = (if is_add { old.wrapping_add(operand) } else { old.wrapping_sub(operand) }) & size_mask(size);
+            let val = (if is_add {
+                old.wrapping_add(operand)
+            } else {
+                old.wrapping_sub(operand)
+            }) & size_mask(size);
             self.write_ea(mode, ea_reg, size, val);
             self.set_nz_sized(val, size);
             let carry = if is_add { val < old } else { val > old };
-            self.sr = if carry { self.sr | SR_C | SR_X } else { self.sr & !(SR_C | SR_X) };
+            self.sr = if carry {
+                self.sr | SR_C | SR_X
+            } else {
+                self.sr & !(SR_C | SR_X)
+            };
         } else {
             let old = self.d[reg] & size_mask(size);
             let operand = self.read_ea(mode, ea_reg, size);
-            let val = (if is_add { old.wrapping_add(operand) } else { old.wrapping_sub(operand) }) & size_mask(size);
+            let val = (if is_add {
+                old.wrapping_add(operand)
+            } else {
+                old.wrapping_sub(operand)
+            }) & size_mask(size);
             self.d[reg] = (self.d[reg] & !size_mask(size)) | val;
             self.set_nz_sized(val, size);
             let carry = if is_add { val < old } else { val > old };
-            self.sr = if carry { self.sr | SR_C | SR_X } else { self.sr & !(SR_C | SR_X) };
+            self.sr = if carry {
+                self.sr | SR_C | SR_X
+            } else {
+                self.sr & !(SR_C | SR_X)
+            };
         }
     }
 
@@ -995,13 +1184,23 @@ impl M68k {
             // memory shift (single bit, LSL/LSR/ASL/ASR/ROL/ROR <ea>) -- rare in driver code, skip.
             return;
         }
-        let size: u32 = match size_bits { 0 => 1, 1 => 2, _ => 4 };
+        let size: u32 = match size_bits {
+            0 => 1,
+            1 => 2,
+            _ => 4,
+        };
         let reg = (opcode & 7) as usize;
         let dir_left = opcode & 0x0100 != 0;
         let kind = (opcode >> 3) & 3; // 0=ASx 1=LSx 2=ROXx 3=ROx
         let count_field = ((opcode >> 9) & 7) as u32;
         let use_reg_count = opcode & 0x0020 != 0;
-        let count = if use_reg_count { self.d[count_field as usize] % 64 } else if count_field == 0 { 8 } else { count_field };
+        let count = if use_reg_count {
+            self.d[count_field as usize] % 64
+        } else if count_field == 0 {
+            8
+        } else {
+            count_field
+        };
 
         let mut val = self.d[reg] & size_mask(size);
         let bits = size * 8;
@@ -1010,22 +1209,42 @@ impl M68k {
             let msb = val & (1 << (bits - 1)) != 0;
             let lsb = val & 1 != 0;
             match (kind, dir_left) {
-                (1, true) => { carry = msb; val = (val << 1) & size_mask(size); } // LSL
-                (1, false) => { carry = lsb; val >>= 1; } // LSR
-                (0, true) => { carry = msb; val = (val << 1) & size_mask(size); } // ASL (same bit motion as LSL)
-                (0, false) => { // ASR: replicate sign bit
+                (1, true) => {
+                    carry = msb;
+                    val = (val << 1) & size_mask(size);
+                } // LSL
+                (1, false) => {
+                    carry = lsb;
+                    val >>= 1;
+                } // LSR
+                (0, true) => {
+                    carry = msb;
+                    val = (val << 1) & size_mask(size);
+                } // ASL (same bit motion as LSL)
+                (0, false) => {
+                    // ASR: replicate sign bit
                     carry = lsb;
                     let sign = val & (1 << (bits - 1));
                     val = (val >> 1) | sign;
                 }
-                (3, true) => { carry = msb; val = ((val << 1) | (msb as u32)) & size_mask(size); } // ROL
-                (3, false) => { carry = lsb; val = (val >> 1) | ((lsb as u32) << (bits - 1)); } // ROR
+                (3, true) => {
+                    carry = msb;
+                    val = ((val << 1) | (msb as u32)) & size_mask(size);
+                } // ROL
+                (3, false) => {
+                    carry = lsb;
+                    val = (val >> 1) | ((lsb as u32) << (bits - 1));
+                } // ROR
                 _ => {}
             }
         }
         self.d[reg] = (self.d[reg] & !size_mask(size)) | val;
         self.set_nz_sized(val, size);
-        self.sr = if carry { self.sr | SR_C } else { self.sr & !SR_C };
+        self.sr = if carry {
+            self.sr | SR_C
+        } else {
+            self.sr & !SR_C
+        };
         self.sr &= !SR_V;
     }
 
@@ -1103,7 +1322,10 @@ mod tests {
         cpu.pc = 0x100;
         cpu.write_word(0x100, 0x6004); // BRA +4
         cpu.step();
-        assert_eq!(cpu.pc, 0x106, "BRA target = pc-after-opcode(0x102) + disp(4)");
+        assert_eq!(
+            cpu.pc, 0x106,
+            "BRA target = pc-after-opcode(0x102) + disp(4)"
+        );
     }
 
     #[test]
@@ -1137,7 +1359,10 @@ mod tests {
         cpu.step(); // JSR
         assert_eq!(cpu.pc, 0x200);
         cpu.step(); // RTS
-        assert_eq!(cpu.pc, 0x106, "must return past the JSR's 6-byte instruction");
+        assert_eq!(
+            cpu.pc, 0x106,
+            "must return past the JSR's 6-byte instruction"
+        );
     }
 
     #[test]
@@ -1150,7 +1375,10 @@ mod tests {
         cpu.write_word(0x100, 0x4AD0); // TAS (A0)
         cpu.step();
         assert_eq!(cpu.read_byte(0x1000), 0x80);
-        assert!(cpu.sr & SR_Z != 0, "original value was 0, Z must be set from the pre-set-bit read");
+        assert!(
+            cpu.sr & SR_Z != 0,
+            "original value was 0, Z must be set from the pre-set-bit read"
+        );
     }
 
     #[test]
@@ -1189,11 +1417,17 @@ mod tests {
 
         // MCIPD bit 0x20 set, but MCIEB never enabled it: must NOT fire.
         cpu.write_byte(0x0010_002D, 0x20); // MCIPD low byte
-        assert!(!flag.load(std::sync::atomic::Ordering::Relaxed), "MCIPD alone, without MCIEB, must not raise the interrupt");
+        assert!(
+            !flag.load(std::sync::atomic::Ordering::Relaxed),
+            "MCIPD alone, without MCIEB, must not raise the interrupt"
+        );
 
         // Now enable it in MCIEB, then request it again via MCIPD: must fire.
         cpu.write_byte(0x0010_002B, 0x20); // MCIEB low byte
         cpu.write_byte(0x0010_002D, 0x20); // MCIPD low byte again
-        assert!(flag.load(std::sync::atomic::Ordering::Relaxed), "MCIPD with the matching MCIEB bit enabled must raise the interrupt");
+        assert!(
+            flag.load(std::sync::atomic::Ordering::Relaxed),
+            "MCIPD with the matching MCIEB bit enabled must raise the interrupt"
+        );
     }
 }

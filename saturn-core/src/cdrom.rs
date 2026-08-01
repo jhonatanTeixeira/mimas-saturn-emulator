@@ -17,7 +17,7 @@ impl Cdrom {
         }
 
         let is_dummy = path.contains("dummy");
-        
+
         let path_buf = Path::new(path);
         let exists = path_buf.exists();
         let is_small = if exists {
@@ -97,7 +97,8 @@ impl Cdrom {
         if hunk_num != self.current_hunk_num {
             let mut hunk = chd.hunk(hunk_num).map_err(|e| e.to_string())?;
             let mut comp_buf = Vec::new();
-            hunk.read_hunk_in(&mut comp_buf, &mut self.hunk_buffer).map_err(|e| e.to_string())?;
+            hunk.read_hunk_in(&mut comp_buf, &mut self.hunk_buffer)
+                .map_err(|e| e.to_string())?;
             self.current_hunk_num = hunk_num;
         }
 

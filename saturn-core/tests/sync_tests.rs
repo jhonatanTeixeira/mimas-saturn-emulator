@@ -1,8 +1,8 @@
-use std::sync::{mpsc, Arc};
+use saturn_core::{BusArbiter, LockStepSync, SaturnSystem, Sh2, ThrottleSpeed, WorkRam};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
-use saturn_core::{BusArbiter, LockStepSync, SaturnSystem, Sh2, ThrottleSpeed, WorkRam};
 
 /// Run `f` on its own thread and wait up to `timeout` for it to finish,
 /// propagating a panic from inside `f` verbatim (so a real assertion
@@ -21,7 +21,10 @@ fn assert_completes_within<F: FnOnce() + Send + 'static>(timeout: Duration, f: F
     match rx.recv_timeout(timeout) {
         Ok(Ok(())) => {}
         Ok(Err(payload)) => std::panic::resume_unwind(payload),
-        Err(_) => panic!("operation did not complete within {:?} -- likely deadlock", timeout),
+        Err(_) => panic!(
+            "operation did not complete within {:?} -- likely deadlock",
+            timeout
+        ),
     }
 }
 
@@ -42,7 +45,10 @@ fn test_lockstep_sync_basic() {
 
     // Wait a bit and verify that the thread is indeed blocked
     thread::sleep(Duration::from_millis(50));
-    assert!(is_blocked.load(Ordering::Relaxed), "Core 0 did not block when exceeding drift limit");
+    assert!(
+        is_blocked.load(Ordering::Relaxed),
+        "Core 0 did not block when exceeding drift limit"
+    );
 
     // Advance the other cores to 1.
     // Core 0 at 12 is still exceeding 1 + 10 = 11, so it should still block.
@@ -51,7 +57,10 @@ fn test_lockstep_sync_basic() {
     sync.sync_core(3, 1);
 
     thread::sleep(Duration::from_millis(20));
-    assert!(is_blocked.load(Ordering::Relaxed), "Core 0 woke up too early when still exceeding drift limit");
+    assert!(
+        is_blocked.load(Ordering::Relaxed),
+        "Core 0 woke up too early when still exceeding drift limit"
+    );
 
     // Advance the other cores to 2.
     // Core 0 at 12 is now within 2 + 10 = 12. It should wake up!
@@ -61,7 +70,10 @@ fn test_lockstep_sync_basic() {
 
     // Join the thread to verify it unblocks and finishes
     handle.join().unwrap();
-    assert!(!is_blocked.load(Ordering::Relaxed), "Core 0 failed to unblock after other cores caught up");
+    assert!(
+        !is_blocked.load(Ordering::Relaxed),
+        "Core 0 failed to unblock after other cores caught up"
+    );
 }
 
 #[test]
@@ -132,7 +144,7 @@ fn test_bus_arbiter_blocking() {
     // This means Cores 1, 2, 3 should be able to advance cycles way past the drift limit of 10.
     // Let's verify by advancing Cores 1, 2, 3 to 100 cycles concurrently.
     let start_time = std::time::Instant::now();
-    
+
     let handle1 = {
         let sync = sync.clone();
         thread::spawn(move || sync.sync_core(1, 100))
@@ -150,14 +162,20 @@ fn test_bus_arbiter_blocking() {
     handle2.join().unwrap();
     handle3.join().unwrap();
 
-    assert!(start_time.elapsed() < Duration::from_millis(150), "Other cores blocked on inactive Core 0");
+    assert!(
+        start_time.elapsed() < Duration::from_millis(150),
+        "Other cores blocked on inactive Core 0"
+    );
 
     // Now unlock the DMA bus
     arbiter.unlock_from_dma();
 
     // Core 0 should resume, set itself active again, catch up, and finish
     handle.join().unwrap();
-    assert!(!is_blocked.load(Ordering::Relaxed), "Core 0 failed to resume after DMA unlock");
+    assert!(
+        !is_blocked.load(Ordering::Relaxed),
+        "Core 0 failed to resume after DMA unlock"
+    );
 }
 
 #[test]
@@ -174,12 +192,18 @@ fn test_park_while_inactive_blocks_and_wakes_on_reactivation() {
     });
 
     thread::sleep(Duration::from_millis(50));
-    assert!(!handle.is_finished(), "parked thread should still be blocked");
+    assert!(
+        !handle.is_finished(),
+        "parked thread should still be blocked"
+    );
 
     sync.set_thread_active(1, true);
 
     assert_completes_within(Duration::from_secs(2), move || handle.join().unwrap());
-    assert!(woke_via_reactivation.load(Ordering::Relaxed), "park_while_inactive must return true on reactivation");
+    assert!(
+        woke_via_reactivation.load(Ordering::Relaxed),
+        "park_while_inactive must return true on reactivation"
+    );
 }
 
 #[test]
@@ -202,8 +226,14 @@ fn test_park_while_inactive_wakes_on_shutdown() {
     sync.request_shutdown();
 
     assert_completes_within(Duration::from_secs(2), move || handle.join().unwrap());
-    assert!(start.elapsed() < Duration::from_millis(100), "parked core did not wake promptly on shutdown");
-    assert!(!woke_via_reactivation.load(Ordering::Relaxed), "park_while_inactive must return false when woken by shutdown");
+    assert!(
+        start.elapsed() < Duration::from_millis(100),
+        "parked core did not wake promptly on shutdown"
+    );
+    assert!(
+        !woke_via_reactivation.load(Ordering::Relaxed),
+        "park_while_inactive must return false when woken by shutdown"
+    );
 }
 
 #[test]
@@ -279,7 +309,10 @@ fn test_saturn_system_startup_shutdown() {
         let pc_before = system.cpu0_pc.load(Ordering::Relaxed);
         thread::sleep(Duration::from_millis(100));
         let pc_after = system.cpu0_pc.load(Ordering::Relaxed);
-        assert_ne!(pc_before, pc_after, "Core 0 made no forward progress -- possibly stalled behind a parked core");
+        assert_ne!(
+            pc_before, pc_after,
+            "Core 0 made no forward progress -- possibly stalled behind a parked core"
+        );
 
         // Shutdown and join threads
         system.shutdown();

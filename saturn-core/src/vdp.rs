@@ -1,6 +1,6 @@
+use crate::shared_buffers::WorkRam;
 use arc_swap::ArcSwap;
 use std::sync::Arc;
-use crate::shared_buffers::WorkRam;
 
 pub struct Framebuffer {
     pub width: usize,
@@ -10,7 +10,11 @@ pub struct Framebuffer {
 
 impl Framebuffer {
     pub fn new(width: usize, height: usize) -> Self {
-        Self { width, height, pixels: vec![0; width * height] }
+        Self {
+            width,
+            height,
+            pixels: vec![0; width * height],
+        }
     }
 
     fn fill(&mut self, color: u32) {
@@ -90,16 +94,17 @@ pub fn execute_vdp1(ram: &WorkRam) {
         }
         let cmdctrl = u16::from_be_bytes([vram[cmd_addr], vram[cmd_addr + 1]]);
         let cmdcolr = u16::from_be_bytes([vram[cmd_addr + 4], vram[cmd_addr + 5]]);
-        
+
         let xa = i16::from_be_bytes([vram[cmd_addr + 8], vram[cmd_addr + 9]]) as i32;
         let ya = i16::from_be_bytes([vram[cmd_addr + 10], vram[cmd_addr + 11]]) as i32;
         let xb = i16::from_be_bytes([vram[cmd_addr + 12], vram[cmd_addr + 13]]) as i32;
         let yb = i16::from_be_bytes([vram[cmd_addr + 14], vram[cmd_addr + 15]]) as i32;
         let xc = i16::from_be_bytes([vram[cmd_addr + 16], vram[cmd_addr + 17]]) as i32;
         let yc = i16::from_be_bytes([vram[cmd_addr + 18], vram[cmd_addr + 19]]) as i32;
-        
+
         let comm_type = cmdctrl & 0x000F;
-        if comm_type == 4 { // Polygon / Quad Draw
+        if comm_type == 4 {
+            // Polygon / Quad Draw
             let min_x = xa.min(xb).min(xc).max(0) as usize;
             let max_x = xa.max(xb).max(xc).min(319) as usize;
             let min_y = ya.min(yb).min(yc).max(0) as usize;
@@ -171,10 +176,26 @@ mod tests {
 
     #[test]
     fn rgb555_conversion_hits_full_white_and_pure_channels() {
-        assert_eq!(rgb555_to_xrgb8888(0x7FFF), 0x00FFFFFF, "all channels at max must be white");
-        assert_eq!(rgb555_to_xrgb8888(0x001F), 0x00FF0000, "R is the low 5 bits, must land in the R byte");
-        assert_eq!(rgb555_to_xrgb8888(0x03E0), 0x0000FF00, "G is bits 5-9, must land in the G byte");
-        assert_eq!(rgb555_to_xrgb8888(0x7C00), 0x000000FF, "B is bits 10-14, must land in the B byte");
+        assert_eq!(
+            rgb555_to_xrgb8888(0x7FFF),
+            0x00FFFFFF,
+            "all channels at max must be white"
+        );
+        assert_eq!(
+            rgb555_to_xrgb8888(0x001F),
+            0x00FF0000,
+            "R is the low 5 bits, must land in the R byte"
+        );
+        assert_eq!(
+            rgb555_to_xrgb8888(0x03E0),
+            0x0000FF00,
+            "G is bits 5-9, must land in the G byte"
+        );
+        assert_eq!(
+            rgb555_to_xrgb8888(0x7C00),
+            0x000000FF,
+            "B is bits 10-14, must land in the B byte"
+        );
         assert_eq!(rgb555_to_xrgb8888(0), 0);
     }
 
@@ -233,7 +254,7 @@ mod tests {
             let cmdcolr = 0x001Fu16;
             vram[0..2].copy_from_slice(&cmdctrl.to_be_bytes());
             vram[4..6].copy_from_slice(&cmdcolr.to_be_bytes());
-            
+
             vram[8..10].copy_from_slice(&10i16.to_be_bytes()); // XA
             vram[10..12].copy_from_slice(&10i16.to_be_bytes()); // YA
             vram[12..14].copy_from_slice(&20i16.to_be_bytes()); // XB

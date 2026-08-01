@@ -1,5 +1,8 @@
-use std::sync::{atomic::{AtomicBool, Ordering}, Condvar, Mutex};
 use crate::sync::LockStepSync;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Condvar, Mutex,
+};
 
 pub struct BusArbiter {
     locked_by_dma: AtomicBool,
@@ -28,9 +31,10 @@ impl BusArbiter {
     pub fn acquire_bus(&self) {
         if self.locked_by_dma.load(Ordering::Relaxed) {
             let guard = self.unlock_mutex.lock().unwrap();
-            let _guard = self.unlock_signal.wait_while(guard, |_| {
-                self.locked_by_dma.load(Ordering::Acquire)
-            }).unwrap();
+            let _guard = self
+                .unlock_signal
+                .wait_while(guard, |_| self.locked_by_dma.load(Ordering::Acquire))
+                .unwrap();
         }
     }
 
@@ -40,9 +44,10 @@ impl BusArbiter {
             sync.set_thread_active(core_id, false);
             {
                 let guard = self.unlock_mutex.lock().unwrap();
-                let _guard = self.unlock_signal.wait_while(guard, |_| {
-                    self.locked_by_dma.load(Ordering::Acquire)
-                }).unwrap();
+                let _guard = self
+                    .unlock_signal
+                    .wait_while(guard, |_| self.locked_by_dma.load(Ordering::Acquire))
+                    .unwrap();
             }
             let caught_up = sync.set_thread_active(core_id, true);
             Some(caught_up)

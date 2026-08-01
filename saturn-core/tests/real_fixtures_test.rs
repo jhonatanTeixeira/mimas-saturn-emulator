@@ -4,8 +4,8 @@
 //! BIOS against a real boot disc -- not a self-consistent guess. See
 //! `saturn-core/tests/fixtures/README.md` for exactly how each fixture was
 //! captured and how to regenerate it.
-use std::sync::{Arc, Mutex};
 use saturn_core::{BusArbiter, Sh2, Smpc, WorkRam};
+use std::sync::{Arc, Mutex};
 
 fn load_fixture(name: &str) -> Vec<u8> {
     let path = format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name);
@@ -21,7 +21,11 @@ fn load_fixture(name: &str) -> Vec<u8> {
 #[test]
 fn real_smpc_intback_status_reads_back_through_the_cpu_address_path() {
     let fixture = load_fixture("smpc_intback_status.bin");
-    assert_eq!(fixture.len(), 0x80, "fixture must be the full real SMPC register window");
+    assert_eq!(
+        fixture.len(),
+        0x80,
+        "fixture must be the full real SMPC register window"
+    );
 
     let arbiter = Arc::new(BusArbiter::new());
     let work_ram = Arc::new(WorkRam::new());
@@ -60,7 +64,11 @@ fn real_smpc_intback_status_reads_back_through_the_cpu_address_path() {
 
     // OREG31 (offset 0x5F): 0x10 echoes the INTBACK command byte, per
     // `docs/hardware-reference/smpc-peripheral.md`'s INTBACK section.
-    assert_eq!(cpu.read_byte(SMPC_BASE + 0x5F), 0x10, "OREG31 (command echo)");
+    assert_eq!(
+        cpu.read_byte(SMPC_BASE + 0x5F),
+        0x10,
+        "OREG31 (command echo)"
+    );
 
     // SR (offset 0x61): real hardware sets 0x4F here (0x4F | intback<<5,
     // with intback=0 since no peripheral data was requested) -- Mimas's
@@ -117,8 +125,16 @@ fn real_smpc_post_regs_readback() {
     // OREG0 shows real connected digital pad, port status 0xF1/id 0x02/idle buttons 0xFF 0xFF
     assert_eq!(cpu.read_byte(SMPC_BASE + 0x21), 0xF1, "OREG0 (port status)");
     assert_eq!(cpu.read_byte(SMPC_BASE + 0x23), 0x02, "OREG1 (pad id)");
-    assert_eq!(cpu.read_byte(SMPC_BASE + 0x25), 0xFF, "OREG2 (button status high)");
-    assert_eq!(cpu.read_byte(SMPC_BASE + 0x27), 0xFF, "OREG3 (button status low)");
+    assert_eq!(
+        cpu.read_byte(SMPC_BASE + 0x25),
+        0xFF,
+        "OREG2 (button status high)"
+    );
+    assert_eq!(
+        cpu.read_byte(SMPC_BASE + 0x27),
+        0xFF,
+        "OREG3 (button status low)"
+    );
 }
 
 #[test]
@@ -159,7 +175,10 @@ fn real_vdp2_vram_fixture_loads() {
             non_zero_count += 1;
         }
     }
-    assert!(non_zero_count > 0, "Should read back some non-zero bytes from real VDP2 VRAM");
+    assert!(
+        non_zero_count > 0,
+        "Should read back some non-zero bytes from real VDP2 VRAM"
+    );
 }
 
 #[test]
@@ -169,7 +188,7 @@ fn real_high_wram_fixture_loads() {
 
     let arbiter = Arc::new(BusArbiter::new());
     let work_ram = Arc::new(WorkRam::new());
-    
+
     // Copy the 1MB fixture into the 32 stripes of 32KB
     for stripe in 0..32 {
         let start = stripe * 0x8000;
@@ -187,5 +206,8 @@ fn real_high_wram_fixture_loads() {
             non_zero_count += 1;
         }
     }
-    assert!(non_zero_count > 0, "Should read back some non-zero bytes from real High Work RAM");
+    assert!(
+        non_zero_count > 0,
+        "Should read back some non-zero bytes from real High Work RAM"
+    );
 }
