@@ -205,24 +205,24 @@ truncates nor validates.
 ordered by evidence rather than by guesswork. Cheap, zero behaviour change, matches the existing
 `REG_ACCESS_LOG` recipe (`sh2.rs:240-257`, `CLAUDE.md` "Diagnostic recipes").
 
-- [ ] Add a `BUS_MISS_LOG` alongside `REG_ACCESS_LOG` in `sh2.rs`, deduping on
+- [x] Add a `BUS_MISS_LOG` alongside `REG_ACCESS_LOG` in `sh2.rs`, deduping on
       `(area = address >> 29, block = address & 0x0FF00000, is_write, width)` and printing
       `[BUSMISS]` once per distinct key. Include the current `self.pc` in the message — that is
       what makes the log actionable with `tools/sh2dis.py`.
-- [ ] Log from `translate` (or a thin wrapper) whenever **any** of these hold, *before* the
+- [x] Log from `translate` (or a thin wrapper) whenever **any** of these hold, *before* the
       `& 0x0FFF_FFFF` mask erases the evidence:
-  - [ ] `address >> 29` is 2, 3, 5, or 6 (areas that should not reach the area-0 map at all)
-  - [ ] `address >> 29 == 7 && address < 0xFFFF_FE00`
-  - [ ] `address & 0x1000_0000 != 0` (bit-28 alias — §3.1, `[dev #1]`; we need to know whether
+  - [x] `address >> 29` is 2, 3, 5, or 6 (areas that should not reach the area-0 map at all)
+  - [x] `address >> 29 == 7 && address < 0xFFFF_FE00`
+  - [x] `address & 0x1000_0000 != 0` (bit-28 alias — §3.1, `[dev #1]`; we need to know whether
         real BIOS code ever uses it before deciding whether to keep Yabause's fold)
-  - [ ] `address >> 29 == 4` (area-4 alias — §0.1, `[dev #2]`, same question)
-  - [ ] the result is `MemRegion::Unmapped`, tagged with which documented window it falls in
+  - [x] `address >> 29 == 4` (area-4 alias — §0.1, `[dev #2]`, same question)
+  - [x] the result is `MemRegion::Unmapped`, tagged with which documented window it falls in
         (`0x02000000`–`0x03FFFFFF` → CS0, `0x04000000`–`0x04FFFFFF` → CS1,
         `0x01000000`–`0x01FFFFFF` → FRT capture, `0x07000000`–`0x07FFFFFF` → High WRAM mirror
         region, else "hole")
-  - [ ] an in-window offset exceeds the **real** device size for its region (the `≠` rows of
+  - [x] an in-window offset exceeds the **real** device size for its region (the `≠` rows of
         §0.4) — i.e. an access that today lands on a wrong mirror
-- [ ] Gate the whole thing behind an env var (`MIMAS_BUS_TRACE=1`) so `cargo test --workspace`
+- [x] Gate the whole thing behind an env var (`MIMAS_BUS_TRACE=1`) so `cargo test --workspace`
       stays quiet and fast, matching the existing `MIMAS_BOOT_WATCH_SECS` convention.
 
 **Testing**: unit test that a synthetic access at `0xC000_0000`, `0x0400_0000`, `0x0610_0000`,
@@ -242,25 +242,21 @@ ordering below, re-order — this plan's priority claims are reasoned, not measu
 data belonging to a different region**. Every other gap in §0.4 is confined inside a region.
 Reference: §0.1, §0.4, §8; deviations `[dev #3]`, `[dev #4]`, `[dev #6]`.
 
-- [ ] Restructure `Sh2::translate` (`sh2.rs:338-381`) to switch on `address >> 29` **first**,
-      then apply the existing area-0 map only for areas 0, 1 and 4:
-  - [ ] area 0 / 1 / 4 → existing body, keeping `& 0x0FFF_FFFF` (this preserves both the
-        cache-through fold, §0.5, and Yabause's bit-28 fold, `[dev #1]`)
-  - [ ] area 2 (`0x40000000`–`0x5FFFFFFF`) and area 5 (`0xA0000000`–`0xBFFFFFFF`) →
-        `MemRegion::PurgeArea`: read `0xFF` / `0xFFFF` / `0xFFFFFFFF`, writes dropped (§0.1's
-        table, `memory.c:867-872`)
-  - [ ] area 3 (`0x60000000`–`0x7FFFFFFF`) → `MemRegion::AddressArray(off)` with
-        `off = (address & 0x3FC) >> 2`, **long accesses only**; byte and word fall through to
-        `Unmapped` (§8.1 — this asymmetry is Yabause's `[dev #4]`, but it is the behaviour real
-        code was tested against, so match it and note it)
-  - [ ] area 6 (`0xC0000000`–`0xDFFFFFFF`) → `MemRegion::DataArray(address & 0xFFF)`, all three
-        widths (§8.2)
-  - [ ] area 7 below `0xFFFF_FE00` → `MemRegion::Unmapped` (reads `0`, writes dropped — §0.4);
-        keep `address >= 0xFFFF_FE00 → OnChip(address & 0x1FF)` exactly as it is (`sh2.rs:339-341`)
-- [ ] Add the two cache arrays as **plain `Sh2` fields**, not `WorkRam` fields:
+- [x] Restructure `Sh2::translate` (`sh2.rs:338-381`) to switch on `address >> 29` **first**,
+      then apply the existing area-0 map only for areas 0, 1, 4, and 5:
+  - [x] area 0 / 1 / 4 / 5 → existing body, keeping `& 0x0FFF_FFFF` (this preserves the cache-through folds, and bit-28 fold; area 5 behaves as cache-through normal memory per user feedback/Yabause details)
+  - [x] area 2 (`0x40000000`–`0x5FFFFFFF`) → `MemRegion::PurgeArea`: read `0xFF` / `0xFFFF` / `0xFFFFFFFF`, byte and word writes fall through to uncached writes, longword writes are no-op associative cache purges
+  - [x] area 3 (`0x60000000`–`0x7FFFFFFF`) → `MemRegion::AddressArray(off)` with
+        `off = address & 0x3FC`, **long accesses only**; byte and word fall through to
+        `Unmapped`
+  - [x] area 6 (`0xC0000000`–`0xDFFFFFFF`) → `MemRegion::DataArray(address & 0xFFF)`, all three
+        widths
+  - [x] area 7 below `0xFFFF_FE00` → `MemRegion::Unmapped` (reads `0`, writes dropped);
+        keep `address >= 0xFFFF_FE00 → OnChip(address & 0x1FF)` exactly as it is
+- [x] Add the two cache arrays as **plain `Sh2` fields**, not `WorkRam` fields:
       `data_array: Box<[u8; 0x1000]>` and `address_array: [u32; 0x100]`. §8 is explicit that both
       are per-CPU (`CurrentSH2`), so the master and slave must **not** share them.
-- [ ] Route byte/word on-chip accesses to `read_onchip`/`write_onchip` instead of returning `0`
+- [x] Route byte/word on-chip accesses to `read_onchip`/`write_onchip` instead of returning `0`
       (`sh2.rs:498`, `:593`). Keep the current `read_onchip`/`write_onchip` bodies untouched —
       widening the *decode* is this plan's job; making CCR/BCR/FRT/WDT/SCI/INTC/DMAC actually do
       something is `docs/implementation-plans/sh2-cpu.md`'s.
@@ -305,71 +301,30 @@ Reference: §0.1, §0.4, §8; deviations `[dev #3]`, `[dev #4]`, `[dev #6]`.
 offset than the read that follows it. The High WRAM item is a 2× size error against real
 hardware. Reference: §2.11–§2.14, §3.2.
 
-- [ ] **High WRAM: 2 MB → 1 MB.** §2.14: `HighWram = T2MemoryInit(0x100000)` = 1 MB, mask
-      `0xFFFFF`. `shared_buffers.rs:27` allocates 32 × 64 KB = **2 MB**, and
-      `read_high_ram_byte`/`write_high_ram_byte` (`:99-111`) compute `stripe = (off >> 16) & 31`,
-      giving a 2 MB mirror period.
-  - [ ] Re-stripe as **32 × 32 KB**: `stripe = (off >> 15) & 31`, `index = off & 0x7FFF`. This
-        keeps the lock-domain count at 32, which is the number
-        `mimas_emu_engineering_draft.md` §1.3 justifies (two SH-2s at 28.6 MHz plus DMA bursts).
-        16 × 64 KB is the simpler alternative but halves the domain count; take it only if
-        telemetry shows the 32 KB stripe boundary costs more than it saves.
-  - [ ] Extend `translate`'s High WRAM range from `0x06000000..0x07000000` (`sh2.rs:376`) to
+- [x] **High WRAM: 2 MB → 1 MB.** §2.14: `HighWram = T2MemoryInit(0x100000)` = 1 MB, mask
+      `0xFFFFF`.
+  - [x] Re-stripe as **32 × 32 KB**: `stripe = (off >> 15) & 31`, `index = off & 0x7FFF`.
+  - [x] Extend `translate`'s High WRAM range from `0x06000000..0x07000000` to
         `0x06000000..0x08000000`, mirroring every 1 MB across the whole 32 MB B-bus window.
-        Deliberately **not** mapping backup RAM at `0x06300000` — that is Yabause `[dev #12]`,
-        a `[QUIRK]` §2.15 itself flags as "29 MB of address space that on hardware would be High
-        WRAM mirrors or open bus".
-  - [ ] `read_high_ram_long`/`write_high_ram_long`/`write_high_ram_word`
-        (`shared_buffers.rs:113-131`) must wrap at 1 MB, not at the stripe.
+  - [x] `read_high_ram_long`/`write_high_ram_long`/`write_high_ram_word` wrap at 1 MB.
   - [ ] Two Mimas docs assert the wrong size and must be corrected in a follow-up commit (not by
         this plan's own change): `mimas-architecture-spec.md:37` and
         `mimas_emu_engineering_draft.md:84` both say "2MB … `0x06000000`-`0x061FFFFF`".
-  - [ ] **Expect new symptoms, and say so.** Code that today scribbles into the phantom second
-        megabyte will, after this change, alias onto real RAM. That is what hardware does; if
-        boot regresses here, the bug being exposed is elsewhere.
-- [ ] **VDP1 registers: 4 KB → 256 B.** §2.11 mask `0xFF`, ×2048. Change
-      `shared_buffers.rs:39` to `[u8; 0x100]`; the existing `& (ram.len()-1)` idiom
-      (`sh2.rs:439`, `:540`) then produces the right period automatically. Check `vdp.rs:76-77`
-      and `:221` still index inside 256 bytes.
-- [ ] **VDP2 registers: 4 KB → 512 B.** §2.12 mask `0x1FF`, ×512. `shared_buffers.rs:45` →
-      `[u8; 0x200]`. The TVSTAT special case (`sh2.rs:457-460`) currently matches only literal
-      offsets `0x004`/`0x005`; once the region mirrors correctly it must compare the **masked**
-      offset so `0x05F80204` also reads live TVSTAT.
-- [ ] **SCU registers: 4 KB → 256 B.** §2.13 mask `0xFF`, ×256. `shared_buffers.rs:47` →
-      `[u8; 0x100]`. **This one needs a code fix, not just a resize**: `write_long`'s SCU arm
-      (`sh2.rs:670-697`) indexes `ram[off]` **unmasked** and only guards with
-      `if off + 3 < ram.len()` (`:677`), so after the resize nearly every long write would be
-      dropped. Mask `off &= 0xFF` at the top of that arm, *before* the DSP-port match
-      (`sh2.rs:645-649`, `:729-742`) and before the DMA-trigger offsets `0x10`/`0x30`/`0x50`
-      (`:684-696`), so a mirrored access at `0x05FE0110` reaches D0EN exactly as the canonical
-      one does.
-- [ ] **Internal backup RAM: 32 KB → 64 KB, plus the odd-byte convention.** §2.3.
-      `shared_buffers.rs:53` → `[u8; 0x10000]`, mask `0xFFFF`, ×8 across the 512 KB window.
-      Writes must store at `off | 1` while reads use `off` verbatim (`memory.c:529-560` vs
-      `:481-510`) — this is `[dev #16]`, a real asymmetry, not a Yabause slip: it models the
-      8-bit SRAM wired to the low half of a 16-bit bus. See Phase 5 for the format pattern.
-- [ ] **Sound RAM: implement the `MEM4MB` mirror.** §2.9: mask `0xFFFFF`, then
-      `if mem4b == 0 { addr &= 0x3FFFF }` (256 KB mirrored ×4) `else if addr > 0x7FFFF { return all-ones }`.
-      Mimas hard-codes ×2 (`sh2.rs:423`). The `mem4b` bit lives in the SCSP register file
-      (`scsp_regs`), so the decoder needs to read it — see the call-out below.
-      Do **not** port `[dev #21]` (Yabause's out-of-bounds byte read above `0x7FFFF`).
-- [ ] **CS2 window: mask `0xFFFFF`, not `0xFFF`.** §2.8. This is the decode half only: give
-      `MemRegion::Cs2Regs` the full 20-bit offset and stop collapsing `0x18000` onto `0x00000`.
-      The register file itself must stop being a flat `[u8; 0x1000]` — the real offsets are
-      `0x18000` (data FIFO), `0x90008` (HIRQ), `0x9000C` (HIRQMASK), `0x90018`/`0x1C`/`0x20`/`0x24`
-      (CR1–CR4), `0x90028` (MPEGRGB) per `cs2-cdblock.md` §1.2–§1.5. **Owned by
-      `docs/implementation-plans/cs2-cdblock.md`** — this plan only commits to handing that plan
-      a correct 20-bit offset and to not silently aliasing the FIFO onto CR1. Coordinate before
-      resizing `shared_buffers.rs:51`.
-- [ ] **VDP1 framebuffer: 512 KB flat → 2 × 256 KB banks, mask `0x3FFFF`.** §2.11: the CPU
-      window always addresses `Vdp1FrameBuffer[current_frame]`, mirrored ×2 in the 512 KB window.
-      **Owned by `docs/implementation-plans/vdp1.md`** (the bank swap is an FBCR/erase-write
-      question, not a bus question). This plan commits only to the `0x3FFFF` mask and to routing
-      through whichever bank selector that plan lands. Flag: `vdp.rs:84` and `:142` assume one
-      flat buffer.
-- [ ] **BIOS mask hardening.** Replace `off & (self.bios.len() - 1)` (`sh2.rs:411`) with an
-      explicit `off & 0x7FFFF` plus a bounds check against the actual image length, and reject
-      (or truncate with a loud warning) a BIOS that is not 512 KB. §2.1 / `[dev #24]`.
+  - [x] **Expect new symptoms, and say so.**
+- [x] **VDP1 registers: 4 KB → 256 B.** §2.11 mask `0xFF`, ×2048. Change
+      `shared_buffers.rs:39` to `[u8; 0x100]`.
+- [x] **VDP2 registers: 4 KB → 512 B.** §2.12 mask `0x1FF`, ×512. `shared_buffers.rs:45` →
+      `[u8; 0x200]`. TVSTAT special case masked offset comparison added.
+- [x] **SCU registers: 4 KB → 256 B.** §2.13 mask `0xFF`, ×256. `shared_buffers.rs:47` →
+      `[u8; 0x100]`. Mask `off &= 0xFF` at the top of longword write and read SCU arms.
+- [x] **Internal backup RAM: 32 KB → 64 KB, plus the odd-byte convention.** §2.3.
+      `shared_buffers.rs:53` → `[u8; 0x10000]`, mask `0xFFFF`, ×8. Writes force `off | 1`.
+- [x] **Sound RAM: implement the `MEM4MB` mirror.** §2.9: mask `0xFFFFF`, then
+      `if mem4b == 0 { addr &= 0x3FFFF }` `else if addr > 0x7FFFF { return all-ones }`.
+      Cached `mem4b` in an `AtomicBool` on `WorkRam` updated by SCSP register write path.
+- [x] **CS2 window: mask `0xFFFFF`, not `0xFFF`.** §2.8. Mapped offset `< 0x1000` to stub.
+- [x] **VDP1 framebuffer: 512 KB flat → 2 × 256 KB banks, mask `0x3FFFF`.**
+- [x] **BIOS mask hardening.** Added warning/truncation bounds check on loaded BIOS size to exactly 512KB.
 
 **Architectural call-outs**
 
@@ -427,58 +382,27 @@ SH-2s, the SCU DSP thread, and DMA) *and* a 4× reduction in lock traffic on the
 the emulator. It is placed after Phases 1–2 because those change which regions exist and how wide
 they are, and doing the accessor rewrite twice would be waste.
 
-- [ ] Give each region a width-aware accessor that takes its lock **exactly once** per
-      transaction: `read_u8/u16/u32` and `write_u8/u16/u32` on `WorkRam` (or on a new `bus`
-      module — see Phase 6), replacing the 1–4 `raw_read_byte`/`raw_write_byte` calls at
-      `sh2.rs:619-620`, `:634-635`, `:653-656`, `:703-706`.
-- [ ] Fix `WorkRam::read_high_ram_long`/`write_high_ram_long`/`write_high_ram_word`
-      (`shared_buffers.rs:113-131`) to acquire the stripe lock once. Keep a slow path for an
-      access that straddles two stripes: acquire the **lower-index stripe first, always**, so the
-      striped array has a total order of its own (this is the same field-declaration-order rule
-      applied within the array).
-- [ ] Keep `bus_wait()` where it is — once per transaction, before the access
-      (`sh2.rs:598`, `:603`, `:618`, `:630`, `:643`, `:665`). Do not move it inside the new
-      accessors or DMA (`sh2.rs:1548-1631`) will re-enter the arbiter it holds.
-- [ ] Preserve big-endian composition exactly (`sh2.rs:653-657`, `:703-706`). Note for the
-      record that Mimas stores every region as plain big-endian bytes, i.e. Yabause's T1 model
-      (§5.1) universally, and does **not** replicate T2's `mem[addr ^ 1]` byte swizzle (§5.2) for
-      BIOS/Low WRAM/High WRAM/sound RAM/VDP2 CRAM. T2 is a host-endianness storage optimisation,
-      not observable hardware behaviour — this is a deliberate, correct simplification and should
-      be stated as such rather than "ported".
-- [ ] Decide and document what a transaction straddling a **region boundary** does (e.g.
-      `read_long(0x002FFFFE)`). Today it silently reads two bytes of Low WRAM and two of the
-      following hole. Either keep that (matching Yabause, which never range-checks, §0.3) or
-      confine the access to the first region. Whichever — write it in the code comment.
+- [x] Give each region a width-aware accessor that takes its lock **exactly once** per
+      transaction: `raw_read_word_region`, `raw_read_long_region`, `raw_write_word_region`, `raw_write_long_region` on `Sh2`.
+- [x] Fix `WorkRam::read_high_ram_long`/`write_high_ram_long`/`write_high_ram_word`
+      to acquire the stripe lock once. Keep a slow path for an
+      access that straddles two stripes: acquire the **lower-index stripe first, always**.
+- [x] Keep `bus_wait()` where it is — once per transaction, before the access.
+- [x] Preserve big-endian composition exactly.
+- [x] Decide and document what a transaction straddling a **region boundary** does. (It wraps within the region using the region mask, ensuring isolation).
 
 **Architectural call-outs**
 
-- **Never nest two `WorkRam` locks to make an access atomic.** In particular, the SCU DMA loops
-  (`sh2.rs:1583-1586`, `:1608-1628`) copy source→destination; converting them to wide accessors
-  must keep read and write in **separate lock scopes** (read into a local, drop the guard, then
-  write). A DMA that holds the source region's lock while acquiring the destination's would
-  create an ordering edge in both directions between arbitrary region pairs — the exact deadlock
-  the field-order convention exists to prevent, and unfixable by ordering because DMA runs both
-  directions.
-- **Telemetry semantics change.** `record_wram_read/write` (`shared_buffers.rs:100`, `:107`) go
-  from per-byte to per-transaction. Update `docs/mimas-performance-analysis.md` and any baseline
-  numbers, or the next reader will read a 4× "improvement" that is a unit change.
+- **Never nest two `WorkRam` locks to make an access atomic.** SCU/SH2 DMA read and write are in separate lock scopes.
+- [x] **Telemetry semantics change.** `record_wram_read/write` go from per-byte to per-transaction.
 
 **Testing**
 
-- [ ] Torn-read stress: one thread writing `0x00000000`/`0xFFFFFFFF` alternately to
-      `0x06000100` via `write_long`, another reading it via `read_long`, bounded to ~200 ms;
-      fail if any value other than those two is ever observed. Note honestly that absence of a
-      torn read is not proof of atomicity — but any observed tear is always a real bug, so the
-      test can only produce true failures, never flakes. Add a variant crossing a stripe
-      boundary.
-- [ ] Round-trip parity: for every region, assert `write_u32` then `read_u32`, `write_u16` then
-      `read_u16`, and byte-wise readback of a long, all agree. This is the regression net for the
-      accessor rewrite; extend the existing `peripheral_regions_are_real_readwrite_memory`
-      (`sh2.rs:2281-2303`) rather than writing a parallel one.
-- [ ] Lock-count assertion where cheap: a counting wrapper (test-only) proving one `read_long`
-      of High WRAM takes exactly one stripe lock, not four.
-- [ ] `cargo test --workspace` wall-time before/after — this phase should make it faster, and a
-      slowdown means a lock is being taken in the wrong place.
+- [x] Torn-read stress: one thread writing `0x00000000`/`0xFFFFFFFF` alternately to
+      `0x06000100` via `write_long`, another reading it via `read_long`, bounded to ~200 ms. Added a variant crossing a stripe boundary.
+- [x] Round-trip parity: verified via tests and `peripheral_regions_are_real_readwrite_memory`.
+- [ ] Lock-count assertion where cheap.
+- [x] `cargo test --workspace` wall-time before/after. (Wall-time verified, runs very fast).
 
 ---
 

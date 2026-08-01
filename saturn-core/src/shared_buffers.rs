@@ -24,7 +24,7 @@ use std::sync::RwLock;
 /// order the fields are declared below, to avoid a lock-ordering deadlock.
 pub struct WorkRam {
     pub low_ram: RwLock<Box<[u8; 0x100000]>>,  // 1MB Low Work RAM (0x00200000-0x002FFFFF)
-    pub high_ram: [RwLock<Box<[u8; 0x10000]>>; 32], // 32 stripes of 64KB = 2MB High Work RAM (0x06000000-0x061FFFFF)
+    pub high_ram: [RwLock<Box<[u8; 0x8000]>>; 32], // 32 stripes of 32KB = 1MB High Work RAM (0x06000000-0x06FFFFFF mirrored)
     /// SCSP Sound RAM, real size 512KB (0x05A00000-0x05AFFFFF).
     pub sound_ram: RwLock<Box<[u8; 0x80000]>>,
     /// SCSP register block, separate from Sound RAM on real hardware
@@ -36,21 +36,21 @@ pub struct WorkRam {
     /// one flat window), 512KB (0x05C80000-0x05CFFFFF).
     pub vdp1_framebuffer: RwLock<Box<[u8; 0x80000]>>,
     /// VDP1 registers (0x05D00000-0x05D7FFFF).
-    pub vdp1_regs: RwLock<Box<[u8; 0x1000]>>,
+    pub vdp1_regs: RwLock<Box<[u8; 0x100]>>,
     /// VDP2 VRAM, real size 512KB (0x05E00000-0x05E7FFFF).
     pub vdp2_vram: RwLock<Box<[u8; 0x80000]>>,
     /// VDP2 color RAM / palette, real size 4KB (0x05F00000-0x05F00FFF).
     pub vdp2_cram: RwLock<Box<[u8; 0x1000]>>,
     /// VDP2 registers (0x05F80000-0x05FBFFFF).
-    pub vdp2_regs: RwLock<Box<[u8; 0x1000]>>,
+    pub vdp2_regs: RwLock<Box<[u8; 0x200]>>,
     /// SCU registers (0x05FE0000-0x05FEFFFF).
-    pub scu_regs: RwLock<Box<[u8; 0x1000]>>,
+    pub scu_regs: RwLock<Box<[u8; 0x100]>>,
     /// CS2 / CD-ROM block registers (0x05800000-0x058FFFFF). The real CD
     /// command protocol lives in `Cdrom` (CR1-4/HIRQ/DTR); this is a plain
     /// memory stub until that's wired into the CPU's address space.
     pub cs2_regs: RwLock<Box<[u8; 0x1000]>>,
-    /// Internal backup RAM, real size 32KB (0x00180000-0x001FFFFF).
-    pub backup_ram: RwLock<Box<[u8; 0x8000]>>,
+    /// Internal backup RAM, real size 64KB (0x00180000-0x001FFFFF).
+    pub backup_ram: RwLock<Box<[u8; 0x10000]>>,
     /// SMPC register file, real 0x80-byte window (0x00100000-0x0017FFFF,
     /// mirrored -- see `Sh2::translate`'s `& 0x7F`). Real registers live
     /// only at odd byte offsets (IREG0-6 at 0x01-0x0D, COMREG at 0x1F,
@@ -59,12 +59,13 @@ pub struct WorkRam {
     /// against Yabause's `SmpcReadByte`'s `SmpcRegsT[addr >> 1]` indexing
     /// and its register-offset `switch` in `smpc.c`.
     pub smpc_regs: RwLock<Box<[u8; 0x80]>>,
+    pub mem4b: std::sync::atomic::AtomicBool,
 }
 
 impl WorkRam {
     pub fn new() -> Self {
-        let high_ram: [RwLock<Box<[u8; 0x10000]>>; 32] = std::array::from_fn(|_| {
-            RwLock::new(vec![0; 0x10000].into_boxed_slice().try_into().unwrap())
+        let high_ram: [RwLock<Box<[u8; 0x8000]>>; 32] = std::array::from_fn(|_| {
+            RwLock::new(vec![0; 0x8000].into_boxed_slice().try_into().unwrap())
         });
         Self {
             low_ram: RwLock::new(vec![0; 0x100000].into_boxed_slice().try_into().unwrap()),
@@ -73,14 +74,15 @@ impl WorkRam {
             scsp_regs: RwLock::new(vec![0; 0x1000].into_boxed_slice().try_into().unwrap()),
             vdp1_vram: RwLock::new(vec![0; 0x80000].into_boxed_slice().try_into().unwrap()),
             vdp1_framebuffer: RwLock::new(vec![0; 0x80000].into_boxed_slice().try_into().unwrap()),
-            vdp1_regs: RwLock::new(vec![0; 0x1000].into_boxed_slice().try_into().unwrap()),
+            vdp1_regs: RwLock::new(vec![0; 0x100].into_boxed_slice().try_into().unwrap()),
             vdp2_vram: RwLock::new(vec![0; 0x80000].into_boxed_slice().try_into().unwrap()),
             vdp2_cram: RwLock::new(vec![0; 0x1000].into_boxed_slice().try_into().unwrap()),
-            vdp2_regs: RwLock::new(vec![0; 0x1000].into_boxed_slice().try_into().unwrap()),
-            scu_regs: RwLock::new(vec![0; 0x1000].into_boxed_slice().try_into().unwrap()),
+            vdp2_regs: RwLock::new(vec![0; 0x200].into_boxed_slice().try_into().unwrap()),
+            scu_regs: RwLock::new(vec![0; 0x100].into_boxed_slice().try_into().unwrap()),
             cs2_regs: RwLock::new(vec![0; 0x1000].into_boxed_slice().try_into().unwrap()),
-            backup_ram: RwLock::new(vec![0; 0x8000].into_boxed_slice().try_into().unwrap()),
+            backup_ram: RwLock::new(vec![0; 0x10000].into_boxed_slice().try_into().unwrap()),
             smpc_regs: RwLock::new(vec![0; 0x80].into_boxed_slice().try_into().unwrap()),
+            mem4b: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -98,36 +100,147 @@ impl WorkRam {
 
     pub fn read_high_ram_byte(&self, off: usize) -> u8 {
         crate::telemetry::record_wram_read();
-        let stripe = (off >> 16) & 31;
-        let index = off & 0xFFFF;
+        let off = off & 0xFFFFF;
+        let stripe = (off >> 15) & 31;
+        let index = off & 0x7FFF;
         self.high_ram[stripe].read().unwrap()[index]
     }
 
     pub fn write_high_ram_byte(&self, off: usize, val: u8) {
         crate::telemetry::record_wram_write();
-        let stripe = (off >> 16) & 31;
-        let index = off & 0xFFFF;
+        let off = off & 0xFFFFF;
+        let stripe = (off >> 15) & 31;
+        let index = off & 0x7FFF;
         self.high_ram[stripe].write().unwrap()[index] = val;
     }
 
     pub fn read_high_ram_long(&self, off: usize) -> u32 {
-        let b0 = self.read_high_ram_byte(off) as u32;
-        let b1 = self.read_high_ram_byte(off + 1) as u32;
-        let b2 = self.read_high_ram_byte(off + 2) as u32;
-        let b3 = self.read_high_ram_byte(off + 3) as u32;
-        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+        crate::telemetry::record_wram_read();
+        let off = off & 0xFFFFF;
+        let stripe = (off >> 15) & 31;
+        let index = off & 0x7FFF;
+        if index + 3 < 0x8000 {
+            let ram = self.high_ram[stripe].read().unwrap();
+            let b0 = ram[index] as u32;
+            let b1 = ram[index + 1] as u32;
+            let b2 = ram[index + 2] as u32;
+            let b3 = ram[index + 3] as u32;
+            (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+        } else {
+            // Straddling path: acquire lower-index stripe lock first
+            let stripe1 = stripe;
+            let stripe2 = (stripe1 + 1) & 31;
+            let (first, second) = if stripe1 < stripe2 {
+                (stripe1, stripe2)
+            } else {
+                (stripe2, stripe1)
+            };
+            let lock_first = self.high_ram[first].read().unwrap();
+            let lock_second = self.high_ram[second].read().unwrap();
+            let mut val = 0u32;
+            for i in 0..4 {
+                let curr_off = off + i;
+                let curr_stripe = (curr_off >> 15) & 31;
+                let curr_index = curr_off & 0x7FFF;
+                let byte = if curr_stripe == first {
+                    lock_first[curr_index]
+                } else {
+                    lock_second[curr_index]
+                };
+                val = (val << 8) | (byte as u32);
+            }
+            val
+        }
     }
 
     pub fn write_high_ram_long(&self, off: usize, val: u32) {
-        self.write_high_ram_byte(off, (val >> 24) as u8);
-        self.write_high_ram_byte(off + 1, (val >> 16) as u8);
-        self.write_high_ram_byte(off + 2, (val >> 8) as u8);
-        self.write_high_ram_byte(off + 3, val as u8);
+        crate::telemetry::record_wram_write();
+        let off = off & 0xFFFFF;
+        let stripe = (off >> 15) & 31;
+        let index = off & 0x7FFF;
+        if index + 3 < 0x8000 {
+            let mut ram = self.high_ram[stripe].write().unwrap();
+            ram[index] = (val >> 24) as u8;
+            ram[index + 1] = (val >> 16) as u8;
+            ram[index + 2] = (val >> 8) as u8;
+            ram[index + 3] = val as u8;
+        } else {
+            let stripe1 = stripe;
+            let stripe2 = (stripe1 + 1) & 31;
+            let (first, second) = if stripe1 < stripe2 {
+                (stripe1, stripe2)
+            } else {
+                (stripe2, stripe1)
+            };
+            let mut lock_first = self.high_ram[first].write().unwrap();
+            let mut lock_second = self.high_ram[second].write().unwrap();
+            for i in 0..4 {
+                let curr_off = off + i;
+                let curr_stripe = (curr_off >> 15) & 31;
+                let curr_index = curr_off & 0x7FFF;
+                let byte = (val >> (8 * (3 - i))) as u8;
+                if curr_stripe == first {
+                    lock_first[curr_index] = byte;
+                } else {
+                    lock_second[curr_index] = byte;
+                }
+            }
+        }
     }
 
     pub fn write_high_ram_word(&self, off: usize, val: u16) {
-        self.write_high_ram_byte(off, (val >> 8) as u8);
-        self.write_high_ram_byte(off + 1, val as u8);
+        crate::telemetry::record_wram_write();
+        let off = off & 0xFFFFF;
+        let stripe = (off >> 15) & 31;
+        let index = off & 0x7FFF;
+        if index + 1 < 0x8000 {
+            let mut ram = self.high_ram[stripe].write().unwrap();
+            ram[index] = (val >> 8) as u8;
+            ram[index + 1] = val as u8;
+        } else {
+            let stripe1 = stripe;
+            let stripe2 = (stripe1 + 1) & 31;
+            let (first, second) = if stripe1 < stripe2 {
+                (stripe1, stripe2)
+            } else {
+                (stripe2, stripe1)
+            };
+            let mut lock_first = self.high_ram[first].write().unwrap();
+            let mut lock_second = self.high_ram[second].write().unwrap();
+            if stripe1 == first {
+                lock_first[index] = (val >> 8) as u8;
+                lock_second[0] = val as u8;
+            } else {
+                lock_second[index] = (val >> 8) as u8;
+                lock_first[0] = val as u8;
+            }
+        }
+    }
+
+    pub fn read_high_ram_word(&self, off: usize) -> u16 {
+        crate::telemetry::record_wram_read();
+        let off = off & 0xFFFFF;
+        let stripe = (off >> 15) & 31;
+        let index = off & 0x7FFF;
+        if index + 1 < 0x8000 {
+            let ram = self.high_ram[stripe].read().unwrap();
+            let b0 = ram[index] as u16;
+            let b1 = ram[index + 1] as u16;
+            (b0 << 8) | b1
+        } else {
+            let stripe1 = stripe;
+            let stripe2 = (stripe1 + 1) & 31;
+            let (first, second) = if stripe1 < stripe2 {
+                (stripe1, stripe2)
+            } else {
+                (stripe2, stripe1)
+            };
+            let lock_first = self.high_ram[first].read().unwrap();
+            let lock_second = self.high_ram[second].read().unwrap();
+            let val1 = if first == stripe1 { lock_first[index] } else { lock_second[index] };
+            let val2 = if second == stripe2 { lock_second[0] } else { lock_first[0] };
+            (val1 as u16) << 8 | (val2 as u16)
+        }
     }
 
     /// Atomic Test-And-Set byte transaction for TAS.B.
@@ -142,10 +255,10 @@ impl WorkRam {
             let val = ram[index];
             ram[index] = val | 0x80;
             Some(val)
-        } else if (0x0600_0000..0x0700_0000).contains(&a) {
-            let off = (a - 0x0600_0000) as usize;
-            let stripe = (off >> 16) & 31;
-            let index = off & 0xFFFF;
+        } else if (0x0600_0000..0x0800_0000).contains(&a) {
+            let off = ((a - 0x0600_0000) & 0xFFFFF) as usize;
+            let stripe = (off >> 15) & 31;
+            let index = off & 0x7FFF;
             let mut ram = self.high_ram[stripe].write().unwrap();
             let val = ram[index];
             ram[index] = val | 0x80;

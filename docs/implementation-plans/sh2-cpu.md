@@ -858,27 +858,15 @@ opcode or an unmodelled address stops being silent.
       opcodes are silent no-ops. P3-1 breaks both. Update them to use `NOP` (`0x0009`)
       — which is what they clearly meant, given `test_tier1_f3_sh2_nop_execution`
       already does exactly that — and add the illegal-opcode assertions as new tests.
-      `cargo test --workspace` must be green in the same commit (`CLAUDE.md`).
-
----
-
-## Phase 4 — On-chip register file: storage, reset values, byte/word/long dispatch
-
-**Unblocks:** everything in Phases 5-13. Also plausibly a live boot wall on its own: real
-BIOS reset code configures the bus state controller (`BCR1`, `BCR2`, `WCR`, `MCR`), the
-cache (`CCR`), standby (`SBYCR`) and the interrupt priorities (`IPRA`, `IPRB`, `VCRx`)
-within its first few hundred instructions, and any read-back verify of those currently
-sees zero.
-
-- [ ] **P4-1.** Introduce an `OnChip` struct in `sh2.rs` (or a new
+      `cargo test --workspace` must be - [x] **P4-1.** Introduce an `OnChip` struct in `sh2.rs` (or a new
       `saturn-core/src/sh2_onchip.rs` module re-exported from `sh2.rs`) holding every
       register in §0.4's table with its HR §11.1 reset value. Port the *layout and reset
       values*, not Yabause's `Onchip_struct` C shape (`CLAUDE.md`: "Port what the
       hardware does, never transliterate Yabause's C data structures").
-- [ ] **P4-2.** Move the 8 existing DIVU fields (`sh2.rs:165-172`) into it. They are
+- [x] **P4-2.** Move the 8 existing DIVU fields (`sh2.rs:165-172`) into it. They are
       `pub` today and read by `test_onchip_division` only through `read_long`/`write_long`,
       so no test depends on the field names — verify with a grep before moving.
-- [ ] **P4-3 (D-11).** Route `MemRegion::OnChip` through byte, word **and** long paths:
+- [x] **P4-3 (D-11).** Route `MemRegion::OnChip` through byte, word **and** long paths:
       - `raw_read_byte_region` (`sh2.rs:405`): replace the
         `MemRegion::Unmapped | MemRegion::OnChip(_) => 0` arm (`sh2.rs:498`) with a call
         to `read_onchip_byte(off)`.
@@ -893,7 +881,7 @@ sees zero.
       HR §11.1 is explicit that some registers exist at both a long offset and a word
       offset (the BSC block at `0x1E0` long / `0x1E2` word), and that DIVU is mirrored at
       `0x100`- and `0x120`-blocks. Preserve both.
-- [ ] **P4-4 INTC storage + write masking** (HR §11.4). Exact per-register behaviour:
+- [x] **P4-4 INTC storage + write masking** (HR §11.4). Exact per-register behaviour:
       - `IPRA` `0x0E2`: byte@`0x0E2` → `IPRA = (val << 8) | (IPRA & 0x00FF)`;
         byte@`0x0E3` → `IPRA = (IPRA & 0xFF00) | (val & 0xF0)`; word → `IPRA = val & 0xFFF0`.
       - `IPRB` `0x060`: byte@`0x060` → `IPRB = val << 8` (**low byte destroyed** — HR calls
@@ -907,19 +895,19 @@ sees zero.
       - `ICR` `0x0E0`: byte@`0x0E0` → `ICR = ((val & 1) << 8) | (ICR & 0xFEFF)`;
         byte@`0x0E1` → `ICR = (ICR & 0xFFFE) | (val & 1)`; word → `ICR = val & 0x0101`.
         Bit 15 is set only by NMI (Phase 5).
-- [ ] **P4-5 CCR storage** (HR §11.7). Offset `0x092`, readable as byte and as word,
+- [x] **P4-5 CCR storage** (HR §11.7). Offset `0x092`, readable as byte and as word,
       written identically by both paths: `CCR = val & 0xCF`; `if (val & 0x10) purge`;
       `if (CCR & 1) enable else disable`. Until Phase 11 the purge/enable/disable calls
       are no-ops with a comment; the **stored value and its `0xCF` mask must be right
       now**, because bit 5 always reading back 0 is exactly the kind of thing a BIOS
       read-back verify checks.
-- [ ] **P4-6 SBYCR** (HR §11.10). Offset `0x091`, write `SBYCR = val & 0xDF`, reset
+- [x] **P4-6 SBYCR** (HR §11.10). Offset `0x091`, write `SBYCR = val & 0xDF`, reset
       `0x60`. HR: **there is no read path** in the reference — decide explicitly whether
       to match (returns whatever the "unhandled" default is) or to add one. Recommended:
       add a read path returning the stored value, and comment that the reference lacks
       one; a register the BIOS can write but not read is far more likely to be a Yabause
       omission than hardware behaviour, and HR does not claim otherwise.
-- [ ] **P4-7 BSC storage** (HR §11.9). All seven registers, long offsets `0x1E0`,
+- [x] **P4-7 BSC storage** (HR §11.9). All seven registers, long offsets `0x1E0`,
       `0x1E4`, `0x1E8`, `0x1EC`, `0x1F0`, `0x1F4`, `0x1F8`; word **read** aliases at
       base+2 (`0x1E2`, `0x1E6`, `0x1EA`, `0x1EE`, `0x1F2`, `0x1F6`, `0x1FA`); writes exist
       only on the long path. Masks: `BCR1 = (BCR1 & 0x8000) | (val & 0x1FF7)` (bit 15
@@ -927,30 +915,30 @@ sees zero.
       `MCR = val & 0xFEFC`; `RTCSR = val & 0xF8`; `RTCNT` **no write path**;
       `RTCOR = val & 0xFF`. HR §11.9 is explicit that these are pure storage — no wait
       states, no refresh counting — so implement storage and say so.
-- [ ] **P4-8 BCR1 MASTER bit (D-19, part 1).** Set `BCR1 = 0x0000` for the master and
+- [x] **P4-8 BCR1 MASTER bit (D-19, part 1).** Set `BCR1 = 0x0000` for the master and
       `0x8000` for the slave at construction, and have the on-chip reset preserve bit 15
       while forcing `| 0x03F0` (HR §4, §11.1). This is the first thing `is_slave`
       (`sh2.rs:66`) actually drives.
-- [ ] **P4-9 SCI storage** (HR §11.2). Six byte registers `0x000`-`0x005` with reset
+- [x] **P4-9 SCI storage** (HR §11.2). Six byte registers `0x000`-`0x005` with reset
       values `0x00`/`0xFF`/`0x00`/`0xFF`/`0x84`/`0x00`. Two behaviours beyond storage:
       writing `SCR` with bit 5 clear sets `SSR |= 0x80` (TDRE); writing `SSR` with bit 7
       clear while `SCR & 0x20` calls the (no-op) transmit. `RDR` is not writable. HR §11.2
       says the SCI is fully stubbed in the reference — match, and say so.
-- [ ] **P4-10 DRCR0/DRCR1** (HR §11.8). Offsets `0x071`/`0x072`, `val & 0x3`, stored and
+- [x] **P4-10 DRCR0/DRCR1** (HR §11.8). Offsets `0x071`/`0x072`, `val & 0x3`, stored and
       **never read by anything**. Pure storage, one line each.
-- [ ] **P4-11 "Unhandled onchip" logging.** Any offset with no arm should hit the P3-3
+- [x] **P4-11 "Unhandled onchip" logging.** Any offset with no arm should hit the P3-3
       dedup logger with an `[ONCHIP]` tag. HR §11.11 notes the reference itself logs
       unhandled on-chip accesses; that log is how the next boot run tells you which
       register to implement next.
-
-### Phase 4 testing
-
-- [ ] **P4-T1 reset values.** One test asserting the reset value of every register in
+ 
+ ### Phase 4 testing
+ 
+- [x] **P4-T1 reset values.** One test asserting the reset value of every register in
       §0.4's table, read back through the width HR says it is readable at. The expected
       column comes verbatim from HR §11.1 (which cites `sh2core.c:1076-1129`) — a table
       transcribed from a document, not from the implementation. This single test is worth
       more than any other in the phase: it catches every transposed constant at once.
-- [ ] **P4-T2 write masking.** For each masked register, write `0xFFFFFFFF` (or `0xFF`)
+- [x] **P4-T2 write masking.** For each masked register, write `0xFFFFFFFF` (or `0xFF`)
       and assert the exact read-back: `IPRA → 0xFFF0`; `IPRB → 0xFF00`;
       `VCRA/B/C/D → 0x7F7F`; `VCRWDT → 0x7F7F`; `ICR → 0x0101`; `CCR → 0xCF`;
       `SBYCR → 0xDF`; `BCR1 → 0x9FF7` on master / `0x9FF7` with bit 15 forced on slave
@@ -958,17 +946,17 @@ sees zero.
       `MCR → 0xFEFC`; `RTCSR → 0xF8`; `RTCOR → 0xFF`; `DVCR → 0x3`; `TCR → 0x83`;
       `TOCR → 0xF3`; `DRCR0/1 → 0x3`; `BBRA → 0xFF`; `BRCR → 0xF4DC`; `TCR0 → 0xFFFFFF`;
       `DMAOR → 0xF`; `VCRDMA0/1 → 0xFFFF`. All derived from HR §11's tables.
-- [ ] **P4-T3 destructive-byte-write quirks.** `IPRB` byte-write at `0x060` must destroy
+- [x] **P4-T3 destructive-byte-write quirks.** `IPRB` byte-write at `0x060` must destroy
       the low byte; `VCRD` byte-write at `0x068` must clear the low byte; byte writes at
       `0x061` and `0x069` must be ignored. These are HR-documented irregularities that a
       "reasonable" implementation would get wrong, so pin them individually with the HR
       §11.4 citation in the test name or comment.
-- [ ] **P4-T4 access-width matrix.** For a representative register of each width, prove
+- [x] **P4-T4 access-width matrix.** For a representative register of each width, prove
       all three widths behave per HR: `CCR` (byte and word both write); `BCR1` (long
       write, word read at `+2`, **no** word write); `DVSR` (long only, mirrored at
       `0x120`); `WTCNT` (byte only). A generic "every register readable at every width"
       test would be wrong — the widths are part of the hardware contract.
-- [ ] **P4-T5 master/slave BCR1.** `Sh2::new(false, …)` → `BCR1 & 0x8000 == 0`;
+- [x] **P4-T5 master/slave BCR1.** `Sh2::new(false, …)` → `BCR1 & 0x8000 == 0`;
       `Sh2::new(true, …)` → `BCR1 & 0x8000 != 0`; after `reset()`, bit 15 survives and
       bits `0x03F0` are set. HR §4.
 
@@ -979,7 +967,7 @@ sees zero.
 **Unblocks:** every on-chip interrupt source (FRT, WDT, DIVU, DMAC, UBC) and SMPC NMI.
 Also removes the hardcoded if/else chain that cannot express more than 4 sources.
 
-- [ ] **P5-1 Pending queue** (HR §10.1). `Vec`-or-array-backed queue of
+- [x] **P5-1 Pending queue** (HR §10.1). `Vec`-or-array-backed queue of
       `{ vector: u8, level: u8 }`, capacity 50 (`MAX_INTERRUPTS`). Semantics to match
       exactly:
       - `send(vector, level)`: **dedupe by vector only** — if a queued entry already has
@@ -993,13 +981,13 @@ Also removes the hardcoded if/else chain that cannot express more than 4 sources
         distinct vectors. **Deliberately diverge**: in Rust, cap the queue and log via the
         P3-3 dedup logger. Record the divergence in a comment — this is a case where
         matching the reference means reproducing a buffer overrun.
-- [ ] **P5-2 Delivery** (HR §10.2, §10.3). Replace
+- [x] **P5-2 Delivery** (HR §10.2, §10.3). Replace
       `service_pending_interrupt` (`sh2.rs:908-952`) body: inspect **only** the last queue
       entry; deliver iff `level > (sr >> 4) & 0xF`; deliver exactly **one** per call. The
       push/vector/mask sequence at `sh2.rs:945-951` is already correct — keep it verbatim,
       including the "0 cycles charged" property (HR §13). Add the `level == 0x10 → SR.I = 0xF`
       clamp for NMI.
-- [ ] **P5-3 Migrate the four existing sources.** `vblank_pending`, `vblank_out_pending`,
+- [x] **P5-3 Migrate the four existing sources.** `vblank_pending`, `vblank_out_pending`,
       `smpc_irq_pending` and `sound_req_irq` become `send(vector, level)` calls with the
       existing constants (`sh2.rs:193-222`): `(0x40, 15)`, `(0x41, 14)`, `(0x46, 9)`,
       `(0x47, 8)`. **Keep the public `request_vblank_interrupt()` /
@@ -1007,10 +995,10 @@ Also removes the hardcoded if/else chain that cannot express more than 4 sources
       fields as thin wrappers** — `lib.rs`, `m68k.rs` and 6+ unit tests reference them
       directly. Deleting them is a needless API break; `CLAUDE.md`'s stability rule is
       about `Sh2::new()` specifically but the spirit applies.
-- [ ] **P5-4 NMI (D-20)** (HR §10.4). `pub fn nmi(&mut self)`: `ICR |= 0x8000`, then
+- [x] **P5-4 NMI (D-20)** (HR §10.4). `pub fn nmi(&mut self)`: `ICR |= 0x8000`, then
       `send(0xB, 0x10)`. Wire nothing to it yet — SMPC's `MSHNMI`/`SYSRES` commands belong
       to `docs/implementation-plans/smpc-peripheral.md`; leave a pointer there.
-- [ ] **P5-5 Cross-thread source injection (A-1).** The four migrated sources arrive from
+- [x] **P5-5 Cross-thread source injection (A-1).** The four migrated sources arrive from
       *other threads* today (`sound_req_irq` is an `Arc<AtomicBool>` written by Core 4's
       M68K; VBLANK is generated in `Sh2::run_loop` itself but belongs on Core 3). A shared
       queue therefore needs interior mutability. Use the existing pattern:
@@ -1019,12 +1007,12 @@ Also removes the hardcoded if/else chain that cannot express more than 4 sources
       (`sh2.rs:163`, `lib.rs:139`) and `sound_req_irq` (`sh2.rs:148`, `lib.rs:137`) already
       work. **Do not change `Sh2::new()`'s signature.** When `None`, fall back to a
       CPU-local queue so bare unit tests keep working unchanged.
-- [ ] **P5-6 Waking a parked core.** Delivery to a core that is parked in
+- [x] **P5-6 Waking a parked core.** Delivery to a core that is parked in
       `LockStepSync::park_while_inactive` must call `sync.set_thread_active(core_id, true)`.
       Relevant today for Core 1 (parked until `SSHON`) and, after P2-1's parking lands,
       for a sleeping Core 0. Use `LockStepSync`'s park condvar, never the drift condvar —
       see `sync.rs`'s doc comment on why.
-- [ ] **P5-7 Do not couple this to `BusArbiter`.** Interrupt delivery performs two
+- [x] **P5-7 Do not couple this to `BusArbiter`.** Interrupt delivery performs two
       `write_long`s and one `read_long`, which already go through `bus_wait()`
       (`sh2.rs:383`) like any other access. No new arbitration is needed. Record that,
       because "interrupts must coordinate through the arbiter" is a plausible-sounding
@@ -1032,21 +1020,21 @@ Also removes the hardcoded if/else chain that cannot express more than 4 sources
 
 ### Phase 5 testing
 
-- [ ] **P5-T1 sort/dedupe invariants.** Push `(vector=0x40, level=15)`,
+- [x] **P5-T1 sort/dedupe invariants.** Push `(vector=0x40, level=15)`,
       `(0x47, 8)`, `(0x41, 14)`, then `(0x40, 2)` again. Assert: the queue holds 3
       entries (the duplicate vector rejected), the last entry is level 15, and the level
       of the first `0x40` entry is **still 15** (HR §10.1: "the level of the existing
       entry is *not* upgraded"). That last assertion is the one that distinguishes a
       faithful port from a "sensible" one.
-- [ ] **P5-T2 strictly-greater masking.** With `SR.I = 8`, a level-8 interrupt must
+- [x] **P5-T2 strictly-greater masking.** With `SR.I = 8`, a level-8 interrupt must
       **not** be delivered and a level-9 one must be (HR §10.2's `>` not `>=`). Also
       assert a level-0 interrupt is never deliverable at any mask.
-- [ ] **P5-T3 one per call.** Two deliverable interrupts queued → one `step()` takes
+- [x] **P5-T3 one per call.** Two deliverable interrupts queued → one `step()` takes
       exactly one, and the second is still queued.
-- [ ] **P5-T4 NMI clamp.** `nmi()` then deliver: `PC == [VBR + 0x2C]` (vector 11),
+- [x] **P5-T4 NMI clamp.** `nmi()` then deliver: `PC == [VBR + 0x2C]` (vector 11),
       `SR.I == 0xF` (not 16), `ICR & 0x8000 != 0`. Vector arithmetic `0xB * 4 = 0x2C`
       computed in the comment.
-- [ ] **P5-T5 no regression.** All six existing interrupt tests
+- [x] **P5-T5 no regression.** All six existing interrupt tests
       (`vblank_interrupt_masked_stays_pending` `sh2.rs:2076`,
       `vblank_interrupt_enters_and_returns` `:2088`,
       `vblank_out_interrupt_masked_stays_pending` `:2120`,
@@ -1056,11 +1044,10 @@ Also removes the hardcoded if/else chain that cannot express more than 4 sources
       `intback_populates_real_status_and_fires_system_manager_irq` `:1970`) must pass
       **unmodified**. If any needs editing, the migration changed observable behaviour and
       that needs justifying.
-- [ ] **P5-T6 no interrupt in a delay slot.** With an unmasked interrupt pending, execute
+- [x] **P5-T6 no interrupt in a delay slot.** With an unmasked interrupt pending, execute
       a `BRA` whose delay slot is a `MOV #imm`: assert the delay slot ran *and* the
       interrupt was taken only afterwards, with the pushed PC equal to the branch target
       (HR §8.2 item 4). This property holds today by construction; pin it before the
-      refactor can break it.
 
 ---
 
@@ -1069,7 +1056,7 @@ Also removes the hardcoded if/else chain that cannot express more than 4 sources
 **Unblocks:** removes a live process-killing panic; completes a peripheral the BIOS and
 essentially every 3D game uses.
 
-- [ ] **P6-1 (D-12) Guard both divisions.** In the 32÷32 path (`sh2.rs:1490-1491`) and
+- [x] **P6-1 (D-12) Guard both divisions.** In the 32÷32 path (`sh2.rs:1490-1491`) and
       the 64÷32 path (`sh2.rs:1524-1525`), use `checked_div`/`checked_rem` (or an explicit
       `divisor == -1 && dividend == MIN` pre-test). HR §11.6 records that the reference
       performs **no** overflow check on the non-zero-divisor path and leaves it to C's UB.
@@ -1079,7 +1066,7 @@ essentially every 3D game uses.
       (`i32::MIN`, remainder 0), which is what the hardware's own overflow path would
       approximate; whatever is chosen, mark it a DEVIATION-by-necessity, not a guess at
       hardware.
-- [ ] **P6-2 (D-13) 64÷32 quotient overflow.** After computing `quotient: i64`:
+- [x] **P6-2 (D-13) 64÷32 quotient overflow.** After computing `quotient: i64`:
       `if quotient > 0x7FFF_FFFF { DVCR |= 1; DVDNTL = 0x7FFF_FFFF; DVDNTH = 0xFFFF_FFFE; }`
       `else if ((quotient >> 32) as i32) < -1 { DVCR |= 1; DVDNTL = 0x8000_0000; DVDNTH = 0xFFFF_FFFE; }`
       `else { DVDNTL = quotient as u32; DVDNTH = remainder as u32; }`, then
@@ -1088,39 +1075,39 @@ essentially every 3D game uses.
       **not deducible** — copy that note verbatim into the Rust comment so nobody
       "corrects" it from a guess. Note also HR's remark that the negative test is
       `(s32)(quotient >> 32) < -1`, not a comparison against `0x80000000`.
-- [ ] **P6-3 (D-14) `DVDNTUH`/`DVDNTUL` write paths.** Add `0x118`/`0x138` and
+- [x] **P6-3 (D-14) `DVDNTUH`/`DVDNTUL` write paths.** Add `0x118`/`0x138` and
       `0x11C`/`0x13C` arms to `write_onchip` (`sh2.rs:1470`). HR §11.6: they are
       independently writable and are additionally overwritten by every division.
-- [ ] **P6-4 (D-15) Overflow interrupt.** At each of the four `DVCR |= 1` sites, add
+- [x] **P6-4 (D-15) Overflow interrupt.** At each of the four `DVCR |= 1` sites, add
       `if DVCR & 0x2 { send(VCRDIV & 0x7F, (IPRA >> 12) & 0xF) }`. HR §10.6 records the
       **DEVIATION** that the reference reads the level from `MSH2->onchip.IPRA` even on
       the slave. Implement the correct-looking per-CPU `IPRA` and leave a comment naming
       the reference's quirk plus what symptom would indicate the quirk is load-bearing
       (slave-side DIVU interrupts firing at the wrong priority). Depends on Phase 4
       (IPRA) and Phase 5 (queue).
-- [ ] **P6-5.** Confirm the mirrored offsets. HR §11.1: every DIVU register has a
+- [x] **P6-5.** Confirm the mirrored offsets. HR §11.1: every DIVU register has a
       `0x100`-block and a `0x120`-block alias and both behave identically. `sh2.rs:1458-1465`
       and `:1472-1531` already list both — keep them when the fields move into `OnChip`.
-- [ ] **P6-6.** DIVU is instantaneous and charges no cycles (HR §11.6). Keep it that way;
+- [x] **P6-6.** DIVU is instantaneous and charges no cycles (HR §11.6). Keep it that way;
       note it explicitly so Phase 8 does not "fix" it.
 
 ### Phase 6 testing
 
-- [ ] **P6-T1 (D-12).** `DVSR = 0xFFFF_FFFF` (−1), `DVDNT = 0x8000_0000` — must not
+- [x] **P6-T1 (D-12).** `DVSR = 0xFFFF_FFFF` (−1), `DVDNT = 0x8000_0000` — must not
       panic. Same for the 64÷32 path with `DVDNTH:DVDNTL = 0x8000_0000_0000_0000`,
       `DVSR = −1`. Assert the documented divergent result, and name the test so it is
       obviously a crash-regression test.
-- [ ] **P6-T2 (D-13).** Derive the trigger inputs with a throwaway script, not by
+- [x] **P6-T2 (D-13).** Derive the trigger inputs with a throwaway script, not by
       running the emulator: pick `DVDNTH:DVDNTL` and `DVSR` such that the true quotient
       is exactly `0x8000_0000` (one past positive overflow) and assert
       `DVDNTL == 0x7FFF_FFFF`, `DVDNTH == 0xFFFF_FFFE`, `DVCR & 1 == 1`. Mirror for the
       negative case.
-- [ ] **P6-T3 (D-14).** Write `DVDNTUH`/`DVDNTUL` directly, read back; then trigger a
+- [x] **P6-T3 (D-14).** Write `DVDNTUH`/`DVDNTUL` directly, read back; then trigger a
       division and assert both were overwritten with the new `DVDNTH`/`DVDNTL`.
-- [ ] **P6-T4 (D-15).** With `DVCR = 0x2` and `VCRDIV = 0x53`, `IPRA = 0xC000`, force a
+- [x] **P6-T4 (D-15).** With `DVCR = 0x2` and `VCRDIV = 0x53`, `IPRA = 0xC000`, force a
       divide-by-zero and assert an interrupt with vector `0x53` and level `0xC` is queued.
       Vector/level extraction (`& 0x7F`, `>> 12 & 0xF`) taken from HR §10.6.
-- [ ] **P6-T5.** Extend the existing `test_onchip_division` (`sh2.rs:2316`) rather than
+- [x] **P6-T5.** Extend the existing `test_onchip_division` (`sh2.rs:2316`) rather than
       replacing it — it already pins `100 / 3 = 33 r 1` and the `2^33 / 4 = 2^31` 64-bit
       case with independently-obvious values. Add the divide-by-zero `DVDNTH` formulas
       (`0xFFFFFFFC | ((val >> 29) & 3)` for negative dividends, `val >> 29` for

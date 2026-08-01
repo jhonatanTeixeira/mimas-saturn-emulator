@@ -54,13 +54,13 @@ Nothing else's correctness claims are trustworthy until this lands — nine phas
 - [x] `sh2-cpu.md` Phase 2 — Add the 9 missing opcodes (`SLEEP`, `BRAF`/`BSRF`, `MAC.L`/`MAC.W`,
       four `#imm,@(R0,GBR)` forms)
 - [x] `sh2-cpu.md` Phase 3 — Exceptions and the address-space holes
-- [ ] `memory-bus.md` Phase 0 — Instrument the decode before changing it
-- [ ] `memory-bus.md` Phase 1 — Stage-1 area decode (`addr >> 29`) — fixes the cache-scratchpad
+- [x] `memory-bus.md` Phase 0 — Instrument the decode before changing it
+- [x] `memory-bus.md` Phase 1 — Stage-1 area decode (`addr >> 29`) — fixes the cache-scratchpad
       aliasing to BIOS ROM
-- [ ] `memory-bus.md` Phase 2 — Correct device sizes and per-region mirror periods
-- [ ] `memory-bus.md` Phase 3 — Width-atomic, single-lock region accessors
-- [ ] `sh2-cpu.md` Phase 4 — On-chip register file: storage, reset values, byte/word/long dispatch
-- [ ] `sh2-cpu.md` Phase 5 — Real interrupt controller (prerequisite for SCU's own interrupt
+- [x] `memory-bus.md` Phase 2 — Correct device sizes and per-region mirror periods
+- [x] `memory-bus.md` Phase 3 — Width-atomic, single-lock region accessors
+- [x] `sh2-cpu.md` Phase 4 — On-chip register file: storage, reset values, byte/word/long dispatch
+- [x] `sh2-cpu.md` Phase 5 — Real interrupt controller (prerequisite for SCU's own interrupt
       controller in Milestone 2 to signal into something real)
 - [ ] `sh2-cpu.md` Phase 6 — DIVU hardening (fixes the confirmed `i32::MIN / -1` process panic)
 

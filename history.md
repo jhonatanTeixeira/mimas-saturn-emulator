@@ -1206,3 +1206,101 @@ With the SMPC fixtures extracted and the testing pipeline verified green, Milest
   1. **Area 5 CachePurge Fix**: Removed Area 5 (`0xA000_0000`) from the `CachePurge` translation match, restoring it to its correct hardware behavior as a cache-through mirror of physical memory.
   2. **TAS.B Non-RAM Fallback**: Modified the `TAS.B` execution path to fall back to a non-atomic read-modify-write (`raw_read_byte` followed by `raw_write_byte`) for addresses outside Low RAM and High RAM (e.g. SMPC registers), avoiding silent failures/no-ops. Wrote unit test (`test_tas_b_fallback`) confirming correctness.
   3. **Address 7 Cache Range**: Noted that the cache data array is strictly for area 6, but area 7 (`0xE...`/`0xF...`) fetches match the cache-execution boundary as designed.
+
+---
+
+## Chapter 16 — Memory Bus Milestone 1: Phase 0 — Instrument the decode before changing it
+
+To gather evidence on which address-space holes and mirror regions the real Sega Saturn BIOS actually accesses during boot, we implemented the memory bus instrumentation phase:
+
+* **Bus Miss Log (`BUS_MISS_LOG`)**: Added a diagnostic logger that dedups on access keys `(area, block, is_write, width)` and logs a `[BUSMISS]` entry once per distinct key to prevent stderr noise, while still outputting the `self.pc` at the moment of access to make tracing with `tools/sh2dis.py` straightforward.
+* **Instrumentation Hook (`check_bus_miss`)**: Wired a hook into all central memory-access entry points (`read_byte`, `write_byte`, `read_word`, `write_word`, `read_long`, `write_long`). The hook catches accesses where:
+  * The address points to Area 2, 3, 5, or 6 (areas mapping outside the normal physical address space).
+  * The address points to Area 7 but is below on-chip registers (`address < 0xFFFF_FE00`).
+  * Bit 28 of the address is set (bit-28 alias).
+  * The address belongs to Area 4 (Area-4 alias).
+  * The translation lands on an `Unmapped` region (CS0, CS1, FRT Captures, WRAM mirrors, or general holes).
+  * The in-window offset exceeds the documented physical device size (e.g. BIOS, Backup RAM, VDP1/2 registers, SCU registers, or High RAM mirror limits).
+* **Env-Gate**: Gated all bus miss logging behind the environment variable `MIMAS_BUS_TRACE=1` to keep normal testing fast and quiet.
+* **Fidelity Testing**: Wrote unit test `test_bus_miss_logging` verifying that synthetic miss hits generate exactly one distinct log and that duplicates are correctly suppressed. Verified that the entire workspace is green.
+
+---
+
+## Chapter 17 — Memory Bus Milestone 1: Phase 1 — Stage-1 area decode
+
+To implement correct address-space isolation and resolve aliasing conflicts (such as cache scratchpad aliasing onto BIOS ROM), we completed the Stage-1 area decode:
+
+* **Restructured `Sh2::translate`**: Modified the translation logic to switch on the top three bits (`address >> 29`) first:
+  * **Area 0 / 1 / 4 / 5** follow the cache-through / bit-28 folding rules, resolving normal memory regions. Area 5 was specifically kept as cache-through normal memory per real hardware and Yabause consistency.
+  * **Area 2** maps to `MemRegion::PurgeArea`. Reads return `0xFF` per byte. Byte and word writes correctly fall through to uncached writes, while longword writes act as a no-op associative cache purge.
+  * **Area 3** maps to `MemRegion::AddressArray` supporting longword accesses only (byte and word accesses return `0` / behave as `Unmapped`).
+  * **Area 6** maps to `MemRegion::DataArray` supporting all access widths (byte, word, long).
+  * **Area 7** maps to `MemRegion::OnChip` if `>= 0xFFFF_FE00`, else it falls to `MemRegion::Unmapped`.
+* **CPU-private Cache Arrays**: Added the cache array fields `address_array: [u32; 0x100]` and `data_array: Box<[u8; 0x1000]>` directly onto the `Sh2` struct. Since these are CPU-specific cache arrays, they are not shared inside `WorkRam`, avoiding mutex synchronization overhead.
+* **Width-Correct On-Chip Dispatch**: Routed byte and word accesses to `MemRegion::OnChip` to `read_onchip` and `write_onchip` via shifted/masked register operations rather than returning `0`.
+* **Testing & Integrity**: Added `test_memory_bus_phase_1` to verify correct Area 2/5 read returns, Area 5 normal cache-through behavior, cache array mirror bounds, CPU isolation, longword-only AddressArray accesses, and Area 7 unmapped bounds. Updated existing e2e and unit tests to compile and pass cleanly.
+
+---
+
+## Chapter 18 — Memory Bus Milestone 1: Phase 2 — Correct device sizes and per-region mirror periods
+
+To resolve mirror-period bugs and enforce correct device sizes matching real hardware behaviors, we completed the device boundaries update:
+
+* **High WRAM Correction**: Resized High WRAM allocation from 2 MB to 1 MB. Re-striped WRAM locks from 32 stripes of 64 KB to 32 stripes of 32 KB, maintaining lock granularity. Updated access/wrapping arithmetic to wrap offsets at 1 MB. Extended the translate window to `0x06000000..0x08000000` (entire 32 MB window) mirroring High WRAM every 1 MB.
+* **VDP1/VDP2 Register Scaling**: Resized VDP1 registers buffer to 256 B and VDP2 registers buffer to 512 B. Masked VDP2 register offset checking for TVSTAT (`0x004`/`0x005`) to match mirrored addresses (e.g. `0x05F80204`).
+* **SCU Register Scaling & Masking**: Resized SCU registers buffer to 256 B. Masked offset (`off &= 0xFF`) at the top of the longword SCU read and write arms to prevent out-of-bounds dropping of DMA triggers and DSP port accesses.
+* **Odd-Byte Backup WRAM**: Resized backup RAM to 64 KB, and forced writes to odd-byte offsets (`off | 1`) to emulate the 8-bit SRAM hardware convention.
+* **Sound RAM MEM4MB Mirror**: Implemented the `MEM4MB` mirror switch governed by SCSP register `$400` bit 9. Added a non-locking cached `mem4b` atomic flag in `WorkRam` (updated on SCSP register writes to `0x400`). If `mem4b == 0` (default), Sound RAM mirrors every 256 KB. If `mem4b == 1` and address exceeds 512 KB, reads return all-ones (`0xFF`) and writes are dropped.
+* **CS2 20-bit Offset**: Passed 20-bit offsets to `MemRegion::Cs2Regs` and blocked reads/writes above 4 KB (returning `0`/dropping writes) to stop silent FIFO-on-CR1 aliasing without resizing the register stub prematurely.
+* **BIOS Hardening**: Added explicit 512 KB bounds validation to `load_bios`, warning and truncating/padding images that mismatch.
+* **Test Verification**: Wrote `test_memory_bus_phase_2` checking High WRAM mirrors, VDP1/VDP2/SCU scaling, TVSTAT mirroring, odd-byte Backup WRAM writes, Sound RAM `MEM4MB` modes, and CS2 boundary protection. Adjusted existing integration fixtures copy loops to target 32 KB stripes. Checked all workspace tests are green.
+
+---
+
+## Chapter 19 — Memory Bus Milestone 1: Phase 3 — Width-atomic, single-lock region accessors
+
+To prevent multi-threaded data race bugs (torn reads/writes across cores and DMA) and optimize hot path lock contention:
+
+* **High WRAM Single-Lock Accessors**: Refactored `read_high_ram_long`, `write_high_ram_long`, `write_high_ram_word`, and introduced `read_high_ram_word` on `WorkRam` to acquire the stripe lock exactly once for transactions that fall in a single stripe. Added safe, ordered dual-lock acquisition (lower index first) for transactions that straddle a stripe boundary to prevent deadlocks.
+* **Unified CPU Accessors**: Added `raw_read_word`, `raw_read_long`, `raw_write_word`, and `raw_write_long` on `Sh2` and mapped their transaction logic to region-specific handlers (`raw_read_word_region`, `raw_read_long_region`, `raw_write_word_region`, `raw_write_long_region`). These methods translate the address once and acquire the target region lock exactly once.
+* **Bus Wait Placement**: Preserved the call to `bus_wait()` at the CPU transaction boundary (in `read_word`, `write_word`, etc.) to prevent DMA from re-entering the arbiter.
+* **Purge Area Fixes**: Hardened Purge Area handling to return `0xFFFF` on word reads and `0xFFFFFFFF` on longword reads, while longword writes act as no-op associative cache purges, and word writes fall through to uncached writes.
+* **Stress Testing**: Added a high-concurrency torn-read stress test `test_torn_read_stress` executing parallel alternating longword writes and reads on both normal and straddled High WRAM boundaries for 200 ms, verifying no torn values occur. All 185 tests are green.
+
+---
+
+## Chapter 20 — CPU Milestone 1: Phase 4 — On-chip register file: storage, reset values, byte/word/long dispatch
+
+To implement the on-chip register file structure and address-width access dispatch:
+
+* **On-Chip Register Storage (`Sh2OnChip`)**: Created [`saturn-core/src/sh2_onchip.rs`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/saturn-core/src/sh2_onchip.rs) containing a dedicated register file structure populated with all hardware-defined reset defaults.
+* **On-Chip Width-Access Routing**: Implemented non-recursive lookup helper methods `get_onchip_16` and `get_onchip_32` inside [`saturn-core/src/sh2.rs`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/saturn-core/src/sh2.rs) to avoid stack overflows from nested, width-varying calls. Mapped `MemRegion::OnChip` accesses through specific byte, word, and longword paths.
+* **Write Masking & Quirks**: Implemented hardware masking for Standby Control (`SBYCR`), Cache Control (`CCR`), Standby Mode (`DRCR0`/`DRCR1`), and Interrupt Control (`IPRA`, `IPRB`, `VCRA`, `VCRB`, `VCRC`, `VCRD`, `ICR`, `VCRWDT`). Added the destructive byte-write quirks for `IPRB` and `VCRD`, where writing a byte to the high offset (`0x060` or `0x068`) clears/destroys the register's low byte, while byte-writes to the low offsets (`0x061` and `0x069`) are ignored.
+* **Master/Slave Reset Selection**: Configured the Bus Control Register 1 (`BCR1`) to initialize with its physical master (`0x0000`) or slave (`0x8000`) construct flag, preserving this state across CPU resets while setting default bits (`| 0x03F0`).
+* **Test Verification**: Wrote unit tests checking reset values (`test_onchip_p4_t1_reset_values`), write masking (`test_onchip_p4_t2_write_masking`), destructive byte-write quirks (`test_onchip_p4_t3_destructive_byte_write_quirks`), and width-access contracts (`test_onchip_p4_t4_access_width_matrix`). Verified that the entire workspace is green (all 194 tests passed successfully).
+
+---
+
+## Chapter 21 — CPU Milestone 1: Phase 5 — Real interrupt controller
+
+To implement the on-chip Interrupt Controller (INTC) queue resolution, priority levels, and NMI handling:
+
+* **Interrupt Pending Queue (`InterruptQueue`)**: Implemented a sorted, deduplicated-by-vector queue structure supporting a maximum capacity of 50 interrupts. It sorts pending interrupts ascending by level (highest priority last, preserving insertion order for ties).
+* **Width & Priority Delivery**: Replaced the legacy if/else pending checks with an automated queue peeker that extracts the highest-priority pending interrupt and delivers it only if the level is strictly greater than the current SR interrupt mask (or if the level is 16, representing NMI).
+* **Migrated Legacy Sources**: Re-routed VBLANK-IN (`0x40`, 15), VBLANK-OUT (`0x41`, 14), SMPC System Manager (`0x47`, 8), and Sound Request (`0x46`, 9) through `queue_send` and `queue_remove` methods, maintaining the thin wrappers and legacy fields to avoid public API breaks.
+* **Non-Maskable Interrupts (`nmi`)**: Implemented `Sh2::nmi` which triggers the physical NMI, setting bit 15 of the on-chip Interrupt Control Register (`ICR`) and appending NMI (vector `0xB`, level 16) to the queue. When delivered, it clamps the resulting SR mask update to 15 (`0xF`).
+* **Cross-Thread Source Injection**: Added `pub irq_in: Option<Arc<Mutex<InterruptQueue>>>` to `Sh2` and initialized it for Core 0 and Core 1 in `SaturnSystem::start`, falling back to `local_irq_in` when no external queue is wired.
+* **Active State Synchronization**: Configured interrupt injection via `queue_send` to automatically wake parked cores by calling `sync.set_thread_active(core_id, true)`.
+* **Verification & Regression Testing**: Added unit tests checking queue sorting/deduplication (`test_onchip_p5_t1_sort_dedupe`), masking thresholds (`test_onchip_p5_t2_strictly_greater_masking`), delivery pacing (`test_onchip_p5_t3_one_per_call`), NMI exception clamping (`test_onchip_p5_t4_nmi_clamp`), and delay-slot interrupt blocking (`test_onchip_p5_t6_delay_slot_no_interrupt`). Verified all 199 tests pass.
+
+---
+
+## Chapter 22 — CPU Milestone 1: Phase 6 — DIVU division hardening and overflow interrupts
+
+To handle boundary overflows and prevent system-killing crashes during arithmetic divisions:
+
+* **Hardened Division Guards**: Added checks for signed division overflows (`i32::MIN / -1` and `i64::MIN / -1`) in the 32÷32 and 64÷32 arithmetic paths in [`saturn-core/src/sh2.rs`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/saturn-core/src/sh2.rs), resolving division to a safe two's-complement wrap instead of letting Rust hard-panic.
+* **Quotient Overflow Checks**: Implemented range bounds checking for 64÷32 divisions. When the computed quotient overflows 32-bit limits, Mimas now sets the overflow flag (`DVCR |= 1`), updates the output registers with clamped limits (`0x7FFF_FFFF` or `0x8000_0000`), and populates `dvdntul`/`dvdntuh`.
+* **Mirrored/Indirect Registers**: Wired direct writes for `DVDNTUH` and `DVDNTUL` and confirmed that aliases between the `0x100` and `0x120` register ranges map correctly.
+* **Interrupt Injection**: Integrated `divu_check_interrupt` which dispatches a queue interrupt dynamically mapped using priority (`IPRA` bits 12-15) and vector (`VCRDIV`) fields whenever `DVCR` overflow triggers with interrupt enable active.
+* **Testing**: Added unit test `test_divu_p6_t1_crash_regression_overflow` confirming division guards wrap safely under `i32::MIN / -1` and `i64::MIN / -1`, and `test_divu_p6_t4_overflow_interrupt` asserting correct priority/vector interrupt dispatch during divide-by-zero. All 206 tests pass.
