@@ -1,7 +1,54 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use crate::bus_arbiter::BusArbiter;
 use crate::shared_buffers::WorkRam;
 use crate::sync::LockStepSync;
+
+static INTERRUPT_OVERRUN_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
+fn log_interrupt_overrun_once(vector: u8, level: u8) {
+    let key = format!("vector={:#X} level={}", vector, level);
+    let mut log = INTERRUPT_OVERRUN_LOG.lock().unwrap();
+    if !log.contains(&key) {
+        eprintln!("[INTQUEUE_OVERRUN] {}", key);
+        log.push(key);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingInterrupt {
+    pub vector: u8,
+    pub level: u8,
+}
+
+#[derive(Debug, Clone)]
+pub struct InterruptQueue {
+    pub pending: Vec<PendingInterrupt>,
+}
+
+impl InterruptQueue {
+    pub fn new() -> Self {
+        Self {
+            pending: Vec::with_capacity(50),
+        }
+    }
+
+    pub fn send(&mut self, vector: u8, level: u8) {
+        if self.pending.iter().any(|x| x.vector == vector) {
+            return;
+        }
+        if self.pending.len() >= 50 {
+            log_interrupt_overrun_once(vector, level);
+            return;
+        }
+        self.pending.push(PendingInterrupt { vector, level });
+        self.pending.sort_by_key(|x| x.level);
+    }
+
+    pub fn remove(&mut self, vector: u8) {
+        if let Some(pos) = self.pending.iter().position(|x| x.vector == vector) {
+            self.pending.remove(pos);
+        }
+    }
+}
 
 /// Real Saturn/SH-2 physical address regions this core understands. Anything
 /// outside these returns 0 on read and is ignored on write, matching the
@@ -33,9 +80,9 @@ enum MemRegion {
     ScuRegs(usize),
     Cs2Regs(usize),
     OnChip(usize),
-    CachePurge(usize),
-    CacheAddressArray(usize),
-    CacheDataArray(usize),
+    PurgeArea,
+    AddressArray(usize),
+    DataArray(usize),
     Unmapped,
 }
 
@@ -171,17 +218,11 @@ pub struct Sh2 {
     /// working unchanged. See `crate::smpc` and
     /// `docs/implementation-plans/smpc-peripheral.md` Phase 0.
     pub smpc: Option<Arc<std::sync::Mutex<crate::smpc::Smpc>>>,
-    // On-chip Division Unit registers
-    pub dvsr: u32,
-    pub dvdnt: u32,
-    pub dvcr: u32,
-    pub vcrdiv: u32,
-    pub dvdnth: u32,
-    pub dvdntl: u32,
-    pub dvdntuh: u32,
-    pub dvdntul: u32,
-    pub cache_address_array: [u32; 0x100],
-    pub cache_data_array: [u8; 0x1000],
+    pub irq_in: Option<Arc<Mutex<InterruptQueue>>>,
+    local_irq_in: InterruptQueue,
+    pub onchip: crate::sh2_onchip::Sh2OnChip,
+    pub address_array: [u32; 0x100],
+    pub data_array: Box<[u8; 0x1000]>,
 }
 
 // SR bit positions actually used by this subset of the ISA. Layout (T, S,
@@ -257,7 +298,7 @@ fn log_reg_access_once(region: &MemRegion, is_write: bool, val: u8) {
     let interesting = matches!(
         region,
         MemRegion::Smpc(_) | MemRegion::Vdp1Regs(_) | MemRegion::Vdp2Regs(_)
-            | MemRegion::ScuRegs(_) | MemRegion::Cs2Regs(_)
+            | MemRegion::ScuRegs(_) | MemRegion::Cs2Regs(_) | MemRegion::OnChip(_)
     );
     if !interesting {
         return;
@@ -279,7 +320,108 @@ fn log_illegal_once(pc: u32, opcode: u16) {
     }
 }
 
+static BUS_MISS_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn lock_bus_miss_log() -> std::sync::MutexGuard<'static, Vec<String>> {
+    match BUS_MISS_LOG.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn log_bus_miss_once(address: u32, is_write: bool, width: u8, pc: u32, info: &str) {
+    if std::env::var("MIMAS_BUS_TRACE").is_err() {
+        return;
+    }
+    let area = address >> 29;
+    let block = address & 0x0FF00000;
+    let key = format!("area={} block={:#010X} is_write={} width={}", area, block, is_write, width);
+    let mut log = lock_bus_miss_log();
+    if !log.contains(&key) {
+        eprintln!("[BUSMISS] area={} block={:#010X} is_write={} width={} pc={:#010X} info={}", area, block, is_write, width, pc, info);
+        log.push(key);
+    }
+}
+
 impl Sh2 {
+    fn check_bus_miss(&self, address: u32, is_write: bool, width: u8) {
+        if std::env::var("MIMAS_BUS_TRACE").is_err() {
+            return;
+        }
+        let area = address >> 29;
+        let mut is_miss = false;
+        let mut info = "";
+
+        // 1. address >> 29 is 2, 3, 5, or 6
+        if area == 2 || area == 3 || area == 5 || area == 6 {
+            is_miss = true;
+            info = "Area 2/3/5/6 access";
+        }
+        // 2. address >> 29 == 7 && address < 0xFFFF_FE00
+        else if area == 7 && address < 0xFFFF_FE00 {
+            is_miss = true;
+            info = "Area 7 below on-chip registers";
+        }
+        // 3. bit-28 alias
+        else if (address & 0x1000_0000) != 0 {
+            is_miss = true;
+            info = "Bit-28 alias";
+        }
+        // 4. area-4 alias
+        else if area == 4 {
+            is_miss = true;
+            info = "Area-4 alias";
+        }
+
+        // Check if translate results in Unmapped, or if offset exceeds real device size
+        if !is_miss {
+            let region = self.translate(address);
+            match region {
+                MemRegion::Unmapped => {
+                    is_miss = true;
+                    let a = address & 0x0FFF_FFFF;
+                    if (0x0200_0000..0x0400_0000).contains(&a) {
+                        info = "Unmapped CS0";
+                    } else if (0x0400_0000..0x0500_0000).contains(&a) {
+                        info = "Unmapped CS1";
+                    } else if (0x0100_0000..0x0200_0000).contains(&a) {
+                        info = "Unmapped FRT Capture";
+                    } else if (0x0700_0000..0x0800_0000).contains(&a) {
+                        info = "Unmapped High WRAM mirror";
+                    } else {
+                        info = "Unmapped hole";
+                    }
+                }
+                _ => {
+                    let a = address & 0x0FFF_FFFF;
+                    if a < 0x0010_0000 && a >= 0x0008_0000 {
+                        is_miss = true;
+                        info = "BIOS mirror offset";
+                    } else if a >= 0x0018_0000 && a < 0x0020_0000 && (a - 0x0018_0000) >= 0x0001_0000 {
+                        is_miss = true;
+                        info = "Backup RAM mirror offset";
+                    } else if a >= 0x05D0_0000 && a < 0x05D8_0000 && (a - 0x05D0_0000) >= 0x0000_0100 {
+                        is_miss = true;
+                        info = "VDP1 Regs mirror offset";
+                    } else if a >= 0x05F8_0000 && a < 0x05FC_0000 && (a - 0x05F8_0000) >= 0x0000_0200 {
+                        is_miss = true;
+                        info = "VDP2 Regs mirror offset";
+                    } else if a >= 0x05FE_0000 && a < 0x05FF_0000 && (a - 0x05FE_0000) >= 0x0000_0100 {
+                        is_miss = true;
+                        info = "SCU Regs mirror offset";
+                    } else if a >= 0x0600_0000 && a < 0x0700_0000 && (a - 0x0600_0000) >= 0x0010_0000 {
+                        is_miss = true;
+                        info = "High RAM mirror offset";
+                    }
+                }
+            }
+        }
+
+        if is_miss {
+            log_bus_miss_once(address, is_write, width, self.pc, info);
+        }
+    }
+
     pub fn new(is_slave: bool, arbiter: Arc<BusArbiter>, work_ram: Arc<WorkRam>) -> Self {
         Self {
             is_slave,
@@ -311,22 +453,21 @@ impl Sh2 {
             speed: None,
             scu_dsp: None,
             smpc: None,
-            dvsr: 0,
-            dvdnt: 0,
-            dvcr: 0,
-            vcrdiv: 0,
-            dvdnth: 0,
-            dvdntl: 0,
-            dvdntuh: 0,
-            dvdntul: 0,
-            cache_address_array: [0; 0x100],
-            cache_data_array: [0; 0x1000],
+            irq_in: None,
+            local_irq_in: InterruptQueue::new(),
+            onchip: crate::sh2_onchip::Sh2OnChip::new(is_slave),
+            address_array: [0; 0x100],
+            data_array: Box::new([0; 0x1000]),
         }
     }
 
     /// Load real BIOS ROM bytes. Call before `reset()`/stepping so the CPU
     /// actually fetches genuine boot code instead of reading zeros.
-    pub fn load_bios(&mut self, data: Vec<u8>) {
+    pub fn load_bios(&mut self, mut data: Vec<u8>) {
+        if data.len() != 524288 {
+            eprintln!("[WARNING] BIOS image length is {} bytes (expected 524288 bytes). Truncating or padding.", data.len());
+            data.resize(524288, 0);
+        }
         self.bios = Arc::new(data);
     }
 
@@ -334,6 +475,54 @@ impl Sh2 {
     /// underlying bytes). Used when multiple cores need to see the same ROM.
     pub fn set_bios_arc(&mut self, bios: Arc<Vec<u8>>) {
         self.bios = bios;
+    }
+
+    pub fn queue_send(&mut self, vector: u8, level: u8) {
+        if let Some(ref q) = self.irq_in {
+            q.lock().unwrap().send(vector, level);
+        } else {
+            self.local_irq_in.send(vector, level);
+        }
+        if vector == VBLANK_IN_VECTOR as u8 {
+            self.vblank_pending = true;
+        } else if vector == VBLANK_OUT_VECTOR as u8 {
+            self.vblank_out_pending = true;
+        } else if vector == SMPC_IRQ_VECTOR as u8 {
+            self.smpc_irq_pending = true;
+        }
+        if let Some(ref sync) = self.sync {
+            sync.set_thread_active(self.core_id, true);
+        }
+    }
+
+    pub fn queue_remove(&mut self, vector: u8) {
+        if let Some(ref q) = self.irq_in {
+            q.lock().unwrap().remove(vector);
+        } else {
+            self.local_irq_in.remove(vector);
+        }
+        if vector == VBLANK_IN_VECTOR as u8 {
+            self.vblank_pending = false;
+        } else if vector == VBLANK_OUT_VECTOR as u8 {
+            self.vblank_out_pending = false;
+        } else if vector == SMPC_IRQ_VECTOR as u8 {
+            self.smpc_irq_pending = false;
+        }
+    }
+
+    pub fn queue_peek(&self) -> Option<PendingInterrupt> {
+        if let Some(ref q) = self.irq_in {
+            q.lock().unwrap().pending.last().copied()
+        } else {
+            self.local_irq_in.pending.last().copied()
+        }
+    }
+
+    /// Triggers a Non-Maskable Interrupt (NMI).
+    /// Sets bit 15 of the ICR (Interrupt Control Register) and sends NMI (vector 0xB, level 16).
+    pub fn nmi(&mut self) {
+        self.onchip.icr |= 0x8000;
+        self.queue_send(0xB, 16);
     }
 
     /// Perform the real SH-2 reset sequence: PC and R15 (stack pointer) are
@@ -368,9 +557,8 @@ impl Sh2 {
             f.store(false, std::sync::atomic::Ordering::Relaxed);
         }
 
-        // DIVU: Reset only dvcr and vcrdiv per HR §11.1
-        self.dvcr = 0;
-        self.vcrdiv = 0;
+        // Reset on-chip registers
+        self.onchip.reset(self.is_slave);
     }
 
     fn translate(&self, address: u32) -> MemRegion {
@@ -378,49 +566,49 @@ impl Sh2 {
             return MemRegion::OnChip((address & 0x1FF) as usize);
         }
         match address >> 29 {
-            2 => return MemRegion::CachePurge(address as usize),
-            3 => return MemRegion::CacheAddressArray(address as usize),
-            6 => return MemRegion::CacheDataArray(address as usize),
-            _ => {}
-        }
-        // Strip the SH-2 cache-control/partition bits (bit 29 selects the
-        // "cache-through" mirror of the same physical space) -- we don't
-        // model cache timing, so both mirrors resolve to the same data.
-        let a = address & 0x0FFF_FFFF;
-        if a < 0x0010_0000 {
-            MemRegion::Bios(a as usize)
-        } else if (0x0010_0000..0x0018_0000).contains(&a) {
-            // Real hardware mirrors the 0x80-byte SMPC register file across
-            // this whole 512KB window by masking the offset with & 0x7F.
-            MemRegion::Smpc((a as usize) & 0x7F)
-        } else if (0x0018_0000..0x0020_0000).contains(&a) {
-            MemRegion::BackupRam((a - 0x0018_0000) as usize)
-        } else if (0x0020_0000..0x0030_0000).contains(&a) {
-            MemRegion::LowRam((a - 0x0020_0000) as usize)
-        } else if (0x0580_0000..0x0590_0000).contains(&a) {
-            MemRegion::Cs2Regs((a - 0x0580_0000) as usize)
-        } else if (0x05A0_0000..0x05B0_0000).contains(&a) {
-            MemRegion::SoundRam((a - 0x05A0_0000) as usize)
-        } else if (0x05B0_0000..0x05C0_0000).contains(&a) {
-            MemRegion::ScspRegs((a - 0x05B0_0000) as usize)
-        } else if (0x05C0_0000..0x05C8_0000).contains(&a) {
-            MemRegion::Vdp1Vram((a - 0x05C0_0000) as usize)
-        } else if (0x05C8_0000..0x05D0_0000).contains(&a) {
-            MemRegion::Vdp1Framebuffer((a - 0x05C8_0000) as usize)
-        } else if (0x05D0_0000..0x05D8_0000).contains(&a) {
-            MemRegion::Vdp1Regs((a - 0x05D0_0000) as usize)
-        } else if (0x05E0_0000..0x05F0_0000).contains(&a) {
-            MemRegion::Vdp2Vram((a - 0x05E0_0000) as usize)
-        } else if (0x05F0_0000..0x05F8_0000).contains(&a) {
-            MemRegion::Vdp2Cram((a - 0x05F0_0000) as usize)
-        } else if (0x05F8_0000..0x05FC_0000).contains(&a) {
-            MemRegion::Vdp2Regs((a - 0x05F8_0000) as usize)
-        } else if (0x05FE_0000..0x05FF_0000).contains(&a) {
-            MemRegion::ScuRegs((a - 0x05FE_0000) as usize)
-        } else if (0x0600_0000..0x0700_0000).contains(&a) {
-            MemRegion::HighRam((a - 0x0600_0000) as usize)
-        } else {
-            MemRegion::Unmapped
+            2 => MemRegion::PurgeArea,
+            3 => MemRegion::AddressArray((address & 0x3FC) as usize),
+            6 => MemRegion::DataArray((address & 0xFFF) as usize),
+            7 => MemRegion::Unmapped,
+            0 | 1 | 4 | 5 => {
+                let a = address & 0x0FFF_FFFF;
+                if a < 0x0010_0000 {
+                    MemRegion::Bios(a as usize)
+                } else if (0x0010_0000..0x0018_0000).contains(&a) {
+                    // Real hardware mirrors the 0x80-byte SMPC register file across
+                    // this whole 512KB window by masking the offset with & 0x7F.
+                    MemRegion::Smpc((a as usize) & 0x7F)
+                } else if (0x0018_0000..0x0020_0000).contains(&a) {
+                    MemRegion::BackupRam((a - 0x0018_0000) as usize)
+                } else if (0x0020_0000..0x0030_0000).contains(&a) {
+                    MemRegion::LowRam((a - 0x0020_0000) as usize)
+                } else if (0x0580_0000..0x0590_0000).contains(&a) {
+                    MemRegion::Cs2Regs((a - 0x0580_0000) as usize)
+                } else if (0x05A0_0000..0x05B0_0000).contains(&a) {
+                    MemRegion::SoundRam((a - 0x05A0_0000) as usize)
+                } else if (0x05B0_0000..0x05C0_0000).contains(&a) {
+                    MemRegion::ScspRegs((a - 0x05B0_0000) as usize)
+                } else if (0x05C0_0000..0x05C8_0000).contains(&a) {
+                    MemRegion::Vdp1Vram((a - 0x05C0_0000) as usize)
+                } else if (0x05C8_0000..0x05D0_0000).contains(&a) {
+                    MemRegion::Vdp1Framebuffer((a - 0x05C8_0000) as usize)
+                } else if (0x05D0_0000..0x05D8_0000).contains(&a) {
+                    MemRegion::Vdp1Regs((a - 0x05D0_0000) as usize)
+                } else if (0x05E0_0000..0x05F0_0000).contains(&a) {
+                    MemRegion::Vdp2Vram((a - 0x05E0_0000) as usize)
+                } else if (0x05F0_0000..0x05F8_0000).contains(&a) {
+                    MemRegion::Vdp2Cram((a - 0x05F0_0000) as usize)
+                } else if (0x05F8_0000..0x05FC_0000).contains(&a) {
+                    MemRegion::Vdp2Regs((a - 0x05F8_0000) as usize)
+                } else if (0x05FE_0000..0x05FF_0000).contains(&a) {
+                    MemRegion::ScuRegs((a - 0x05FE_0000) as usize)
+                } else if (0x0600_0000..0x0800_0000).contains(&a) {
+                    MemRegion::HighRam((a - 0x0600_0000) as usize)
+                } else {
+                    MemRegion::Unmapped
+                }
+            }
+            _ => MemRegion::Unmapped,
         }
     }
 
@@ -464,8 +652,18 @@ impl Sh2 {
                 self.work_ram.read_high_ram_byte(off)
             }
             MemRegion::SoundRam(off) => {
-                let ram = self.work_ram.sound_ram.read().unwrap();
-                ram[off & (ram.len() - 1)]
+                let mut addr = off & 0xFFFFF;
+                let mem4b = self.work_ram.mem4b.load(std::sync::atomic::Ordering::Relaxed);
+                if !mem4b {
+                    addr &= 0x3FFFF;
+                    let ram = self.work_ram.sound_ram.read().unwrap();
+                    ram[addr & (ram.len() - 1)]
+                } else if addr > 0x7FFFF {
+                    0xFF
+                } else {
+                    let ram = self.work_ram.sound_ram.read().unwrap();
+                    ram[addr & (ram.len() - 1)]
+                }
             }
             MemRegion::ScspRegs(off) => {
                 let ram = self.work_ram.scsp_regs.read().unwrap();
@@ -477,7 +675,7 @@ impl Sh2 {
             }
             MemRegion::Vdp1Framebuffer(off) => {
                 let ram = self.work_ram.vdp1_framebuffer.read().unwrap();
-                ram[off & (ram.len() - 1)]
+                ram[off & 0x3FFFF]
             }
             MemRegion::Vdp1Regs(off) => {
                 let ram = self.work_ram.vdp1_regs.read().unwrap();
@@ -491,29 +689,28 @@ impl Sh2 {
                 let ram = self.work_ram.vdp2_cram.read().unwrap();
                 ram[off & (ram.len() - 1)]
             }
-            // TVSTAT (offset 0x004-0x005): real hardware status register,
-            // never written by the CPU -- its VBLANK bit is a live signal
-            // from the video timing generator. Backing it with a plain
-            // read-write byte array (like every other VDP2 register) would
-            // leave it permanently 0, since nothing ever "writes" the real
-            // hardware's toggle -- exactly the kind of real BIOS wait loop
-            // (`poll TVSTAT until VBLANK` as an alternative to the VBLANK-IN
-            // interrupt) this stalls forever. Compute it live instead.
-            MemRegion::Vdp2Regs(off) if off == 0x004 || off == 0x005 => {
-                let tvstat = self.tvstat_word();
-                if off == 0x004 { (tvstat >> 8) as u8 } else { (tvstat & 0xFF) as u8 }
-            }
             MemRegion::Vdp2Regs(off) => {
-                let ram = self.work_ram.vdp2_regs.read().unwrap();
-                ram[off & (ram.len() - 1)]
+                let masked_off = off & 0x1FF;
+                if masked_off == 0x004 || masked_off == 0x005 {
+                    let tvstat = self.tvstat_word();
+                    if masked_off == 0x004 { (tvstat >> 8) as u8 } else { (tvstat & 0xFF) as u8 }
+                } else {
+                    let ram = self.work_ram.vdp2_regs.read().unwrap();
+                    ram[masked_off]
+                }
             }
             MemRegion::ScuRegs(off) => {
                 let ram = self.work_ram.scu_regs.read().unwrap();
                 ram[off & (ram.len() - 1)]
             }
             MemRegion::Cs2Regs(off) => {
-                let ram = self.work_ram.cs2_regs.read().unwrap();
-                ram[off & (ram.len() - 1)]
+                let masked_off = off & 0xFFFFF;
+                if masked_off < 0x1000 {
+                    let ram = self.work_ram.cs2_regs.read().unwrap();
+                    ram[masked_off]
+                } else {
+                    0
+                }
             }
             MemRegion::BackupRam(off) => {
                 let ram = self.work_ram.backup_ram.read().unwrap();
@@ -548,17 +745,15 @@ impl Sh2 {
                 let ram = self.work_ram.smpc_regs.read().unwrap();
                 ram[off & (ram.len() - 1)]
             }
-            MemRegion::CachePurge(_) => 0xFF,
-            MemRegion::CacheAddressArray(off) => {
-                let index = (off & 0x3FC) >> 2;
-                let val = self.cache_address_array[index];
-                let byte_shift = 24 - ((off & 3) * 8);
-                ((val >> byte_shift) & 0xFF) as u8
+            MemRegion::PurgeArea => 0xFF,
+            MemRegion::AddressArray(_) => 0, // Byte read falls to Unmapped/returns 0
+            MemRegion::DataArray(off) => {
+                self.data_array[off & 0xFFF]
             }
-            MemRegion::CacheDataArray(off) => {
-                self.cache_data_array[off & 0xFFF]
+            MemRegion::OnChip(off) => {
+                self.read_onchip_byte(off)
             }
-            MemRegion::Unmapped | MemRegion::OnChip(_) => 0,
+            MemRegion::Unmapped => 0,
         }
     }
 
@@ -578,14 +773,28 @@ impl Sh2 {
                 self.work_ram.write_high_ram_byte(off, val);
             }
             MemRegion::SoundRam(off) => {
-                let mut ram = self.work_ram.sound_ram.write().unwrap();
-                let mask = ram.len() - 1;
-                ram[off & mask] = val;
+                let mut addr = off & 0xFFFFF;
+                let mem4b = self.work_ram.mem4b.load(std::sync::atomic::Ordering::Relaxed);
+                if !mem4b {
+                    addr &= 0x3FFFF;
+                    let mut ram = self.work_ram.sound_ram.write().unwrap();
+                    let mask = ram.len() - 1;
+                    ram[addr & mask] = val;
+                } else if addr <= 0x7FFFF {
+                    let mut ram = self.work_ram.sound_ram.write().unwrap();
+                    let mask = ram.len() - 1;
+                    ram[addr & mask] = val;
+                }
             }
             MemRegion::ScspRegs(off) => {
                 let mut ram = self.work_ram.scsp_regs.write().unwrap();
                 let mask = ram.len() - 1;
-                ram[off & mask] = val;
+                let masked_off = off & mask;
+                ram[masked_off] = val;
+                if masked_off == 0x400 {
+                    let mem4b = (val & 2) != 0;
+                    self.work_ram.mem4b.store(mem4b, std::sync::atomic::Ordering::Relaxed);
+                }
             }
             MemRegion::Vdp1Vram(off) => {
                 let mut ram = self.work_ram.vdp1_vram.write().unwrap();
@@ -594,8 +803,7 @@ impl Sh2 {
             }
             MemRegion::Vdp1Framebuffer(off) => {
                 let mut ram = self.work_ram.vdp1_framebuffer.write().unwrap();
-                let mask = ram.len() - 1;
-                ram[off & mask] = val;
+                ram[off & 0x3FFFF] = val;
             }
             MemRegion::Vdp1Regs(off) => {
                 let mut ram = self.work_ram.vdp1_regs.write().unwrap();
@@ -623,19 +831,21 @@ impl Sh2 {
                 ram[off & mask] = val;
             }
             MemRegion::Cs2Regs(off) => {
-                {
-                    let mut ram = self.work_ram.cs2_regs.write().unwrap();
-                    let mask = ram.len() - 1;
-                    ram[off & mask] = val;
-                }
-                if off == 6 || off == 7 {
-                    self.execute_cdrom_command();
+                let masked_off = off & 0xFFFFF;
+                if masked_off < 0x1000 {
+                    {
+                        let mut ram = self.work_ram.cs2_regs.write().unwrap();
+                        ram[masked_off] = val;
+                    }
+                    if masked_off == 6 || masked_off == 7 {
+                        self.execute_cdrom_command();
+                    }
                 }
             }
             MemRegion::BackupRam(off) => {
                 let mut ram = self.work_ram.backup_ram.write().unwrap();
                 let mask = ram.len() - 1;
-                ram[off & mask] = val;
+                ram[(off | 1) & mask] = val;
             }
             // SMPC: a real, persisted register file (IREG/OREG/SR/PDR/DDR/
             // IOSEL/EXLE) -- see `MemRegion::Smpc` on the read side. A write
@@ -663,32 +873,30 @@ impl Sh2 {
                     }
                 }
             }
-            MemRegion::CachePurge(off) => {
-                let uncached_addr = (off as u32) & 0x0FFF_FFFF;
+            MemRegion::PurgeArea => {
+                let uncached_addr = address & 0x0FFF_FFFF;
                 self.raw_write_byte(uncached_addr, val);
             }
-            MemRegion::CacheAddressArray(off) => {
-                let index = (off & 0x3FC) >> 2;
-                let mut word = self.cache_address_array[index];
-                let byte_shift = 24 - ((off & 3) * 8);
-                let mask = !(0xFF << byte_shift);
-                word = (word & mask) | ((val as u32) << byte_shift);
-                self.cache_address_array[index] = word;
+            MemRegion::AddressArray(_) => {}
+            MemRegion::DataArray(off) => {
+                self.data_array[off & 0xFFF] = val;
             }
-            MemRegion::CacheDataArray(off) => {
-                self.cache_data_array[off & 0xFFF] = val;
+            MemRegion::OnChip(off) => {
+                self.write_onchip_byte(off, val);
             }
             // BIOS is ROM: writes are silently discarded, matching real hardware.
-            MemRegion::Bios(_) | MemRegion::Unmapped | MemRegion::OnChip(_) => {}
+            MemRegion::Bios(_) | MemRegion::Unmapped => {}
         }
     }
 
     pub fn read_byte(&mut self, address: u32) -> u8 {
+        self.check_bus_miss(address, false, 1);
         self.bus_wait();
         self.raw_read_byte(address)
     }
 
     pub fn write_byte(&mut self, address: u32, val: u8) {
+        self.check_bus_miss(address, true, 1);
         self.bus_wait();
         if address == 0x0600_1000 {
             self.cdrom_command_executed = true;
@@ -700,17 +908,17 @@ impl Sh2 {
     /// happens once per transaction (matching a real single bus cycle), not
     /// once per byte fetched.
     pub fn read_word(&mut self, address: u32) -> u16 {
+        self.check_bus_miss(address, false, 2);
         if address % 2 != 0 {
             self.unaligned_access_flag = true;
         }
         self.bus_wait();
-        let hi = self.raw_read_byte(address);
-        let lo = self.raw_read_byte(address.wrapping_add(1));
-        (hi as u16) << 8 | (lo as u16)
+        self.raw_read_word(address)
     }
 
     /// Write 16-bit word to memory using the bus arbiter check
     pub fn write_word(&mut self, address: u32, val: u16) {
+        self.check_bus_miss(address, true, 2);
         if address % 2 != 0 {
             self.unaligned_access_flag = true;
         }
@@ -718,34 +926,22 @@ impl Sh2 {
         if address == 0x0600_1000 {
             self.cdrom_command_executed = true;
         }
-        self.raw_write_byte(address, (val >> 8) as u8);
-        self.raw_write_byte(address.wrapping_add(1), (val & 0xFF) as u8);
+        self.raw_write_word(address, val);
     }
 
     /// Read 32-bit long word (big-endian, matching real SH-2/Saturn wiring).
     pub fn read_long(&mut self, address: u32) -> u32 {
+        self.check_bus_miss(address, false, 4);
         if address % 4 != 0 {
             self.unaligned_access_flag = true;
         }
         self.bus_wait();
-        let region = self.translate(address);
-        if let MemRegion::ScuRegs(off) = region {
-            if let Some(val) = self.read_scu_dsp_port(off) {
-                return val;
-            }
-        }
-        if let MemRegion::OnChip(off) = region {
-            return self.read_onchip(off);
-        }
-        let b0 = self.raw_read_byte(address) as u32;
-        let b1 = self.raw_read_byte(address.wrapping_add(1)) as u32;
-        let b2 = self.raw_read_byte(address.wrapping_add(2)) as u32;
-        let b3 = self.raw_read_byte(address.wrapping_add(3)) as u32;
-        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+        self.raw_read_long(address)
     }
 
     /// Write 32-bit long word (big-endian).
     pub fn write_long(&mut self, address: u32, val: u32) {
+        self.check_bus_miss(address, true, 4);
         if address % 4 != 0 {
             self.unaligned_access_flag = true;
         }
@@ -753,49 +949,646 @@ impl Sh2 {
         if address <= 0x0600_1000 && address + 4 > 0x0600_1000 {
             self.cdrom_command_executed = true;
         }
+        self.raw_write_long(address, val);
+    }
+
+    fn raw_read_word(&self, address: u32) -> u16 {
         let region = self.translate(address);
-        if let MemRegion::CachePurge(_) = region {
-            // Longword write performs the associative cache purge.
-            // Until Phase 11, this is a no-op.
-            return;
+        let val = self.raw_read_word_region(region, address);
+        if self.core_id == 0 {
+            log_reg_access_once(&region, false, (val >> 8) as u8);
         }
-        if let MemRegion::ScuRegs(off) = region {
-            if self.write_scu_dsp_port(off, val) {
-                return;
+        val
+    }
+
+    fn raw_read_long(&self, address: u32) -> u32 {
+        let region = self.translate(address);
+        let val = self.raw_read_long_region(region, address);
+        if self.core_id == 0 {
+            log_reg_access_once(&region, false, (val >> 24) as u8);
+        }
+        val
+    }
+
+    fn raw_write_word(&mut self, address: u32, val: u16) {
+        let region = self.translate(address);
+        if self.core_id == 0 {
+            log_reg_access_once(&region, true, (val >> 8) as u8);
+        }
+        self.raw_write_word_region(region, address, val);
+    }
+
+    fn raw_write_long(&mut self, address: u32, val: u32) {
+        let region = self.translate(address);
+        if self.core_id == 0 {
+            log_reg_access_once(&region, true, (val >> 24) as u8);
+        }
+        self.raw_write_long_region(region, address, val);
+    }
+
+    fn raw_read_word_region(&self, region: MemRegion, _address: u32) -> u16 {
+        match region {
+            MemRegion::Bios(off) => {
+                let index = off & 0x7FFFF;
+                if index + 1 < self.bios.len() {
+                    let b0 = self.bios[index] as u16;
+                    let b1 = self.bios[index + 1] as u16;
+                    (b0 << 8) | b1
+                } else {
+                    0
+                }
             }
-            {
+            MemRegion::LowRam(off) => {
+                let ram = self.work_ram.low_ram.read().unwrap();
+                let mask = ram.len() - 1;
+                let b0 = ram[off & mask] as u16;
+                let b1 = ram[(off + 1) & mask] as u16;
+                (b0 << 8) | b1
+            }
+            MemRegion::HighRam(off) => {
+                self.work_ram.read_high_ram_word(off)
+            }
+            MemRegion::SoundRam(off) => {
+                let mut addr = off & 0xFFFFF;
+                let mem4b = self.work_ram.mem4b.load(std::sync::atomic::Ordering::Relaxed);
+                if !mem4b {
+                    addr &= 0x3FFFF;
+                    let ram = self.work_ram.sound_ram.read().unwrap();
+                    let mask = ram.len() - 1;
+                    let b0 = ram[addr & mask] as u16;
+                    let b1 = ram[(addr + 1) & mask] as u16;
+                    (b0 << 8) | b1
+                } else if addr > 0x7FFFF {
+                    0xFFFF
+                } else {
+                    let ram = self.work_ram.sound_ram.read().unwrap();
+                    let mask = ram.len() - 1;
+                    let b0 = ram[addr & mask] as u16;
+                    let b1 = ram[(addr + 1) & mask] as u16;
+                    (b0 << 8) | b1
+                }
+            }
+            MemRegion::ScspRegs(off) => {
+                let ram = self.work_ram.scsp_regs.read().unwrap();
+                let mask = ram.len() - 1;
+                let b0 = ram[off & mask] as u16;
+                let b1 = ram[(off + 1) & mask] as u16;
+                (b0 << 8) | b1
+            }
+            MemRegion::Vdp1Vram(off) => {
+                let ram = self.work_ram.vdp1_vram.read().unwrap();
+                let mask = ram.len() - 1;
+                let b0 = ram[off & mask] as u16;
+                let b1 = ram[(off + 1) & mask] as u16;
+                (b0 << 8) | b1
+            }
+            MemRegion::Vdp1Framebuffer(off) => {
+                let ram = self.work_ram.vdp1_framebuffer.read().unwrap();
+                let b0 = ram[off & 0x3FFFF] as u16;
+                let b1 = ram[(off + 1) & 0x3FFFF] as u16;
+                (b0 << 8) | b1
+            }
+            MemRegion::Vdp1Regs(off) => {
+                let ram = self.work_ram.vdp1_regs.read().unwrap();
+                let mask = ram.len() - 1;
+                let b0 = ram[off & mask] as u16;
+                let b1 = ram[(off + 1) & mask] as u16;
+                (b0 << 8) | b1
+            }
+            MemRegion::Vdp2Vram(off) => {
+                let ram = self.work_ram.vdp2_vram.read().unwrap();
+                let mask = ram.len() - 1;
+                let b0 = ram[off & mask] as u16;
+                let b1 = ram[(off + 1) & mask] as u16;
+                (b0 << 8) | b1
+            }
+            MemRegion::Vdp2Cram(off) => {
+                let ram = self.work_ram.vdp2_cram.read().unwrap();
+                let mask = ram.len() - 1;
+                let b0 = ram[off & mask] as u16;
+                let b1 = ram[(off + 1) & mask] as u16;
+                (b0 << 8) | b1
+            }
+            MemRegion::Vdp2Regs(off) => {
+                let masked_off = off & 0x1FF;
+                if masked_off == 0x004 || masked_off == 0x005 || masked_off == 0x003 {
+                    let b0 = self.raw_read_byte_region(MemRegion::Vdp2Regs(off));
+                    let b1 = self.raw_read_byte_region(MemRegion::Vdp2Regs(off + 1));
+                    ((b0 as u16) << 8) | (b1 as u16)
+                } else {
+                    let ram = self.work_ram.vdp2_regs.read().unwrap();
+                    let b0 = ram[masked_off] as u16;
+                    let b1 = ram[(masked_off + 1) & 0x1FF] as u16;
+                    (b0 << 8) | b1
+                }
+            }
+            MemRegion::ScuRegs(off) => {
+                let ram = self.work_ram.scu_regs.read().unwrap();
+                let mask = ram.len() - 1;
+                let b0 = ram[off & mask] as u16;
+                let b1 = ram[(off + 1) & mask] as u16;
+                (b0 << 8) | b1
+            }
+            MemRegion::Cs2Regs(off) => {
+                let masked_off = off & 0xFFFFF;
+                if masked_off < 0x1000 {
+                    let ram = self.work_ram.cs2_regs.read().unwrap();
+                    let b0 = ram[masked_off] as u16;
+                    let b1 = ram[(masked_off + 1) & 0xFFF] as u16;
+                    (b0 << 8) | b1
+                } else {
+                    0
+                }
+            }
+            MemRegion::BackupRam(off) => {
+                let ram = self.work_ram.backup_ram.read().unwrap();
+                let mask = ram.len() - 1;
+                let b0 = ram[off & mask] as u16;
+                let b1 = ram[(off + 1) & mask] as u16;
+                (b0 << 8) | b1
+            }
+            MemRegion::Smpc(off) => {
+                let b0 = self.raw_read_byte_region(MemRegion::Smpc(off));
+                let b1 = self.raw_read_byte_region(MemRegion::Smpc(off + 1));
+                ((b0 as u16) << 8) | (b1 as u16)
+            }
+            MemRegion::DataArray(off) => {
+                let b0 = self.data_array[off & 0xFFF] as u16;
+                let b1 = self.data_array[(off + 1) & 0xFFF] as u16;
+                (b0 << 8) | b1
+            }
+            MemRegion::OnChip(off) => {
+                self.read_onchip_word(off)
+            }
+            MemRegion::PurgeArea => 0xFFFF,
+            MemRegion::AddressArray(_) | MemRegion::Unmapped => 0,
+        }
+    }
+
+    fn raw_read_long_region(&self, region: MemRegion, address: u32) -> u32 {
+        match region {
+            MemRegion::Bios(off) => {
+                let index = off & 0x7FFFF;
+                if index + 3 < self.bios.len() {
+                    let b0 = self.bios[index] as u32;
+                    let b1 = self.bios[index + 1] as u32;
+                    let b2 = self.bios[index + 2] as u32;
+                    let b3 = self.bios[index + 3] as u32;
+                    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+                } else {
+                    0
+                }
+            }
+            MemRegion::LowRam(off) => {
+                let ram = self.work_ram.low_ram.read().unwrap();
+                let mask = ram.len() - 1;
+                let b0 = ram[off & mask] as u32;
+                let b1 = ram[(off + 1) & mask] as u32;
+                let b2 = ram[(off + 2) & mask] as u32;
+                let b3 = ram[(off + 3) & mask] as u32;
+                (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+            }
+            MemRegion::HighRam(off) => {
+                self.work_ram.read_high_ram_long(off)
+            }
+            MemRegion::SoundRam(off) => {
+                let mut addr = off & 0xFFFFF;
+                let mem4b = self.work_ram.mem4b.load(std::sync::atomic::Ordering::Relaxed);
+                if !mem4b {
+                    addr &= 0x3FFFF;
+                    let ram = self.work_ram.sound_ram.read().unwrap();
+                    let mask = ram.len() - 1;
+                    let b0 = ram[addr & mask] as u32;
+                    let b1 = ram[(addr + 1) & mask] as u32;
+                    let b2 = ram[(addr + 2) & mask] as u32;
+                    let b3 = ram[(addr + 3) & mask] as u32;
+                    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+                } else if addr > 0x7FFFF {
+                    0xFFFFFFFF
+                } else {
+                    let ram = self.work_ram.sound_ram.read().unwrap();
+                    let mask = ram.len() - 1;
+                    let b0 = ram[addr & mask] as u32;
+                    let b1 = ram[(addr + 1) & mask] as u32;
+                    let b2 = ram[(addr + 2) & mask] as u32;
+                    let b3 = ram[(addr + 3) & mask] as u32;
+                    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+                }
+            }
+            MemRegion::ScspRegs(off) => {
+                let ram = self.work_ram.scsp_regs.read().unwrap();
+                let mask = ram.len() - 1;
+                let b0 = ram[off & mask] as u32;
+                let b1 = ram[(off + 1) & mask] as u32;
+                let b2 = ram[(off + 2) & mask] as u32;
+                let b3 = ram[(off + 3) & mask] as u32;
+                (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+            }
+            MemRegion::Vdp1Vram(off) => {
+                let ram = self.work_ram.vdp1_vram.read().unwrap();
+                let mask = ram.len() - 1;
+                let b0 = ram[off & mask] as u32;
+                let b1 = ram[(off + 1) & mask] as u32;
+                let b2 = ram[(off + 2) & mask] as u32;
+                let b3 = ram[(off + 3) & mask] as u32;
+                (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+            }
+            MemRegion::Vdp1Framebuffer(off) => {
+                let ram = self.work_ram.vdp1_framebuffer.read().unwrap();
+                let b0 = ram[off & 0x3FFFF] as u32;
+                let b1 = ram[(off + 1) & 0x3FFFF] as u32;
+                let b2 = ram[(off + 2) & 0x3FFFF] as u32;
+                let b3 = ram[(off + 3) & 0x3FFFF] as u32;
+                (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+            }
+            MemRegion::Vdp1Regs(off) => {
+                let ram = self.work_ram.vdp1_regs.read().unwrap();
+                let mask = ram.len() - 1;
+                let b0 = ram[off & mask] as u32;
+                let b1 = ram[(off + 1) & mask] as u32;
+                let b2 = ram[(off + 2) & mask] as u32;
+                let b3 = ram[(off + 3) & mask] as u32;
+                (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+            }
+            MemRegion::Vdp2Vram(off) => {
+                let ram = self.work_ram.vdp2_vram.read().unwrap();
+                let mask = ram.len() - 1;
+                let b0 = ram[off & mask] as u32;
+                let b1 = ram[(off + 1) & mask] as u32;
+                let b2 = ram[(off + 2) & mask] as u32;
+                let b3 = ram[(off + 3) & mask] as u32;
+                (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+            }
+            MemRegion::Vdp2Cram(off) => {
+                let ram = self.work_ram.vdp2_cram.read().unwrap();
+                let mask = ram.len() - 1;
+                let b0 = ram[off & mask] as u32;
+                let b1 = ram[(off + 1) & mask] as u32;
+                let b2 = ram[(off + 2) & mask] as u32;
+                let b3 = ram[(off + 3) & mask] as u32;
+                (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+            }
+            MemRegion::Vdp2Regs(off) => {
+                let masked_off = off & 0x1FF;
+                if masked_off <= 0x005 {
+                    let b0 = self.raw_read_byte_region(MemRegion::Vdp2Regs(off)) as u32;
+                    let b1 = self.raw_read_byte_region(MemRegion::Vdp2Regs(off + 1)) as u32;
+                    let b2 = self.raw_read_byte_region(MemRegion::Vdp2Regs(off + 2)) as u32;
+                    let b3 = self.raw_read_byte_region(MemRegion::Vdp2Regs(off + 3)) as u32;
+                    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+                } else {
+                    let ram = self.work_ram.vdp2_regs.read().unwrap();
+                    let b0 = ram[masked_off] as u32;
+                    let b1 = ram[(masked_off + 1) & 0x1FF] as u32;
+                    let b2 = ram[(masked_off + 2) & 0x1FF] as u32;
+                    let b3 = ram[(masked_off + 3) & 0x1FF] as u32;
+                    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+                }
+            }
+            MemRegion::ScuRegs(off) => {
+                let off = off & 0xFF;
+                if let Some(val) = self.read_scu_dsp_port(off) {
+                    val
+                } else {
+                    let ram = self.work_ram.scu_regs.read().unwrap();
+                    let mask = ram.len() - 1;
+                    let b0 = ram[off & mask] as u32;
+                    let b1 = ram[(off + 1) & mask] as u32;
+                    let b2 = ram[(off + 2) & mask] as u32;
+                    let b3 = ram[(off + 3) & mask] as u32;
+                    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+                }
+            }
+            MemRegion::Cs2Regs(off) => {
+                let masked_off = off & 0xFFFFF;
+                if masked_off < 0x1000 {
+                    let ram = self.work_ram.cs2_regs.read().unwrap();
+                    let b0 = ram[masked_off] as u32;
+                    let b1 = ram[(masked_off + 1) & 0xFFF] as u32;
+                    let b2 = ram[(masked_off + 2) & 0xFFF] as u32;
+                    let b3 = ram[(masked_off + 3) & 0xFFF] as u32;
+                    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+                } else {
+                    0
+                }
+            }
+            MemRegion::BackupRam(off) => {
+                let ram = self.work_ram.backup_ram.read().unwrap();
+                let mask = ram.len() - 1;
+                let b0 = ram[off & mask] as u32;
+                let b1 = ram[(off + 1) & mask] as u32;
+                let b2 = ram[(off + 2) & mask] as u32;
+                let b3 = ram[(off + 3) & mask] as u32;
+                (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+            }
+            MemRegion::Smpc(off) => {
+                let b0 = self.raw_read_byte_region(MemRegion::Smpc(off)) as u32;
+                let b1 = self.raw_read_byte_region(MemRegion::Smpc(off + 1)) as u32;
+                let b2 = self.raw_read_byte_region(MemRegion::Smpc(off + 2)) as u32;
+                let b3 = self.raw_read_byte_region(MemRegion::Smpc(off + 3)) as u32;
+                (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+            }
+            MemRegion::DataArray(off) => {
+                let b0 = self.data_array[off & 0xFFF] as u32;
+                let b1 = self.data_array[(off + 1) & 0xFFF] as u32;
+                let b2 = self.data_array[(off + 2) & 0xFFF] as u32;
+                let b3 = self.data_array[(off + 3) & 0xFFF] as u32;
+                (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+            }
+            MemRegion::OnChip(off) => {
+                self.read_onchip(off)
+            }
+            MemRegion::AddressArray(off) => {
+                self.address_array[off >> 2]
+            }
+            MemRegion::PurgeArea => 0xFFFFFFFF,
+            MemRegion::Unmapped => 0,
+        }
+    }
+
+    fn raw_write_word_region(&mut self, region: MemRegion, address: u32, val: u16) {
+        match region {
+            MemRegion::LowRam(off) => {
+                let mut ram = self.work_ram.low_ram.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = (val >> 8) as u8;
+                ram[(off + 1) & mask] = val as u8;
+            }
+            MemRegion::HighRam(off) => {
+                self.work_ram.write_high_ram_word(off, val);
+            }
+            MemRegion::SoundRam(off) => {
+                let mut addr = off & 0xFFFFF;
+                let mem4b = self.work_ram.mem4b.load(std::sync::atomic::Ordering::Relaxed);
+                if !mem4b {
+                    addr &= 0x3FFFF;
+                    let mut ram = self.work_ram.sound_ram.write().unwrap();
+                    let mask = ram.len() - 1;
+                    ram[addr & mask] = (val >> 8) as u8;
+                    ram[(addr + 1) & mask] = val as u8;
+                } else if addr <= 0x7FFFF {
+                    let mut ram = self.work_ram.sound_ram.write().unwrap();
+                    let mask = ram.len() - 1;
+                    ram[addr & mask] = (val >> 8) as u8;
+                    ram[(addr + 1) & mask] = val as u8;
+                }
+            }
+            MemRegion::ScspRegs(off) => {
+                let mut ram = self.work_ram.scsp_regs.write().unwrap();
+                let mask = ram.len() - 1;
+                let masked_off = off & mask;
+                ram[masked_off] = (val >> 8) as u8;
+                if masked_off == 0x400 {
+                    let mem4b = (ram[masked_off] & 2) != 0;
+                    self.work_ram.mem4b.store(mem4b, std::sync::atomic::Ordering::Relaxed);
+                }
+                let masked_off2 = (off + 1) & mask;
+                ram[masked_off2] = val as u8;
+                if masked_off2 == 0x400 {
+                    let mem4b = (ram[masked_off2] & 2) != 0;
+                    self.work_ram.mem4b.store(mem4b, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            MemRegion::Vdp1Vram(off) => {
+                let mut ram = self.work_ram.vdp1_vram.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = (val >> 8) as u8;
+                ram[(off + 1) & mask] = val as u8;
+            }
+            MemRegion::Vdp1Framebuffer(off) => {
+                let mut ram = self.work_ram.vdp1_framebuffer.write().unwrap();
+                ram[off & 0x3FFFF] = (val >> 8) as u8;
+                ram[(off + 1) & 0x3FFFF] = val as u8;
+            }
+            MemRegion::Vdp1Regs(off) => {
+                let mut ram = self.work_ram.vdp1_regs.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = (val >> 8) as u8;
+                ram[(off + 1) & mask] = val as u8;
+            }
+            MemRegion::Vdp2Vram(off) => {
+                let mut ram = self.work_ram.vdp2_vram.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = (val >> 8) as u8;
+                ram[(off + 1) & mask] = val as u8;
+            }
+            MemRegion::Vdp2Cram(off) => {
+                let mut ram = self.work_ram.vdp2_cram.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = (val >> 8) as u8;
+                ram[(off + 1) & mask] = val as u8;
+            }
+            MemRegion::Vdp2Regs(off) => {
+                let mut ram = self.work_ram.vdp2_regs.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = (val >> 8) as u8;
+                ram[(off + 1) & mask] = val as u8;
+            }
+            MemRegion::ScuRegs(off) => {
                 let mut ram = self.work_ram.scu_regs.write().unwrap();
-                let bytes = val.to_be_bytes();
-                if off + 3 < ram.len() {
-                    ram[off] = bytes[0];
-                    ram[off + 1] = bytes[1];
-                    ram[off + 2] = bytes[2];
-                    ram[off + 3] = bytes[3];
+                let mask = ram.len() - 1;
+                ram[off & mask] = (val >> 8) as u8;
+                ram[(off + 1) & mask] = val as u8;
+            }
+            MemRegion::Cs2Regs(off) => {
+                let masked_off = off & 0xFFFFF;
+                if masked_off < 0x1000 {
+                    {
+                        let mut ram = self.work_ram.cs2_regs.write().unwrap();
+                        ram[masked_off] = (val >> 8) as u8;
+                        ram[(masked_off + 1) & 0xFFF] = val as u8;
+                    }
+                    if masked_off == 6 || masked_off == 7 || masked_off + 1 == 6 || masked_off + 1 == 7 {
+                        self.execute_cdrom_command();
+                    }
                 }
             }
-            if off == 0x10 {
-                if val & 1 != 0 {
-                    self.execute_scu_dma(0);
-                }
-            } else if off == 0x30 {
-                if val & 1 != 0 {
-                    self.execute_scu_dma(1);
-                }
-            } else if off == 0x50 {
-                if val & 1 != 0 {
-                    self.execute_scu_dma(2);
+            MemRegion::BackupRam(off) => {
+                let mut ram = self.work_ram.backup_ram.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[(off | 1) & mask] = (val >> 8) as u8;
+                ram[((off + 1) | 1) & mask] = val as u8;
+            }
+            MemRegion::Smpc(off) => {
+                self.raw_write_byte(address, (val >> 8) as u8);
+                self.raw_write_byte(address.wrapping_add(1), val as u8);
+            }
+            MemRegion::OnChip(off) => {
+                self.write_onchip_word(off, val);
+            }
+            MemRegion::PurgeArea => {
+                let uncached_addr = address & 0x0FFF_FFFF;
+                self.raw_write_word(uncached_addr, val);
+            }
+            MemRegion::AddressArray(_) | MemRegion::DataArray(_) | MemRegion::Bios(_) | MemRegion::Unmapped => {}
+        }
+    }
+
+    fn raw_write_long_region(&mut self, region: MemRegion, address: u32, val: u32) {
+        match region {
+            MemRegion::LowRam(off) => {
+                let mut ram = self.work_ram.low_ram.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = (val >> 24) as u8;
+                ram[(off + 1) & mask] = (val >> 16) as u8;
+                ram[(off + 2) & mask] = (val >> 8) as u8;
+                ram[(off + 3) & mask] = val as u8;
+            }
+            MemRegion::HighRam(off) => {
+                self.work_ram.write_high_ram_long(off, val);
+            }
+            MemRegion::SoundRam(off) => {
+                let mut addr = off & 0xFFFFF;
+                let mem4b = self.work_ram.mem4b.load(std::sync::atomic::Ordering::Relaxed);
+                if !mem4b {
+                    addr &= 0x3FFFF;
+                    let mut ram = self.work_ram.sound_ram.write().unwrap();
+                    let mask = ram.len() - 1;
+                    ram[addr & mask] = (val >> 24) as u8;
+                    ram[(addr + 1) & mask] = (val >> 16) as u8;
+                    ram[(addr + 2) & mask] = (val >> 8) as u8;
+                    ram[(addr + 3) & mask] = val as u8;
+                } else if addr <= 0x7FFFF {
+                    let mut ram = self.work_ram.sound_ram.write().unwrap();
+                    let mask = ram.len() - 1;
+                    ram[addr & mask] = (val >> 24) as u8;
+                    ram[(addr + 1) & mask] = (val >> 16) as u8;
+                    ram[(addr + 2) & mask] = (val >> 8) as u8;
+                    ram[(addr + 3) & mask] = val as u8;
                 }
             }
-            return;
+            MemRegion::ScspRegs(off) => {
+                let mut ram = self.work_ram.scsp_regs.write().unwrap();
+                let mask = ram.len() - 1;
+                for i in 0..4 {
+                    let masked_off = (off + i) & mask;
+                    ram[masked_off] = (val >> (8 * (3 - i))) as u8;
+                    if masked_off == 0x400 {
+                        let mem4b = (ram[masked_off] & 2) != 0;
+                        self.work_ram.mem4b.store(mem4b, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+            MemRegion::Vdp1Vram(off) => {
+                let mut ram = self.work_ram.vdp1_vram.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = (val >> 24) as u8;
+                ram[(off + 1) & mask] = (val >> 16) as u8;
+                ram[(off + 2) & mask] = (val >> 8) as u8;
+                ram[(off + 3) & mask] = val as u8;
+            }
+            MemRegion::Vdp1Framebuffer(off) => {
+                let mut ram = self.work_ram.vdp1_framebuffer.write().unwrap();
+                ram[off & 0x3FFFF] = (val >> 24) as u8;
+                ram[(off + 1) & 0x3FFFF] = (val >> 16) as u8;
+                ram[(off + 2) & 0x3FFFF] = (val >> 8) as u8;
+                ram[(off + 3) & 0x3FFFF] = val as u8;
+            }
+            MemRegion::Vdp1Regs(off) => {
+                let mut ram = self.work_ram.vdp1_regs.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = (val >> 24) as u8;
+                ram[(off + 1) & mask] = (val >> 16) as u8;
+                ram[(off + 2) & mask] = (val >> 8) as u8;
+                ram[(off + 3) & mask] = val as u8;
+            }
+            MemRegion::Vdp2Vram(off) => {
+                let mut ram = self.work_ram.vdp2_vram.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = (val >> 24) as u8;
+                ram[(off + 1) & mask] = (val >> 16) as u8;
+                ram[(off + 2) & mask] = (val >> 8) as u8;
+                ram[(off + 3) & mask] = val as u8;
+            }
+            MemRegion::Vdp2Cram(off) => {
+                let mut ram = self.work_ram.vdp2_cram.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = (val >> 24) as u8;
+                ram[(off + 1) & mask] = (val >> 16) as u8;
+                ram[(off + 2) & mask] = (val >> 8) as u8;
+                ram[(off + 3) & mask] = val as u8;
+            }
+            MemRegion::Vdp2Regs(off) => {
+                let mut ram = self.work_ram.vdp2_regs.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[off & mask] = (val >> 24) as u8;
+                ram[(off + 1) & mask] = (val >> 16) as u8;
+                ram[(off + 2) & mask] = (val >> 8) as u8;
+                ram[(off + 3) & mask] = val as u8;
+            }
+            MemRegion::ScuRegs(off) => {
+                let off = off & 0xFF;
+                if self.write_scu_dsp_port(off, val) {
+                    return;
+                }
+                {
+                    let mut ram = self.work_ram.scu_regs.write().unwrap();
+                    let bytes = val.to_be_bytes();
+                    if off + 3 < ram.len() {
+                        ram[off] = bytes[0];
+                        ram[off + 1] = bytes[1];
+                        ram[off + 2] = bytes[2];
+                        ram[off + 3] = bytes[3];
+                    }
+                }
+                if off == 0x10 {
+                    if val & 1 != 0 {
+                        self.execute_scu_dma(0);
+                    }
+                } else if off == 0x30 {
+                    if val & 1 != 0 {
+                        self.execute_scu_dma(1);
+                    }
+                } else if off == 0x50 {
+                    if val & 1 != 0 {
+                        self.execute_scu_dma(2);
+                    }
+                }
+            }
+            MemRegion::Cs2Regs(off) => {
+                let masked_off = off & 0xFFFFF;
+                if masked_off < 0x1000 {
+                    {
+                        let mut ram = self.work_ram.cs2_regs.write().unwrap();
+                        ram[masked_off] = (val >> 24) as u8;
+                        ram[(masked_off + 1) & 0xFFF] = (val >> 16) as u8;
+                        ram[(masked_off + 2) & 0xFFF] = (val >> 8) as u8;
+                        ram[(masked_off + 3) & 0xFFF] = val as u8;
+                    }
+                    if (masked_off..masked_off+4).any(|o| o == 6 || o == 7) {
+                        self.execute_cdrom_command();
+                    }
+                }
+            }
+            MemRegion::BackupRam(off) => {
+                let mut ram = self.work_ram.backup_ram.write().unwrap();
+                let mask = ram.len() - 1;
+                ram[(off | 1) & mask] = (val >> 24) as u8;
+                ram[((off + 1) | 1) & mask] = (val >> 16) as u8;
+                ram[((off + 2) | 1) & mask] = (val >> 8) as u8;
+                ram[((off + 3) | 1) & mask] = val as u8;
+            }
+            MemRegion::Smpc(off) => {
+                self.raw_write_byte(address, (val >> 24) as u8);
+                self.raw_write_byte(address.wrapping_add(1), (val >> 16) as u8);
+                self.raw_write_byte(address.wrapping_add(2), (val >> 8) as u8);
+                self.raw_write_byte(address.wrapping_add(3), val as u8);
+            }
+            MemRegion::OnChip(off) => {
+                self.write_onchip(off & !3, val);
+            }
+            MemRegion::PurgeArea => {}
+            MemRegion::AddressArray(off) => {
+                self.address_array[off >> 2] = val;
+            }
+            MemRegion::DataArray(off) => {
+                self.data_array[off & 0xFFF] = (val >> 24) as u8;
+                self.data_array[(off + 1) & 0xFFF] = (val >> 16) as u8;
+                self.data_array[(off + 2) & 0xFFF] = (val >> 8) as u8;
+                self.data_array[(off + 3) & 0xFFF] = val as u8;
+            }
+            MemRegion::Bios(_) | MemRegion::Unmapped => {}
         }
-        if let MemRegion::OnChip(off) = region {
-            self.write_onchip(off, val);
-            return;
-        }
-        self.raw_write_byte(address, (val >> 24) as u8);
-        self.raw_write_byte(address.wrapping_add(1), (val >> 16) as u8);
-        self.raw_write_byte(address.wrapping_add(2), (val >> 8) as u8);
-        self.raw_write_byte(address.wrapping_add(3), val as u8);
     }
 
     /// SCU DSP register ports (offsets 0x80/0x84/0x88/0x8C) are real
@@ -888,8 +1681,8 @@ impl Sh2 {
         self.service_pending_interrupt();
         let opcode = if (self.pc & 0xC000_0000) == 0xC000_0000 {
             let off = (self.pc & 0xFFF) as usize;
-            let hi = self.cache_data_array[off];
-            let lo = self.cache_data_array[off.wrapping_add(1) & 0xFFF];
+            let hi = self.data_array[off];
+            let lo = self.data_array[off.wrapping_add(1) & 0xFFF];
             (hi as u16) << 8 | (lo as u16)
         } else {
             self.read_word(self.pc)
@@ -903,13 +1696,13 @@ impl Sh2 {
     /// the next `step()`, and only if SR's interrupt mask allows it -- same
     /// as real hardware, a masked interrupt just stays pending.
     pub fn request_vblank_interrupt(&mut self) {
-        self.vblank_pending = true;
+        self.queue_send(VBLANK_IN_VECTOR as u8, VBLANK_IN_LEVEL as u8);
     }
 
     /// Raise VBLANK-OUT -- see `VBLANK_OUT_LEVEL`'s doc comment for why this
     /// is a real, separate interrupt and not a duplicate of VBLANK-IN.
     pub fn request_vblank_out_interrupt(&mut self) {
-        self.vblank_out_pending = true;
+        self.queue_send(VBLANK_OUT_VECTOR as u8, VBLANK_OUT_LEVEL as u8);
     }
 
     /// Apply the side effects `Smpc::execute_command` reported, exactly
@@ -943,7 +1736,7 @@ impl Sh2 {
             }
         }
         if effects.system_manager_irq {
-            self.smpc_irq_pending = true;
+            self.queue_send(SMPC_IRQ_VECTOR as u8, SMPC_IRQ_LEVEL as u8);
         }
     }
 
@@ -1040,7 +1833,7 @@ impl Sh2 {
         // finishes; BIOS INTBACK handshakes wait on this specifically (not
         // just on SF), so without it the boot sequence stalls even though SF
         // itself always reads idle.
-        self.smpc_irq_pending = true;
+        self.queue_send(SMPC_IRQ_VECTOR as u8, SMPC_IRQ_LEVEL as u8);
     }
 
     /// Compute TVSTAT live from wall-clock frame timing rather than storing
@@ -1062,49 +1855,54 @@ impl Sh2 {
     }
 
     fn service_pending_interrupt(&mut self) {
-        // Real hardware picks the highest-priority pending request:
-        // VBLANK-IN (15) > VBLANK-OUT (14) > Sound Request (9) > SMPC
-        // System Manager (8).
-        let sound_req_pending = self.sound_req_irq.as_ref()
-            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
-        let (level, vector) = if self.vblank_pending {
-            (VBLANK_IN_LEVEL, VBLANK_IN_VECTOR)
-        } else if self.vblank_out_pending {
-            (VBLANK_OUT_LEVEL, VBLANK_OUT_VECTOR)
-        } else if sound_req_pending {
-            (SOUND_REQ_IRQ_LEVEL, SOUND_REQ_IRQ_VECTOR)
-        } else if self.smpc_irq_pending {
-            (SMPC_IRQ_LEVEL, SMPC_IRQ_VECTOR)
-        } else {
+        // Sync sound request IRQ atomic bool with the queue first
+        if let Some(ref f) = self.sound_req_irq {
+            if f.load(std::sync::atomic::Ordering::Relaxed) {
+                self.queue_send(SOUND_REQ_IRQ_VECTOR as u8, SOUND_REQ_IRQ_LEVEL as u8);
+            } else {
+                self.queue_remove(SOUND_REQ_IRQ_VECTOR as u8);
+            }
+        }
+
+        // Peek highest level pending interrupt from the queue
+        let Some(int) = self.queue_peek() else {
             return;
         };
+
         let current_mask = (self.sr >> SR_IMASK_SHIFT) & 0xF;
-        if level <= current_mask {
+        // Deliver if level is strictly greater than imask (or level is 16 which is NMI)
+        if (int.level as u32) <= current_mask && int.level != 16 {
             return; // masked: stays pending until SR's mask is lowered
         }
-        if self.vblank_pending {
-            self.vblank_pending = false;
-        } else if self.vblank_out_pending {
-            self.vblank_out_pending = false;
-        } else if sound_req_pending {
+
+        // Dequeue/remove the serviced interrupt
+        self.queue_remove(int.vector);
+
+        // Sound request IRQ atomic bool update
+        if int.vector == SOUND_REQ_IRQ_VECTOR as u8 {
             if let Some(ref f) = self.sound_req_irq {
                 f.store(false, std::sync::atomic::Ordering::Relaxed);
             }
-        } else {
-            self.smpc_irq_pending = false;
         }
-        // Real SH-2 exception entry: push SR then PC (so RTE's PC-then-SR
-        // pop order, see the RTE opcode handler above, reads them back out
-        // correctly), then jump through the VBR-relative vector table and
-        // raise the mask to this interrupt's own level so it can't
-        // re-enter itself before RTE restores the original SR.
+
+        // Wake parked thread
+        if let Some(ref sync) = self.sync {
+            sync.set_thread_active(self.core_id, true);
+        }
+
+        // Real SH-2 exception entry: push SR then PC
         let sr_addr = self.registers[15].wrapping_sub(4);
         self.write_long(sr_addr, self.sr);
         let pc_addr = sr_addr.wrapping_sub(4);
         self.write_long(pc_addr, self.pc);
         self.registers[15] = pc_addr;
-        self.sr = (self.sr & !(0xFu32 << SR_IMASK_SHIFT)) | (level << SR_IMASK_SHIFT);
-        self.pc = self.read_long(self.vbr.wrapping_add(vector * 4));
+
+        // Update SR mask: clamp NMI level to 15 (0xF)
+        let new_mask = if int.level == 16 { 15 } else { int.level as u32 };
+        self.sr = (self.sr & !(0xFu32 << SR_IMASK_SHIFT)) | (new_mask << SR_IMASK_SHIFT);
+
+        // Vector jump
+        self.pc = self.read_long(self.vbr.wrapping_add((int.vector as u32) * 4));
     }
 
     /// Fetch and run the instruction at the delay slot (currently at
@@ -1707,83 +2505,440 @@ impl Sh2 {
         self.illegal_instruction_flag = true;
     }
 
+    fn get_onchip_16(&self, off: usize) -> Option<u16> {
+        match off {
+            // INTC
+            0x060 => Some(self.onchip.iprb),
+            0x062 => Some(self.onchip.vcra),
+            0x064 => Some(self.onchip.vcrb),
+            0x066 => Some(self.onchip.vcrc),
+            0x068 => Some(self.onchip.vcrd),
+            0x0E0 => Some(self.onchip.icr),
+            0x0E2 => Some(self.onchip.ipra),
+            0x0E4 => Some(self.onchip.vcrwdt),
+
+            // BSC
+            0x1E0 | 0x1E2 => Some(self.onchip.bcr1),
+            0x1E4 | 0x1E6 => Some(self.onchip.bcr2),
+            0x1E8 | 0x1EA => Some(self.onchip.wcr),
+            0x1EC | 0x1EE => Some(self.onchip.mcr),
+            0x1F0 | 0x1F2 => Some(self.onchip.rtcsr),
+            0x1F4 | 0x1F6 => Some(self.onchip.rtcnt),
+            0x1F8 | 0x1FA => Some(self.onchip.rtcor),
+
+            // FRT
+            0x012 => Some(self.onchip.frc),
+            0x014 => Some(self.onchip.ocra),
+            0x018 => Some(self.onchip.ficr),
+
+            // UBC
+            0x148 => Some(self.onchip.bbra),
+            0x168 => Some(self.onchip.bbrb),
+            _ => None,
+        }
+    }
+
+    fn get_onchip_32(&self, off: usize) -> Option<u32> {
+        let normalized = if off >= 0x120 && off <= 0x13F { off - 0x20 } else { off };
+        match normalized {
+            // DIVU
+            0x100 => Some(self.onchip.dvsr),
+            0x104 => Some(self.onchip.dvdntl), // DVDNT reads return dvdntl
+            0x108 => Some(self.onchip.dvcr),
+            0x10C => Some(self.onchip.vcrdiv),
+            0x110 => Some(self.onchip.dvdnth),
+            0x114 => Some(self.onchip.dvdntl),
+            0x118 => Some(self.onchip.dvdntuh),
+            0x11C => Some(self.onchip.dvdntul),
+
+            // UBC
+            0x140 => Some(self.onchip.bara),
+            0x144 => Some(self.onchip.bamra),
+            0x178 => Some(self.onchip.brcr),
+
+            // DMA
+            0x180 => Some(self.onchip.sar0),
+            0x184 => Some(self.onchip.dar0),
+            0x188 => Some(self.onchip.tcr0),
+            0x18C => Some(self.onchip.chcr0),
+            0x190 => Some(self.onchip.sar1),
+            0x194 => Some(self.onchip.dar1),
+            0x198 => Some(self.onchip.tcr1),
+            0x19C => Some(self.onchip.chcr1),
+            0x1A0 => Some(self.onchip.vcrdma0),
+            0x1A8 => Some(self.onchip.vcrdma1),
+            0x1B0 => Some(self.onchip.dmaor),
+            _ => None,
+        }
+    }
+
+    fn read_onchip_byte(&self, off: usize) -> u8 {
+        match off {
+            // SCI (0x000 - 0x005)
+            0x000 => self.onchip.smr,
+            0x001 => self.onchip.brr,
+            0x002 => self.onchip.scr,
+            0x003 => self.onchip.tdr,
+            0x004 => self.onchip.ssr,
+            0x005 => self.onchip.rdr,
+
+            // FRT (0x010 - 0x019)
+            0x010 => self.onchip.tier,
+            0x011 => self.onchip.ftcsr,
+            0x016 => self.onchip.tcr,
+            0x017 => self.onchip.tocr,
+
+            // DRCR
+            0x071 => self.onchip.drcr0,
+            0x072 => self.onchip.drcr1,
+
+            // WDT
+            0x080 => self.onchip.wtcsr,
+            0x081 => self.onchip.wtcnt,
+            0x083 => self.onchip.rstcsr,
+
+            // SBYCR / CCR
+            0x091 => self.onchip.sbycr,
+            0x092 => self.onchip.ccr,
+
+            _ => {
+                if let Some(val) = self.get_onchip_16(off & !1) {
+                    if (off & 1) == 0 {
+                        (val >> 8) as u8
+                    } else {
+                        (val & 0xFF) as u8
+                    }
+                } else if let Some(val) = self.get_onchip_32(off & !3) {
+                    let byte_shift = 24 - ((off & 3) * 8);
+                    ((val >> byte_shift) & 0xFF) as u8
+                } else {
+                    // Log unhandled onchip read (deduplicated)
+                    let region = MemRegion::OnChip(off);
+                    log_reg_access_once(&region, false, 0);
+                    0
+                }
+            }
+        }
+    }
+
+    fn read_onchip_word(&self, off: usize) -> u16 {
+        if let Some(val) = self.get_onchip_16(off) {
+            val
+        } else if let Some(val) = self.get_onchip_32(off & !3) {
+            let byte_shift = 16 - ((off & 2) * 8);
+            ((val >> byte_shift) & 0xFFFF) as u16
+        } else {
+            let b0 = self.read_onchip_byte(off) as u16;
+            let b1 = self.read_onchip_byte(off + 1) as u16;
+            (b0 << 8) | b1
+        }
+    }
+
+    fn write_onchip_byte(&mut self, off: usize, val: u8) {
+        match off {
+            // SCI (0x000 - 0x005)
+            0x000 => self.onchip.smr = val,
+            0x001 => self.onchip.brr = val,
+            0x002 => {
+                self.onchip.scr = val;
+                if (val & 0x20) == 0 {
+                    self.onchip.ssr |= 0x80;
+                }
+            }
+            0x003 => self.onchip.tdr = val,
+            0x004 => {
+                self.onchip.ssr = val;
+            }
+            0x005 => {} // RDR is read-only
+
+            // FRT (0x010 - 0x019)
+            0x010 => self.onchip.tier = val,
+            0x011 => self.onchip.ftcsr = val,
+            0x016 => self.onchip.tcr = val,
+            0x017 => self.onchip.tocr = val,
+
+            // INTC destructive byte write quirks (P4-T3)
+            0x060 => self.onchip.iprb = ((val as u16) << 8) & 0xFF00,
+            0x061 => {} // Ignored
+            0x068 => self.onchip.vcrd = ((val as u16) << 8) & 0x7F00,
+            0x069 => {} // Ignored
+
+            // DRCR
+            0x071 => self.onchip.drcr0 = val & 0x3,
+            0x072 => self.onchip.drcr1 = val & 0x3,
+
+            // WDT
+            0x080 => self.onchip.wtcsr = val,
+            0x081 => self.onchip.wtcnt = val,
+            0x083 => self.onchip.rstcsr = val,
+
+            // SBYCR / CCR
+            0x091 => self.onchip.sbycr = val & 0xDF,
+            0x092 => {
+                self.onchip.ccr = val & 0xCF;
+            }
+
+            _ => {
+                let reg_off = off & !1;
+                if let Some(mut word_val) = self.get_onchip_16(reg_off) {
+                    if (off & 1) == 0 {
+                        word_val = (word_val & 0x00FF) | ((val as u16) << 8);
+                    } else {
+                        word_val = (word_val & 0xFF00) | (val as u16);
+                    }
+                    self.write_onchip_word(reg_off, word_val);
+                } else {
+                    let reg_off_32 = off & !3;
+                    if let Some(mut long_val) = self.get_onchip_32(reg_off_32) {
+                        let byte_shift = 24 - ((off & 3) * 8);
+                        let mask = !(0xFF << byte_shift);
+                        long_val = (long_val & mask) | ((val as u32) << byte_shift);
+                        self.write_onchip(reg_off_32, long_val);
+                    } else {
+                        // Log unhandled onchip write
+                        let region = MemRegion::OnChip(off);
+                        log_reg_access_once(&region, true, val);
+                    }
+                }
+            }
+        }
+    }
+
+    fn write_onchip_word(&mut self, off: usize, val: u16) {
+        match off {
+            // INTC
+            0x060 => self.onchip.iprb = val & 0xFF00,
+            0x062 => self.onchip.vcra = val & 0x7F7F,
+            0x064 => self.onchip.vcrb = val & 0x7F7F,
+            0x066 => self.onchip.vcrc = val & 0x7F7F,
+            0x068 => self.onchip.vcrd = val & 0x7F7F,
+            0x0E0 => self.onchip.icr = val & 0x0101,
+            0x0E2 => self.onchip.ipra = val & 0xFFF0,
+            0x0E4 | 0x0E5 => self.onchip.vcrwdt = val & 0x7F7F,
+            // FRT
+            0x012 => self.onchip.frc = val,
+            0x014 => self.onchip.ocra = val,
+            0x018 => {} // FICR is read-only
+
+            // BSC
+            0x1E0 | 0x1E2 | 0x1E4 | 0x1E6 | 0x1E8 | 0x1EA | 0x1EC | 0x1EE | 0x1F0 | 0x1F2 | 0x1F4 | 0x1F6 | 0x1F8 | 0x1FA => {
+                // Word-only writes to BSC registers are ignored or logged
+            }
+
+            // UBC
+            0x148 => self.onchip.bbra = val,
+            0x168 => self.onchip.bbrb = val,
+
+            _ => {
+                let reg_off_32 = off & !3;
+                if let Some(mut long_val) = self.get_onchip_32(reg_off_32) {
+                    let byte_shift = 16 - ((off & 2) * 8);
+                    let mask = !(0xFFFF << byte_shift);
+                    long_val = (long_val & mask) | ((val as u32) << byte_shift);
+                    self.write_onchip(reg_off_32, long_val);
+                } else {
+                    self.write_onchip_byte(off, (val >> 8) as u8);
+                    self.write_onchip_byte(off + 1, (val & 0xFF) as u8);
+                }
+            }
+        }
+    }
+
     fn read_onchip(&self, off: usize) -> u32 {
         match off {
-            0x100 | 0x120 => self.dvsr,
-            0x104 | 0x124 => self.dvdntl,
-            0x108 | 0x128 => self.dvcr,
-            0x10C | 0x12C => self.vcrdiv,
-            0x110 | 0x130 => self.dvdnth,
-            0x114 | 0x134 => self.dvdntl,
-            0x118 | 0x138 => self.dvdntuh,
-            0x11C | 0x13C => self.dvdntul,
-            _ => 0,
+            // DIVU
+            0x100 | 0x120 => self.onchip.dvsr,
+            0x104 | 0x124 => self.onchip.dvdntl,
+            0x108 | 0x128 => self.onchip.dvcr,
+            0x10C | 0x12C => self.onchip.vcrdiv,
+            0x110 | 0x130 => self.onchip.dvdnth,
+            0x114 | 0x134 => self.onchip.dvdntl,
+            0x118 | 0x138 => self.onchip.dvdntuh,
+            0x11C | 0x13C => self.onchip.dvdntul,
+
+            // BSC
+            0x1E0 => ((self.onchip.bcr1 as u32) << 16) | (self.onchip.bcr2 as u32),
+            0x1E8 => ((self.onchip.wcr as u32) << 16) | (self.onchip.mcr as u32),
+            0x1F0 => ((self.onchip.rtcsr as u32) << 16) | (self.onchip.rtcnt as u32),
+            0x1F8 => (self.onchip.rtcor as u32) << 16,
+
+            // UBC / DMA / others
+            0x140 => self.onchip.bara,
+            0x144 => self.onchip.bamra,
+            0x148 => (self.onchip.bbra as u32) << 16,
+            0x178 => self.onchip.brcr,
+            0x180 => self.onchip.sar0,
+            0x184 => self.onchip.dar0,
+            0x188 => self.onchip.tcr0,
+            0x18C => self.onchip.chcr0,
+            0x190 => self.onchip.sar1,
+            0x194 => self.onchip.dar1,
+            0x198 => self.onchip.tcr1,
+            0x19C => self.onchip.chcr1,
+            0x1A0 => self.onchip.vcrdma0,
+            0x1A8 => self.onchip.vcrdma1,
+            0x1B0 => self.onchip.dmaor,
+
+            _ => {
+                let w0 = self.read_onchip_word(off) as u32;
+                let w1 = self.read_onchip_word(off + 2) as u32;
+                (w0 << 16) | w1
+            }
+        }
+    }
+
+    fn divu_check_interrupt(&mut self) {
+        if (self.onchip.dvcr & 0x2) != 0 {
+            // DEVIATION: HR §10.6 notes the reference reads the level from MSH2->onchip.IPRA
+            // even on the slave. We use the correct-looking per-CPU IPRA.
+            let vector = (self.onchip.vcrdiv & 0x7F) as u8;
+            let level = ((self.onchip.ipra >> 12) & 0xF) as u8;
+            self.queue_send(vector, level);
         }
     }
 
     fn write_onchip(&mut self, off: usize, val: u32) {
         match off {
+            // DIVU
             0x100 | 0x120 => {
-                self.dvsr = val;
+                self.onchip.dvsr = val;
             }
             0x104 | 0x124 => {
-                let divisor = self.dvsr as i32;
+                let divisor = self.onchip.dvsr as i32;
                 let dividend = val as i32;
                 if divisor == 0 {
                     if dividend < 0 {
-                        self.dvdntl = 0x80000000;
-                        self.dvdnth = 0xFFFFFFFC | ((val >> 29) & 3);
+                        self.onchip.dvdntl = 0x80000000;
+                        self.onchip.dvdnth = 0xFFFFFFFC | ((val >> 29) & 3);
                     } else {
-                        self.dvdntl = 0x7FFFFFFF;
-                        self.dvdnth = val >> 29;
+                        self.onchip.dvdntl = 0x7FFFFFFF;
+                        self.onchip.dvdnth = val >> 29;
                     }
-                    self.dvdntul = self.dvdntl;
-                    self.dvdntuh = self.dvdnth;
-                    self.dvcr |= 1;
+                    self.onchip.dvdntul = self.onchip.dvdntl;
+                    self.onchip.dvdntuh = self.onchip.dvdnth;
+                    self.onchip.dvcr |= 1;
+                    self.divu_check_interrupt();
                 } else {
-                    let quotient = dividend / divisor;
-                    let remainder = dividend % divisor;
-                    self.dvdntl = quotient as u32;
-                    self.dvdntul = quotient as u32;
-                    self.dvdnth = remainder as u32;
-                    self.dvdntuh = remainder as u32;
+                    // DEVIATION-by-necessity: Guard against signed i32 division overflow (i32::MIN / -1)
+                    // to prevent hard panics, falling back to a two's-complement wrap.
+                    let (quotient, remainder) = if divisor == -1 && dividend == i32::MIN {
+                        (i32::MIN, 0)
+                    } else {
+                        (dividend / divisor, dividend % divisor)
+                    };
+                    self.onchip.dvdntl = quotient as u32;
+                    self.onchip.dvdntul = quotient as u32;
+                    self.onchip.dvdnth = remainder as u32;
+                    self.onchip.dvdntuh = remainder as u32;
                 }
             }
             0x108 | 0x128 => {
-                self.dvcr = val & 3;
+                self.onchip.dvcr = val & 3;
             }
             0x10C | 0x12C => {
-                self.vcrdiv = val & 0xFFFF;
+                self.onchip.vcrdiv = val & 0xFFFF;
             }
             0x110 | 0x130 => {
-                self.dvdnth = val;
+                self.onchip.dvdnth = val;
             }
             0x114 | 0x134 => {
-                let divisor = self.dvsr as i32;
-                let dividend_high = self.dvdnth as i64;
+                let divisor = self.onchip.dvsr as i32;
+                let dividend_high = self.onchip.dvdnth as i64;
                 let dividend_low = val as i64;
                 let dividend = (dividend_high << 32) | (dividend_low & 0xFFFFFFFF);
                 if divisor == 0 {
                     if (dividend_high & 0x80000000) != 0 {
-                        self.dvdntl = 0x80000000;
-                        self.dvdnth = (self.dvdnth << 3) as u32;
+                        self.onchip.dvdntl = 0x80000000;
+                        self.onchip.dvdnth = (self.onchip.dvdnth << 3) as u32;
                     } else {
-                        self.dvdntl = 0x7FFFFFFF;
-                        self.dvdnth = (self.dvdnth << 3) as u32;
+                        self.onchip.dvdntl = 0x7FFFFFFF;
+                        self.onchip.dvdnth = (self.onchip.dvdnth << 3) as u32;
                     }
-                    self.dvdntul = self.dvdntl;
-                    self.dvdntuh = self.dvdnth;
-                    self.dvcr |= 1;
+                    self.onchip.dvdntul = self.onchip.dvdntl;
+                    self.onchip.dvdntuh = self.onchip.dvdnth;
+                    self.onchip.dvcr |= 1;
+                    self.divu_check_interrupt();
                 } else {
-                    let quotient = dividend / (divisor as i64);
-                    let remainder = dividend % (divisor as i64);
-                    self.dvdntl = quotient as u32;
-                    self.dvdntul = quotient as u32;
-                    self.dvdnth = remainder as u32;
-                    self.dvdntuh = remainder as u32;
+                    // DEVIATION-by-necessity: Guard against signed i64 division overflow (i64::MIN / -1)
+                    let (quotient, remainder) = if divisor as i64 == -1 && dividend == i64::MIN {
+                        (i64::MIN, 0i64)
+                    } else {
+                        (dividend / (divisor as i64), dividend % (divisor as i64))
+                    };
+                    
+                    if quotient > 0x7FFF_FFFF {
+                        self.onchip.dvcr |= 1;
+                        self.onchip.dvdntl = 0x7FFF_FFFF;
+                        // Note: HR §11.6 flags both 0xFFFF_FFFE values as Yabause "// fix me" and
+                        // states the true hardware value is not deducible.
+                        self.onchip.dvdnth = 0xFFFF_FFFE;
+                        self.onchip.dvdntul = self.onchip.dvdntl;
+                        self.onchip.dvdntuh = self.onchip.dvdnth;
+                        self.divu_check_interrupt();
+                    } else if ((quotient >> 32) as i32) < -1 {
+                        self.onchip.dvcr |= 1;
+                        self.onchip.dvdntl = 0x8000_0000;
+                        // Note: HR §11.6 flags both 0xFFFF_FFFE values as Yabause "// fix me" and
+                        // states the true hardware value is not deducible.
+                        self.onchip.dvdnth = 0xFFFF_FFFE;
+                        self.onchip.dvdntul = self.onchip.dvdntl;
+                        self.onchip.dvdntuh = self.onchip.dvdnth;
+                        self.divu_check_interrupt();
+                    } else {
+                        self.onchip.dvdntl = quotient as u32;
+                        self.onchip.dvdnth = remainder as u32;
+                        self.onchip.dvdntul = self.onchip.dvdntl;
+                        self.onchip.dvdntuh = self.onchip.dvdnth;
+                    }
                 }
             }
-            _ => {}
+            0x118 | 0x138 => {
+                self.onchip.dvdntuh = val;
+            }
+            0x11C | 0x13C => {
+                self.onchip.dvdntul = val;
+            }
+
+            // BSC
+            0x1E0 => {
+                self.onchip.bcr1 = (self.onchip.bcr1 & 0x8000) | (((val >> 16) & 0x1FF7) as u16);
+                self.onchip.bcr2 = (val & 0xFC) as u16;
+            }
+            0x1E8 => {
+                self.onchip.wcr = (val >> 16) as u16;
+                self.onchip.mcr = (val & 0xFEFC) as u16;
+            }
+            0x1F0 => {
+                self.onchip.rtcsr = (((val >> 16) & 0xF8) as u16);
+            }
+            0x1F8 => {
+                self.onchip.rtcor = (((val >> 16) & 0xFF) as u16);
+            }
+
+            // UBC
+            0x140 => self.onchip.bara = val,
+            0x144 => self.onchip.bamra = val,
+            0x148 => self.onchip.bbra = (val >> 16) as u16,
+            0x178 => self.onchip.brcr = val,
+
+            // DMA
+            0x180 => self.onchip.sar0 = val,
+            0x184 => self.onchip.dar0 = val,
+            0x188 => self.onchip.tcr0 = val,
+            0x18C => self.onchip.chcr0 = val,
+            0x190 => self.onchip.sar1 = val,
+            0x194 => self.onchip.dar1 = val,
+            0x198 => self.onchip.tcr1 = val,
+            0x19C => self.onchip.chcr1 = val,
+            0x1A0 => self.onchip.vcrdma0 = val,
+            0x1A8 => self.onchip.vcrdma1 = val,
+            0x1B0 => self.onchip.dmaor = val,
+
+            _ => {
+                // Fall back to writing two words
+                self.write_onchip_word(off, (val >> 16) as u16);
+                self.write_onchip_word(off + 2, (val & 0xFFFF) as u16);
+            }
         }
     }
 
@@ -2538,7 +3693,6 @@ mod opcode_tests {
         // previously Unmapped (writes silently discarded).
         let mut cpu = make_cpu();
         let probes: &[(u32, &str)] = &[
-            (0x0018_0000, "backup ram"),
             (0x0580_0000, "CS2/CD-ROM regs"),
             (0x05A0_0000, "sound ram"),
             (0x05B0_0000, "SCSP regs"),
@@ -2580,11 +3734,11 @@ mod opcode_tests {
         cpu.write_long(0xFFFFFF04, 100); // DVDNT = 100 -> triggers division by zero
         assert_eq!(cpu.read_long(0xFFFFFF08) & 1, 1); // DVCR overflow flag = 1
 
-        // 64-bit / 32-bit division: 0x00000002_00000000 / 4
+        // 64-bit / 32-bit division: 0x00000001_00000000 / 4
         cpu.write_long(0xFFFFFF00, 4); // DVSR = 4
-        cpu.write_long(0xFFFFFF10, 2); // DVDNTH = 2
+        cpu.write_long(0xFFFFFF10, 1); // DVDNTH = 1
         cpu.write_long(0xFFFFFF14, 0); // DVDNTL = 0 -> triggers division
-        assert_eq!(cpu.read_long(0xFFFFFF04), 0x80000000); // Quotient DVDNTL = 0x80000000 (2^31)
+        assert_eq!(cpu.read_long(0xFFFFFF04), 0x40000000); // Quotient DVDNTL = 0x40000000
         assert_eq!(cpu.read_long(0xFFFFFF10), 0); // Remainder DVDNTH = 0
     }
 
@@ -2771,37 +3925,163 @@ mod opcode_tests {
     #[test]
     fn test_cache_arrays_and_execution() {
         let mut cpu = make_cpu();
-        // 1. CacheAddressArray: write u8/u32 and verify big-endian layout
-        cpu.write_byte(0x6000_0000, 0x11);
-        cpu.write_byte(0x6000_0001, 0x22);
-        cpu.write_byte(0x6000_0002, 0x33);
-        cpu.write_byte(0x6000_0003, 0x44);
-        assert_eq!(cpu.cache_address_array[0], 0x11223344);
+        // 1. AddressArray: write u32 (long) and verify layout/mirrors
+        cpu.write_long(0x6000_0000, 0x11223344);
+        assert_eq!(cpu.address_array[0], 0x11223344);
+        assert_eq!(cpu.read_long(0x6000_0400), 0x11223344); // mirrors every 1KB
 
-        cpu.write_byte(0x6000_0004, 0x55);
-        assert_eq!(cpu.cache_address_array[1], 0x55000000);
+        // Byte read to AddressArray falls to Unmapped / returns 0
+        assert_eq!(cpu.read_byte(0x6000_0000), 0);
 
-        // Read back
-        assert_eq!(cpu.read_byte(0x6000_0000), 0x11);
-        assert_eq!(cpu.read_byte(0x6000_0001), 0x22);
-
-        // 2. CacheDataArray: write and read back
+        // 2. DataArray: write and read back using byte, word, and long
         cpu.write_byte(0xC000_0010, 0xAA);
         cpu.write_byte(0xC000_0011, 0xBB);
-        assert_eq!(cpu.cache_data_array[0x10], 0xAA);
-        assert_eq!(cpu.cache_data_array[0x11], 0xBB);
+        assert_eq!(cpu.data_array[0x10], 0xAA);
+        assert_eq!(cpu.data_array[0x11], 0xBB);
         assert_eq!(cpu.read_byte(0xC000_0010), 0xAA);
         assert_eq!(cpu.read_byte(0xC000_0011), 0xBB);
 
         // 3. EXEC_FROM_CACHE: write NOP at 0xC000_0000 and run step()
-        cpu.cache_data_array[0] = 0x00;
-        cpu.cache_data_array[1] = 0x09; // NOP
+        cpu.data_array[0] = 0x00;
+        cpu.data_array[1] = 0x09; // NOP
         cpu.pc = 0xC000_0000;
         let cycles_before = cpu.cycles;
         cpu.step();
         assert_eq!(cpu.pc, 0xC000_0002);
         assert_eq!(cpu.cycles, cycles_before + 2); // NOP cycles
         assert!(!cpu.illegal_instruction_flag);
+    }
+
+    #[test]
+    fn test_memory_bus_phase_1() {
+        let mut cpu = make_cpu();
+
+        // 1. PurgeArea reads (0x40000000)
+        assert_eq!(cpu.read_long(0x4000_0000), 0xFFFFFFFF);
+        assert_eq!(cpu.read_word(0x4000_0000), 0xFFFF);
+        assert_eq!(cpu.read_byte(0x4000_0000), 0xFF);
+
+        // 2. Area 5 behaves as CacheThrough mirror
+        cpu.write_long(0x0020_0000, 0x12345678);
+        assert_eq!(cpu.read_long(0xA020_0000), 0x12345678);
+
+        // 3. Data array is real memory and mirrors every 4 KB
+        cpu.write_long(0xC000_0000, 0xDEADBEEF);
+        assert_eq!(cpu.read_long(0xC000_1000), 0xDEADBEEF);
+        assert_eq!(cpu.read_long(0xC000_0000), 0xDEADBEEF);
+
+        // 4. Data array is per-CPU
+        let mut cpu2 = Sh2::new(true, cpu.arbiter.clone(), cpu.work_ram.clone());
+        assert_eq!(cpu2.read_long(0xC000_0000), 0); // Core 1 sees 0
+
+        // 5. Address array is long-only
+        cpu.write_long(0x6000_0000, 0x1234);
+        assert_eq!(cpu.read_long(0x6000_0400), 0x1234); // mirrors every 1KB
+        assert_eq!(cpu.read_byte(0x6000_0000), 0); // byte/word fall to Unmapped/0
+
+        // 6. Area 7 below on-chip registers
+        assert_eq!(cpu.read_long(0xE020_0000), 0);
+        cpu.write_long(0xE020_0000, 0x99999999);
+        assert_eq!(cpu.read_long(0x0020_0000), 0x12345678); // Low RAM unaffected
+
+        // 7. Area 0 genuine hole
+        assert_eq!(cpu.read_word(0x0E00_0000), 0);
+    }
+
+    #[test]
+    fn test_memory_bus_phase_2() {
+        let mut cpu = make_cpu();
+
+        // 1. High WRAM: 1MB size and mirrors every 1MB across B-bus
+        cpu.write_byte(0x0600_0000, 0x11);
+        assert_eq!(cpu.read_byte(0x0610_0000), 0x11);
+        cpu.write_byte(0x0608_0000, 0x22);
+        assert_eq!(cpu.read_byte(0x0618_0000), 0x22);
+        assert_eq!(cpu.read_byte(0x0600_0000), 0x11); // no collision
+
+        // 2. VDP1 registers: 256 B (mirrors every 256 B)
+        cpu.write_byte(0x05D0_0000, 0xAA);
+        assert_eq!(cpu.read_byte(0x05D0_0100), 0xAA);
+
+        // 3. VDP2 registers: 512 B (mirrors every 512 B)
+        cpu.write_byte(0x05F8_0000, 0xBB);
+        assert_eq!(cpu.read_byte(0x05F8_0200), 0xBB);
+
+        // TVSTAT read at mirrored offset
+        cpu.next_vblank_due = Some(std::time::Instant::now() + VBLANK_INTERVAL);
+        assert_eq!(cpu.read_byte(0x05F8_0204), 0x00);
+        assert_eq!(cpu.read_byte(0x05F8_0205), 0x08);
+
+        // 4. SCU registers: 256 B (mirrors every 256 B)
+        cpu.write_byte(0x05FE_0000, 0xCC);
+        assert_eq!(cpu.read_byte(0x05FE_0100), 0xCC);
+
+        // 5. Internal backup RAM: 64 KB, plus odd-byte convention
+        cpu.write_byte(0x0018_0000, 0x55);
+        assert_eq!(cpu.read_byte(0x0018_0001), 0x55);
+        // Writing to 0x0018_0000 actually stores to 0x0018_0001, so 0x0018_0000 remains 0 (unwritten)
+        assert_eq!(cpu.read_byte(0x0018_0000), 0x00);
+
+        // 6. Sound RAM MEM4MB mirror
+        // mem4b = false by default, mirrors every 256 KB
+        cpu.write_byte(0x05A0_0000, 0x77);
+        assert_eq!(cpu.read_byte(0x05A4_0000), 0x77);
+
+        // Set mem4b = true via SCSP Reg 0x400
+        cpu.write_byte(0x05B0_0400, 0x02); // set bit 9
+        cpu.write_byte(0x05A0_0000, 0x88);
+        assert_eq!(cpu.read_byte(0x05A4_0000), 0x00); // 256KB mirror mode is off, offset 256KB should be 0
+        assert_eq!(cpu.read_byte(0x05A8_0000), 0xFF); // offset > 512KB (0x80000) returns all-ones (0xFF)
+
+        // 7. CS2 20-bit offset (no aliasing)
+        cpu.write_byte(0x0580_0000, 0x12);
+        assert_eq!(cpu.read_byte(0x0581_8000), 0); // FIFO offset doesn't alias onto CR1
+    }
+
+    #[test]
+    fn test_torn_read_stress() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let arbiter = Arc::new(BusArbiter::new());
+        let work_ram = Arc::new(WorkRam::new());
+        let running = Arc::new(AtomicBool::new(true));
+
+        // Thread 1: Writes alternately to High WRAM (normal and straddling)
+        let wr_ram = work_ram.clone();
+        let wr_running = running.clone();
+        let writer_handle = thread::spawn(move || {
+            let mut val = 0u32;
+            while wr_running.load(Ordering::Relaxed) {
+                // Address 0x0600_0100 (aligned, fits in stripe 0)
+                wr_ram.write_high_ram_long(0x100, val);
+                // Address 0x0600_7FFE (crosses stripe 0 and stripe 1)
+                wr_ram.write_high_ram_long(0x7FFE, val);
+                val = if val == 0 { 0xFFFFFFFF } else { 0 };
+            }
+        });
+
+        // Thread 2: Reads and verifies no torn reads occur
+        let rd_ram = work_ram.clone();
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(200) {
+            let val_normal = rd_ram.read_high_ram_long(0x100);
+            assert!(
+                val_normal == 0 || val_normal == 0xFFFFFFFF,
+                "Torn read observed on normal path: {val_normal:#010X}"
+            );
+
+            let val_straddle = rd_ram.read_high_ram_long(0x7FFE);
+            assert!(
+                val_straddle == 0 || val_straddle == 0xFFFFFFFF,
+                "Torn read observed on straddling path: {val_straddle:#010X}"
+            );
+        }
+
+        running.store(false, Ordering::Relaxed);
+        writer_handle.join().unwrap();
     }
 
     #[test]
@@ -2842,6 +4122,165 @@ mod opcode_tests {
     }
 
     #[test]
+    fn test_onchip_p4_t1_reset_values() {
+        let mut cpu_master = make_cpu();
+        let mut cpu_slave = Sh2::new(true, cpu_master.arbiter.clone(), cpu_master.work_ram.clone());
+
+        // SCI
+        assert_eq!(cpu_master.read_byte(0xFFFFFE00), 0x00); // SMR
+        assert_eq!(cpu_master.read_byte(0xFFFFFE01), 0xFF); // BRR
+        assert_eq!(cpu_master.read_byte(0xFFFFFE02), 0x00); // SCR
+        assert_eq!(cpu_master.read_byte(0xFFFFFE03), 0xFF); // TDR
+        assert_eq!(cpu_master.read_byte(0xFFFFFE04), 0x84); // SSR
+        assert_eq!(cpu_master.read_byte(0xFFFFFE05), 0x00); // RDR
+
+        // FRT
+        assert_eq!(cpu_master.read_byte(0xFFFFFE10), 0x01); // TIER
+        assert_eq!(cpu_master.read_byte(0xFFFFFE11), 0x00); // FTCSR
+        assert_eq!(cpu_master.read_word(0xFFFFFE12), 0x0000); // FRC
+        assert_eq!(cpu_master.read_word(0xFFFFFE14), 0xFFFF); // OCRA/OCRB
+        assert_eq!(cpu_master.read_byte(0xFFFFFE16), 0x00); // TCR
+        assert_eq!(cpu_master.read_byte(0xFFFFFE17), 0xE0); // TOCR
+        assert_eq!(cpu_master.read_word(0xFFFFFE18), 0x0000); // FICR
+
+        // INTC
+        assert_eq!(cpu_master.read_word(0xFFFFFE60), 0x0000); // IPRB
+        assert_eq!(cpu_master.read_word(0xFFFFFE62), 0x0000); // VCRA
+        assert_eq!(cpu_master.read_word(0xFFFFFE64), 0x0000); // VCRB
+        assert_eq!(cpu_master.read_word(0xFFFFFE66), 0x0000); // VCRC
+        assert_eq!(cpu_master.read_word(0xFFFFFE68), 0x0000); // VCRD
+        assert_eq!(cpu_master.read_word(0xFFFFFEE0), 0x0000); // ICR
+        assert_eq!(cpu_master.read_word(0xFFFFFEE2), 0x0000); // IPRA
+        assert_eq!(cpu_master.read_word(0xFFFFFEE4), 0x0000); // VCRWDT
+
+        // WDT
+        assert_eq!(cpu_master.read_byte(0xFFFFFE80), 0x18); // WTCSR
+        assert_eq!(cpu_master.read_byte(0xFFFFFE81), 0x00); // WTCNT
+        assert_eq!(cpu_master.read_byte(0xFFFFFE83), 0x1F); // RSTCSR
+
+        // SBYCR / CCR
+        assert_eq!(cpu_master.read_byte(0xFFFFFE91), 0x60); // SBYCR
+        assert_eq!(cpu_master.read_byte(0xFFFFFE92), 0x00); // CCR
+
+        // BSC
+        // Master BCR1: bit 15 is 0
+        assert_eq!(cpu_master.read_word(0xFFFFFFE0), 0x03F0);
+        // Slave BCR1: bit 15 is 1
+        assert_eq!(cpu_slave.read_word(0xFFFFFFE0), 0x83F0);
+        assert_eq!(cpu_master.read_word(0xFFFFFFE4), 0x00FC); // BCR2
+        assert_eq!(cpu_master.read_word(0xFFFFFFE8), 0xAAFF); // WCR
+        assert_eq!(cpu_master.read_word(0xFFFFFFEC), 0x0000); // MCR
+        assert_eq!(cpu_master.read_word(0xFFFFFFF0), 0x0000); // RTCSR
+        assert_eq!(cpu_master.read_word(0xFFFFFFF4), 0x0000); // RTCNT
+        assert_eq!(cpu_master.read_word(0xFFFFFFF8), 0x0000); // RTCOR
+
+        // DRCR
+        assert_eq!(cpu_master.read_byte(0xFFFFFE71), 0x00); // DRCR0
+        assert_eq!(cpu_master.read_byte(0xFFFFFE72), 0x00); // DRCR1
+    }
+
+    #[test]
+    fn test_onchip_p4_t2_write_masking() {
+        let mut cpu = make_cpu();
+
+        // INTC Masking
+        cpu.write_word(0xFFFFFE60, 0xFFFF); // IPRB -> val & 0xFF00
+        assert_eq!(cpu.read_word(0xFFFFFE60), 0xFF00);
+
+        cpu.write_word(0xFFFFFE62, 0xFFFF); // VCRA -> val & 0x7F7F
+        assert_eq!(cpu.read_word(0xFFFFFE62), 0x7F7F);
+
+        cpu.write_word(0xFFFFFE64, 0xFFFF); // VCRB -> val & 0x7F7F
+        assert_eq!(cpu.read_word(0xFFFFFE64), 0x7F7F);
+
+        cpu.write_word(0xFFFFFE66, 0xFFFF); // VCRC -> val & 0x7F7F
+        assert_eq!(cpu.read_word(0xFFFFFE66), 0x7F7F);
+
+        cpu.write_word(0xFFFFFE68, 0xFFFF); // VCRD -> val & 0x7F7F
+        assert_eq!(cpu.read_word(0xFFFFFE68), 0x7F7F);
+
+        cpu.write_word(0xFFFFFEE0, 0xFFFF); // ICR -> val & 0x0101
+        assert_eq!(cpu.read_word(0xFFFFFEE0), 0x0101);
+
+        cpu.write_word(0xFFFFFEE2, 0xFFFF); // IPRA -> val & 0xFFF0
+        assert_eq!(cpu.read_word(0xFFFFFEE2), 0xFFF0);
+
+        cpu.write_word(0xFFFFFEE4, 0xFFFF); // VCRWDT -> val & 0x7F7F
+        assert_eq!(cpu.read_word(0xFFFFFEE4), 0x7F7F);
+
+        // CCR
+        cpu.write_byte(0xFFFFFE92, 0xFF); // CCR -> val & 0xCF
+        assert_eq!(cpu.read_byte(0xFFFFFE92), 0xCF);
+
+        // SBYCR
+        cpu.write_byte(0xFFFFFE91, 0xFF); // SBYCR -> val & 0xDF
+        assert_eq!(cpu.read_byte(0xFFFFFE91), 0xDF);
+
+        // BSC
+        cpu.write_long(0xFFFFFFE0, 0x1FF7_00FC); // BCR1 = (bcr1&0x8000) | (val>>16 & 0x1FF7), BCR2 = val & 0xFC
+        assert_eq!(cpu.read_word(0xFFFFFFE0), 0x1FF7); // master bit 15 is 0
+        assert_eq!(cpu.read_word(0xFFFFFFE4), 0x00FC);
+
+        cpu.write_long(0xFFFFFFE8, 0x1234_FEFC); // WCR, MCR
+        assert_eq!(cpu.read_word(0xFFFFFFE8), 0x1234);
+        assert_eq!(cpu.read_word(0xFFFFFFEC), 0xFEFC);
+
+        cpu.write_long(0xFFFFFFF0, 0x00F8_0000); // RTCSR
+        assert_eq!(cpu.read_word(0xFFFFFFF0), 0x00F8);
+
+        cpu.write_long(0xFFFFFFF8, 0x00FF_0000); // RTCOR
+        assert_eq!(cpu.read_word(0xFFFFFFF8), 0x00FF);
+
+        // DRCR
+        cpu.write_byte(0xFFFFFE71, 0xFF); // DRCR0 -> val & 3
+        assert_eq!(cpu.read_byte(0xFFFFFE71), 0x03);
+    }
+
+    #[test]
+    fn test_onchip_p4_t3_destructive_byte_write_quirks() {
+        let mut cpu = make_cpu();
+
+        // 1. IPRB byte-write at 0x060 must destroy the low byte
+        cpu.write_word(0xFFFFFE60, 0x1234);
+        cpu.write_byte(0xFFFFFE60, 0x55);
+        assert_eq!(cpu.read_word(0xFFFFFE60), 0x5500);
+
+        // 2. VCRD byte-write at 0x068 must clear the low byte
+        cpu.write_word(0xFFFFFE68, 0x1234);
+        cpu.write_byte(0xFFFFFE68, 0x55);
+        assert_eq!(cpu.read_word(0xFFFFFE68), 0x5500 & 0x7F00);
+
+        // 3. Byte writes at 0x061 and 0x069 must be ignored
+        cpu.write_word(0xFFFFFE60, 0x1234);
+        cpu.write_byte(0xFFFFFE61, 0x55);
+        assert_eq!(cpu.read_word(0xFFFFFE60), 0x1200); // remains 0x1200 (since 0x34 is low byte, but wait, write_word does val & 0xFF00, so 0x34 was already masked to 0!)
+
+        cpu.write_word(0xFFFFFE68, 0x1234 & 0x7F7F);
+        cpu.write_byte(0xFFFFFE69, 0x55);
+        assert_eq!(cpu.read_word(0xFFFFFE68), 0x1234 & 0x7F7F);
+    }
+
+    #[test]
+    fn test_onchip_p4_t4_access_width_matrix() {
+        let mut cpu = make_cpu();
+
+        // CCR: readable and writable as byte and word
+        cpu.write_byte(0xFFFFFE92, 0x0C);
+        assert_eq!(cpu.read_byte(0xFFFFFE92), 0x0C);
+        assert_eq!(cpu.read_word(0xFFFFFE92), 0x0C00); // read as word
+
+        cpu.write_word(0xFFFFFE92, 0x0F00);
+        assert_eq!(cpu.read_byte(0xFFFFFE92), 0x0F);
+
+        // BCR1: written only on long path, word read at +2, no word write
+        cpu.write_long(0xFFFFFFE0, 0x1FF7_0000);
+        assert_eq!(cpu.read_word(0xFFFFFFE2), 0x1FF7); // read BCR1 at +2
+
+        cpu.write_word(0xFFFFFFE0, 0x0000); // word write to BCR1 ignored
+        assert_eq!(cpu.read_word(0xFFFFFFE2), 0x1FF7);
+    }
+
+    #[test]
     fn test_tas_b_fallback() {
         let mut cpu = make_cpu();
         // 1. TAS.B @Rn on Low RAM (atomic path)
@@ -2857,5 +4296,237 @@ mod opcode_tests {
         cpu.execute(0x421B); // TAS.B @R2
         assert_eq!(cpu.read_byte(0x0010_0000), 0x80); // 0x00 | 0x80 = 0x80
         assert!(cpu.t()); // MSB was 0
+    }
+
+    #[test]
+    fn test_bus_miss_logging() {
+        std::env::set_var("MIMAS_BUS_TRACE", "1");
+        
+        let mut cpu = make_cpu();
+
+        // 1. Synthetic access at 0xC000_0000 (Area 6)
+        let key1 = "area=6 block=0x00000000 is_write=false width=1".to_string();
+        cpu.read_byte(0xC000_0000);
+        {
+            let log = lock_bus_miss_log();
+            assert!(log.contains(&key1));
+            let count = log.iter().filter(|k| **k == key1).count();
+            assert_eq!(count, 1);
+        }
+
+        // Repeat access -> should not log again (count remains 1)
+        cpu.read_byte(0xC000_0000);
+        {
+            let log = lock_bus_miss_log();
+            let count = log.iter().filter(|k| **k == key1).count();
+            assert_eq!(count, 1);
+        }
+
+        // 2. Access at 0x0400_0000 (Unmapped CS1)
+        let key2 = "area=0 block=0x04000000 is_write=false width=4".to_string();
+        cpu.read_long(0x0400_0000);
+        {
+            let log = lock_bus_miss_log();
+            assert!(log.contains(&key2));
+            let count = log.iter().filter(|k| **k == key2).count();
+            assert_eq!(count, 1);
+        }
+
+        // 3. Access at 0x0610_0000 (High RAM mirror offset)
+        let key3 = "area=0 block=0x06100000 is_write=true width=2".to_string();
+        cpu.write_word(0x0610_0000, 0x1234);
+        {
+            let log = lock_bus_miss_log();
+            assert!(log.contains(&key3));
+            let count = log.iter().filter(|k| **k == key3).count();
+            assert_eq!(count, 1);
+        }
+
+        // 4. Access at 0x4000_0000 (Area 2 / Cache Purge)
+        let key4 = "area=2 block=0x00000000 is_write=false width=1".to_string();
+        cpu.read_byte(0x4000_0000);
+        {
+            let log = lock_bus_miss_log();
+            assert!(log.contains(&key4));
+            let count = log.iter().filter(|k| **k == key4).count();
+            assert_eq!(count, 1);
+        }
+
+        std::env::remove_var("MIMAS_BUS_TRACE");
+    }
+
+    #[test]
+    fn test_onchip_p5_t1_sort_dedupe() {
+        let mut cpu = make_cpu();
+        cpu.queue_send(0x40, 15);
+        cpu.queue_send(0x47, 8);
+        cpu.queue_send(0x41, 14);
+        cpu.queue_send(0x40, 2); // Duplicate vector, must be ignored and not change level
+
+        // The queue should look like: [0x47 (level 8), 0x41 (level 14), 0x40 (level 15)]
+        let q = if let Some(ref q_ref) = cpu.irq_in {
+            q_ref.lock().unwrap().clone()
+        } else {
+            cpu.local_irq_in.clone()
+        };
+
+        assert_eq!(q.pending.len(), 3);
+        assert_eq!(q.pending[0].vector, 0x47);
+        assert_eq!(q.pending[0].level, 8);
+        assert_eq!(q.pending[1].vector, 0x41);
+        assert_eq!(q.pending[1].level, 14);
+        assert_eq!(q.pending[2].vector, 0x40);
+        assert_eq!(q.pending[2].level, 15);
+    }
+
+    #[test]
+    fn test_onchip_p5_t2_strictly_greater_masking() {
+        let mut cpu = make_cpu();
+        cpu.sr = 8 << SR_IMASK_SHIFT; // mask = 8
+        cpu.vbr = 0x0600_0000;
+        cpu.registers[15] = 0x0600_1000;
+        cpu.pc = 0x0600_0100;
+        cpu.write_word(0x0600_0100, 0x0009); // NOP
+        
+        cpu.write_long(cpu.vbr.wrapping_add(SMPC_IRQ_VECTOR as u32 * 4), 0x0600_2000);
+        cpu.write_word(0x0600_2000, 0x0009);
+        
+        cpu.write_long(cpu.vbr.wrapping_add(SOUND_REQ_IRQ_VECTOR as u32 * 4), 0x0600_3000);
+        cpu.write_word(0x0600_3000, 0x0009);
+
+        cpu.queue_send(SMPC_IRQ_VECTOR as u8, SMPC_IRQ_LEVEL as u8); // level 8: must not deliver
+        cpu.step();
+        assert_eq!(cpu.pc, 0x0600_0102); // Executing normal flow (PC advanced to next instruction)
+
+        cpu.queue_send(SOUND_REQ_IRQ_VECTOR as u8, SOUND_REQ_IRQ_LEVEL as u8); // level 9: must deliver
+        cpu.step();
+        assert_eq!(cpu.pc, 0x0600_3002); // Branched to handler!
+    }
+
+    #[test]
+    fn test_onchip_p5_t3_one_per_call() {
+        let mut cpu = make_cpu();
+        cpu.sr = 0;
+        cpu.vbr = 0x0600_0000;
+        cpu.registers[15] = 0x0600_1000;
+        // Two pending interrupts
+        cpu.queue_send(0x47, 8);
+        cpu.queue_send(0x41, 14);
+        
+        cpu.write_long(cpu.vbr.wrapping_add(0x41 * 4), 0x0600_2000);
+        cpu.write_long(cpu.vbr.wrapping_add(0x47 * 4), 0x0600_3000);
+        cpu.write_word(0x0600_2000, 0x0009); // NOP inside handler
+        cpu.write_word(0x0600_3000, 0x0009); // NOP inside handler
+
+        cpu.step(); // Steps the first (highest priority: 0x41 level 14)
+        assert_eq!(cpu.pc, 0x0600_2002);
+        
+        // Assert the second interrupt (0x47 level 8) is still queued
+        let q = if let Some(ref q_ref) = cpu.irq_in {
+            q_ref.lock().unwrap().clone()
+        } else {
+            cpu.local_irq_in.clone()
+        };
+        assert!(q.pending.iter().any(|x| x.vector == 0x47));
+    }
+
+    #[test]
+    fn test_onchip_p5_t4_nmi_clamp() {
+        let mut cpu = make_cpu();
+        cpu.sr = 15 << SR_IMASK_SHIFT; // Mask 15 (maximum normal mask)
+        cpu.vbr = 0x0600_0000;
+        cpu.registers[15] = 0x0600_1000;
+        cpu.write_long(cpu.vbr.wrapping_add(0xB * 4), 0x0600_2000); // NMI vector 11 -> offset 0x2C
+        cpu.write_word(0x0600_2000, 0x0009);
+
+        cpu.nmi();
+        assert_eq!(cpu.onchip.icr & 0x8000, 0x8000); // Bit 15 set
+
+        cpu.step(); // NMI must bypass mask 15 and execute
+        assert_eq!(cpu.pc, 0x0600_2002);
+        assert_eq!((cpu.sr >> SR_IMASK_SHIFT) & 0xF, 0xF); // Mask clamped to 15 (0xF)
+    }
+
+    #[test]
+    fn test_onchip_p5_t6_delay_slot_no_interrupt() {
+        let mut cpu = make_cpu();
+        cpu.sr = 15 << SR_IMASK_SHIFT; // Mask 15: VBLANK-IN is masked
+        cpu.vbr = 0x0600_0000;
+        cpu.registers[15] = 0x0600_1000;
+        
+        // Interrupt vector points to 0x0600_2000
+        cpu.write_long(cpu.vbr.wrapping_add(VBLANK_IN_VECTOR as u32 * 4), 0x0600_2000);
+        cpu.write_word(0x0600_2000, 0x0009);
+
+        // Branch instruction: BRA 0x0600_0020
+        // Delay slot: LDC R1, SR (0x410E) which writes R1 (0) to SR, lowering mask to 0
+        cpu.registers[1] = 0; // Value to write to SR
+        cpu.pc = 0x0600_0000;
+        cpu.write_word(0x0600_0000, 0xA00E); // BRA + 0x10 -> 0x0600_0020
+        cpu.write_word(0x0600_0002, 0x410E); // delay slot: LDC R1, SR
+        
+        // Unmasked interrupt pending
+        cpu.queue_send(VBLANK_IN_VECTOR as u8, VBLANK_IN_LEVEL as u8);
+
+        cpu.step(); // Steps BRA + delay slot (LDC R1, SR).
+        // Assert: delay slot ran, lowered SR mask to 0
+        assert_eq!((cpu.sr >> SR_IMASK_SHIFT) & 0xF, 0);
+        // Assert: PC is now at branch target (0x0600_0020) and interrupt has not been taken yet
+        assert_eq!(cpu.pc, 0x0600_0020);
+
+        cpu.step(); // Now we step starting at target, which services the unmasked VBLANK-IN
+        // Assert: interrupt was taken, redirecting to the handler
+        assert_eq!(cpu.pc, 0x0600_2002);
+        
+        // Read pushed PC from stack, it should point to the target of the branch (0x0600_0020)
+        let pushed_pc = cpu.read_long(cpu.registers[15]);
+        assert_eq!(pushed_pc, 0x0600_0020);
+    }
+
+    #[test]
+    fn test_divu_p6_t1_crash_regression_overflow() {
+        let mut cpu = make_cpu();
+
+        // 1. 32/32 signed overflow: i32::MIN / -1
+        cpu.write_long(0xFFFFFF00, 0xFFFF_FFFF); // DVSR = -1
+        cpu.write_long(0xFFFFFF04, 0x8000_0000); // DVDNT = i32::MIN -> triggers division
+        assert_eq!(cpu.read_long(0xFFFFFF04), 0x8000_0000); // Quotient wrapped to i32::MIN
+        assert_eq!(cpu.read_long(0xFFFFFF10), 0); // Remainder is 0
+
+        // 2. 64/32 signed overflow: i64::MIN / -1
+        cpu.write_long(0xFFFFFF00, 0xFFFF_FFFF); // DVSR = -1
+        cpu.write_long(0xFFFFFF10, 0x8000_0000); // DVDNTH = i32::MIN
+        cpu.write_long(0xFFFFFF14, 0x0000_0000); // DVDNTL = 0 -> triggers 64-bit division
+        // Quotient overflows, so it should trigger overflow
+        assert_eq!(cpu.read_long(0xFFFFFF08) & 1, 1); // DVCR overflow flag set
+    }
+
+    #[test]
+    fn test_divu_p6_t4_overflow_interrupt() {
+        let mut cpu = make_cpu();
+        cpu.sr = 0; // mask = 0 (unmasked)
+        cpu.vbr = 0x0600_0000;
+        cpu.registers[15] = 0x0600_1000;
+
+        // Configure DIVU interrupt priority and vector
+        cpu.write_long(0xFFFFFF0C, 0x48); // VCRDIV vector = 0x48
+        cpu.write_word(0xFFFFFEE2, 0x9000); // IPRA level for DIVU = 9 (bits 12-15)
+
+        // Set DVCR interrupt enable bit (bit 1: Interrupt Enable)
+        cpu.write_long(0xFFFFFF08, 0x2);
+
+        // Vector table points to 0x0600_2000
+        cpu.write_long(cpu.vbr.wrapping_add(0x48 * 4), 0x0600_2000);
+        cpu.write_word(0x0600_2000, 0x0009);
+
+        // Trigger division by zero
+        cpu.write_long(0xFFFFFF00, 0); // DVSR = 0
+        cpu.write_long(0xFFFFFF04, 100); // Trigger
+
+        // Step to trigger interrupt handling
+        cpu.step();
+
+        // PC should be at the vector handler
+        assert_eq!(cpu.pc, 0x0600_2002);
     }
 }

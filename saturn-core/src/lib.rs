@@ -1,6 +1,7 @@
 pub mod bus_arbiter;
 pub mod shared_buffers;
 pub mod sh2;
+pub mod sh2_onchip;
 pub mod sync;
 pub mod cdrom;
 pub mod scu;
@@ -76,6 +77,8 @@ pub struct SaturnSystem {
     /// (register storage stays in `WorkRam::smpc_regs`); see `crate::smpc`
     /// and `docs/implementation-plans/smpc-peripheral.md`.
     pub smpc: Arc<Mutex<Smpc>>,
+    pub irq_in_c0: Arc<Mutex<sh2::InterruptQueue>>,
+    pub irq_in_c1: Arc<Mutex<sh2::InterruptQueue>>,
 }
 
 impl SaturnSystem {
@@ -89,6 +92,8 @@ impl SaturnSystem {
         let vram = Arc::new(RwLock::new(Vram::new()));
         let sync = Arc::new(LockStepSync::new(8, slack_limit));
         let shutdown = Arc::new(AtomicBool::new(false));
+        let irq_in_c0 = Arc::new(Mutex::new(sh2::InterruptQueue::new()));
+        let irq_in_c1 = Arc::new(Mutex::new(sh2::InterruptQueue::new()));
 
         Self {
             arbiter,
@@ -106,6 +111,8 @@ impl SaturnSystem {
             scu_dsp: Arc::new(Mutex::new(ScuDsp::new())),
             scsp: Arc::new(Mutex::new(Scsp::new())),
             smpc: Arc::new(Mutex::new(Smpc::new())),
+            irq_in_c0,
+            irq_in_c1,
         }
     }
 
@@ -143,6 +150,7 @@ impl SaturnSystem {
         let speed_c0 = self.speed.clone();
         let scu_dsp_c0 = self.scu_dsp.clone();
         let smpc_c0 = self.smpc.clone();
+        let irq_in_c0 = self.irq_in_c0.clone();
         let handle_c0 = thread::Builder::new().name("sh2-master".into()).spawn(move || {
             let _guard = PanicGuard::new(sync_c0.clone(), arbiter_c0.clone());
             let mut cpu = Sh2::new(false, arbiter_c0, work_ram_c0);
@@ -156,6 +164,7 @@ impl SaturnSystem {
             cpu.speed = Some(speed_c0);
             cpu.scu_dsp = Some(scu_dsp_c0);
             cpu.smpc = Some(smpc_c0);
+            cpu.irq_in = Some(irq_in_c0);
             cpu.run_loop(shutdown_c0);
         }).expect("failed to spawn Core 0 (Master SH-2) thread");
         self.handles.push(handle_c0);
@@ -167,6 +176,7 @@ impl SaturnSystem {
         let sync_c1 = sync.clone();
         let bios_c1 = self.bios.clone();
         let speed_c1 = self.speed.clone();
+        let irq_in_c1 = self.irq_in_c1.clone();
         let handle_c1 = thread::Builder::new().name("sh2-slave".into()).spawn(move || {
             let _guard = PanicGuard::new(sync_c1.clone(), arbiter_c1.clone());
             sync_c1.set_thread_active(1, false);
@@ -179,6 +189,7 @@ impl SaturnSystem {
             cpu.set_bios_arc(bios_c1);
             cpu.reset();
             cpu.speed = Some(speed_c1);
+            cpu.irq_in = Some(irq_in_c1);
             cpu.run_loop(shutdown_c1);
         }).expect("failed to spawn Core 1 (Slave SH-2) thread");
         self.handles.push(handle_c1);

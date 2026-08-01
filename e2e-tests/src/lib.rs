@@ -562,8 +562,8 @@ mod tests {
         let arbiter = Arc::new(BusArbiter::new());
         let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram);
-        cpu.cache_data_array[0xFFF] = 0x00;
-        cpu.cache_data_array[0x000] = 0x09; // NOP in cache data array
+        cpu.data_array[0xFFF] = 0x00;
+        cpu.data_array[0x000] = 0x09; // NOP in cache data array
         cpu.pc = 0xFFFFFFFF;
         // Step should wrap PC to 0 or throw memory exception
         cpu.step();

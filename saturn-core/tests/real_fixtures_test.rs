@@ -170,10 +170,10 @@ fn real_high_wram_fixture_loads() {
     let arbiter = Arc::new(BusArbiter::new());
     let work_ram = Arc::new(WorkRam::new());
     
-    // Copy the 1MB fixture into the first 16 stripes of 64KB
-    for stripe in 0..16 {
-        let start = stripe * 0x10000;
-        let end = start + 0x10000;
+    // Copy the 1MB fixture into the 32 stripes of 32KB
+    for stripe in 0..32 {
+        let start = stripe * 0x8000;
+        let end = start + 0x8000;
         let mut stripe_lock = work_ram.high_ram[stripe].write().unwrap();
         stripe_lock.copy_from_slice(&fixture[start..end]);
     }
