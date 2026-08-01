@@ -111,5 +111,6 @@ This project's most important non-obvious practice: whenever implementing a new 
 - `.development/current_bugs.md`: known gaps/bugs; add on discovery, remove once genuinely fixed.
 - `.development/TASKS.md` / `.development/ROADMAP.md`: move items between Done/In-progress/Not-started as status actually changes.
 - `history.md`: add a chapter (or extend the current one) explaining *why* a non-obvious decision was made — the diff already shows *what* changed.
+- **`docs/implementation-plans/*.md`**: each phase's checklist items must be flipped `- [x]` (or annotated with **Simplification**/**Partial**/**Deliberately deferred** and a reason) the moment that work actually lands — not left showing `- [ ]` for work that's already done, and not checked off for anything not fully true. Add a one-line **Status:** note under each phase's heading pointing at the `history.md` chapter that covers it. A future session (or agent) trusts these checklists at face value; a stale one wastes exactly the re-derivation effort this whole tracking-docs section exists to avoid.
 
 Skipping these updates is how the next session ends up re-deriving knowledge that was already earned once.

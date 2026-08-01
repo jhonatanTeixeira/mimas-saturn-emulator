@@ -536,18 +536,18 @@ Ordered by *what unblocks real BIOS boot progress soonest*, not by subsystem tid
 **Unblocks:** anything. Highest expected value per line changed. No new API, no new
 fields, no `Sh2::new()` change.
 
-- [ ] **P1-1 (D-1).** Swap `sh2.rs:1135` and `sh2.rs:1136` so `0xCA00` is
+- [x] **P1-1 (D-1).** Swap `sh2.rs:1135` and `sh2.rs:1136` so `0xCA00` is
       `R0 ^= imm8` (`XOR #imm,R0`) and `0xCB00` is `R0 |= imm8` (`OR #imm,R0`). Fix the
       trailing comments too — they currently assert the wrong mapping. Reference:
       HR §9.5, `yabause/src/sh2int.c:2910-2911`.
-- [ ] **P1-2 (D-2).** `sh2.rs:1229`: `self.sr = self.registers[n] & SR_WRITE_MASK;`.
+- [x] **P1-2 (D-2).** `sh2.rs:1229`: `self.sr = self.registers[n] & SR_WRITE_MASK;`.
       Add a comment recording *why* the immediate `SH2HandleInterrupts` call
       (HR §3.3) is not replicated: `service_pending_interrupt` already runs at the head
       of every `step()` (`sh2.rs:784`), so the pending interrupt is taken one instruction
       later with an identical pushed PC. Reference: HR §9.8, §3.2, §3.3.
-- [ ] **P1-3 (D-3).** `sh2.rs:1247`: apply `& SR_WRITE_MASK` to the loaded value.
+- [x] **P1-3 (D-3).** `sh2.rs:1247`: apply `& SR_WRITE_MASK` to the loaded value.
       Reference: HR §9.8.
-- [ ] **P1-4 (D-4).** Make `TAS.B` a single atomic bus transaction. Two viable shapes,
+- [x] **P1-4 (D-4).** Make `TAS.B` a single atomic bus transaction. Two viable shapes,
       both compatible with `WorkRam`'s per-region locks:
       (a) add `WorkRam::tas_byte(region_selector, off) -> u8` methods that take the
       *write* lock once and do read-modify-write under it, mirroring the existing
@@ -558,7 +558,7 @@ fields, no `Sh2::new()` change.
       same `MemRegion` dispatch `raw_read_byte_region` uses. HR §9.5 notes the reference
       does *not* lock the bus, so this is a deliberate improvement on the reference, not
       a port — say so in the comment.
-- [ ] **P1-5 (D-5).** Restructure `sh2.rs:975-999`'s exact-match block into a
+- [x] **P1-5 (D-5).** Restructure `sh2.rs:975-999`'s exact-match block into a
       `match opcode & 0xF0FF` arm set so nibble B is ignored for `NOP` (`0x0009`),
       `CLRT` (`0x0008`), `SETT` (`0x0018`), `CLRMAC` (`0x0028`), `DIV0U` (`0x0019`),
       `RTS` (`0x000B`), `RTE` (`0x002B`) and (from Phase 2) `SLEEP` (`0x001B`). These
@@ -566,7 +566,7 @@ fields, no `Sh2::new()` change.
       already holds `STC`/`STS`/`MOVT`) — verify no arm collision first. Keep the
       literal `0xFFFF` arm where it is until P3-1 replaces it. Reference: HR §5.3,
       `yabause/src/sh2int.c:2669-2699`.
-- [ ] **P1-6 (D-7).** Decide and document the delay-slot PC-relative semantics. Two
+- [x] **P1-6 (D-7).** Decide and document the delay-slot PC-relative semantics. Two
       options: (i) keep Mimas's natural behaviour and add a `DEVIATION` comment on
       `delay_slot_and_jump` (`sh2.rs:957`) citing HR §8.2 item 1 and stating that HR
       marks the hardware truth UNCLEAR; (ii) reproduce Yabause bit-for-bit by setting
@@ -576,21 +576,21 @@ fields, no `Sh2::new()` change.
       behaviour real BIOS/game code was tested against", and (ii) additionally fixes D-8
       for free (an inner branch's own PC assignment then survives). Whichever is chosen,
       the reasoning goes in `history.md`.
-- [ ] **P1-7 (D-8).** Falls out of P1-6(ii). If P1-6(i) is chosen instead, guard the
+- [x] **P1-7 (D-8).** Falls out of P1-6(ii). If P1-6(i) is chosen instead, guard the
       trailing `self.pc = target` so it does not clobber a PC the slot instruction set.
-- [ ] **P1-8 (D-16).** Extend `reset()` (`sh2.rs:317`) to zero `R0..=R14` (**not R15** —
+- [x] **P1-8 (D-16).** Extend `reset()` (`sh2.rs:317`) to zero `R0..=R14` (**not R15** —
       HR §4's loop bound is `i < 15`, and R15 is then loaded from the vector), `gbr`,
       `vbr`, `mach`, `macl`, `pr`, `cycles`, and all four pending interrupt flags. Change
       the DIVU reset to match HR §11.1: reset **only** `dvcr` and `vcrdiv`; leave `dvsr`,
       `dvdnt`, `dvdnth`, `dvdntl`, `dvdntuh`, `dvdntul` untouched. Read the vectors from
       `self.vbr + 0` / `self.vbr + 4` rather than the hardcoded `0x0`/`0x4` (identical at
       reset, correct if anyone ever calls `reset()` with a non-zero VBR).
-- [ ] **P1-9 (D-17).** Make word and long alignment handling consistent. Recommended:
+- [x] **P1-9 (D-17).** Make word and long alignment handling consistent. Recommended:
       keep setting `unaligned_access_flag` (an e2e test depends on it) but **perform the
       access anyway** in `read_word`/`write_word`, matching `read_long`/`write_long` and
       HR §12.2's "no alignment enforcement exists anywhere". Returning a fabricated 0 is
       strictly worse than returning the bytes that are actually there.
-- [ ] **P1-10 (D-10).** Replace `self.bios[off & (self.bios.len() - 1)]`
+- [x] **P1-10 (D-10).** Replace `self.bios[off & (self.bios.len() - 1)]`
       (`sh2.rs:411`) with an explicit `off & 0x7FFFF` bounds-checked against
       `self.bios.len()`, matching HR §5.1's `T2ReadWord(BiosRom, addr & 0x7FFFF)`.
 
@@ -653,7 +653,7 @@ whatever follows). `BRAF`/`BSRF` are the standard PC-relative long-branch and
 position-independent-call forms and appear in real BIOS dispatch tables. The GBR byte
 forms are the standard idiom for touching a flag byte through a global base pointer.
 
-- [ ] **P2-1 `SLEEP`** — `0000 xxxx 0001 1011`. HR §9.7: `cycles += 3`, **PC not
+- [x] **P2-1 `SLEEP`** — `0000 xxxx 0001 1011`. HR §9.7: `cycles += 3`, **PC not
       advanced**, `isSleeping` not set. Since `step()` advances PC *before* `execute()`
       (`sh2.rs:786`), the handler must do `self.pc = self.pc.wrapping_sub(2)`.
       **Architectural decision required** — see A-2: the literal port is a 3-cycle busy
@@ -662,22 +662,22 @@ forms are the standard idiom for touching a flag byte through a global base poin
       literal semantics in `execute()` (so single-stepping and unit tests match HR
       exactly) and handle the *parking* in `run_loop`, which already owns
       `LockStepSync`. See Phase 2's architecture note below.
-- [ ] **P2-2 `BRAF Rm`** — `0000 mmmm 0010 0011`, mask `0xF0FF` value `0x0023`. HR §9.7:
+- [x] **P2-2 `BRAF Rm`** — `0000 mmmm 0010 0011`, mask `0xF0FF` value `0x0023`. HR §9.7:
       `PC = PC_br + Rm + 4`, delay slot, 2 cycles. In Mimas terms with `self.pc` already
       at `PC_br + 2`: `target = self.pc.wrapping_add(2).wrapping_add(self.registers[m])`,
       then `delay_slot_and_jump(target)`. Note the register is nibble **B** here, which
       `execute()` binds as `n` (`sh2.rs:967`), not `m` — read carefully.
-- [ ] **P2-3 `BSRF Rm`** — `0000 mmmm 0000 0011`, mask `0xF0FF` value `0x0003`. HR §9.7:
+- [x] **P2-3 `BSRF Rm`** — `0000 mmmm 0000 0011`, mask `0xF0FF` value `0x0003`. HR §9.7:
       `PR = PC_br + 4` (i.e. `self.pc + 2`), `PC = PC_br + Rm + 4`, delay slot, 2 cycles.
       Same nibble-B caveat.
-- [ ] **P2-4 `MAC.L @Rm+,@Rn+`** — `0000 nnnn mmmm 1111`, mask `0xF00F` value `0x000F`.
+- [x] **P2-4 `MAC.L @Rm+,@Rn+`** — `0000 nnnn mmmm 1111`, mask `0xF00F` value `0x000F`.
       HR §9.4 exact order: read `[Rn]` **first** as `s32`, `Rn += 4`; then `[Rm]` as
       `s32`, `Rm += 4`; `a = MACL | (MACH << 32)`; `b = m0 * m1` as `s64`; `sum = a + b`;
       if `S == 1` and `sum > 0x00007FFFFFFFFFFF` and `sum < 0xFFFF800000000000`, saturate
       to `0xFFFF800000000000` when `b < 0` else `0x00007FFFFFFFFFFF`; `MACL = sum as u32`,
       `MACH = (sum >> 32) as u32`. **No `if n != m` guard** — `MAC.L @R4+,@R4+` increments
       R4 twice. Cycles `3 + rcycle1 + rcycle2`.
-- [ ] **P2-5 `MAC.W @Rm+,@Rn+`** — `0100 nnnn mmmm 1111`, mask `0xF00F` value `0x400F`.
+- [x] **P2-5 `MAC.W @Rm+,@Rn+`** — `0100 nnnn mmmm 1111`, mask `0xF00F` value `0x400F`.
       HR §9.4: read `[Rm]` **first** as `s16` (opposite order from `MAC.L`), `Rm += 2`;
       then `[Rn]` as `s16`, `Rn += 2`; `b = m0 * m1` as `s32`;
       `sum = (MACL as i32 as i64) + b` — **MACH is not part of the accumulator**. If
@@ -687,26 +687,26 @@ forms are the standard idiom for touching a flag byte through a global base poin
       item 1 flags the non-accumulating `MACH` overwrite as a **DEVIATION** whose
       hardware truth is not deducible. Port it as-is and copy that DEVIATION note into
       the Rust comment verbatim.
-- [ ] **P2-6 `S` bit plumbing (D-18).** Add `const SR_S: u32 = 1 << 1;` beside
+- [x] **P2-6 `S` bit plumbing (D-18).** Add `const SR_S: u32 = 1 << 1;` beside
       `SR_T`/`SR_M`/`SR_Q` (`sh2.rs:179-181`) plus an `s()` accessor beside `t()`/`q()`/
       `m()` (`sh2.rs:746-780`). HR §3.1: **no instruction sets or clears S** — there is no
       `SETS`/`CLRS` on SH-2; the only writers are `LDC …,SR`, `LDC.L @Rm+,SR` and `RTE`,
       all of which already go through `SR_WRITE_MASK` after Phase 1. Add a comment saying
       exactly that, so nobody later "adds the missing SETS opcode".
-- [ ] **P2-7 `TST.B #imm,@(R0,GBR)`** — `1100 1100 iiiiiiii`. HR §9.5:
+- [x] **P2-7 `TST.B #imm,@(R0,GBR)`** — `1100 1100 iiiiiiii`. HR §9.5:
       `T = ([GBR+R0] & imm) == 0`. Cycles `3 + rcycle`.
-- [ ] **P2-8 `AND.B #imm,@(R0,GBR)`** — `1100 1101 iiiiiiii`. `[GBR+R0] &= imm`. Cycles
+- [x] **P2-8 `AND.B #imm,@(R0,GBR)`** — `1100 1101 iiiiiiii`. `[GBR+R0] &= imm`. Cycles
       `3 + rcycle + wcycle`.
-- [ ] **P2-9 `XOR.B #imm,@(R0,GBR)`** — `1100 1110 iiiiiiii`. `[GBR+R0] ^= imm`. Cycles
+- [x] **P2-9 `XOR.B #imm,@(R0,GBR)`** — `1100 1110 iiiiiiii`. `[GBR+R0] ^= imm`. Cycles
       `3 + rcycle + wcycle`.
-- [ ] **P2-10 `OR.B #imm,@(R0,GBR)`** — `1100 1111 iiiiiiii`. `[GBR+R0] |= imm`. Cycles
+- [x] **P2-10 `OR.B #imm,@(R0,GBR)`** — `1100 1111 iiiiiiii`. `[GBR+R0] |= imm`. Cycles
       **`3`** — HR §9.5 and §13 record that Yabause computes `rcycle`/`wcycle` and
       discards them, unlike `AND.B`/`XOR.B`. Decide in Phase 8 whether to match the
       irregularity; for now note it.
       All four go in the `match opcode & 0xFF00` block at `sh2.rs:1091-1149`, beside the
       existing `0xC800`-`0xCB00` arms. The comment at `sh2.rs:1445-1453` naming these
       four as the known gap can then be deleted.
-- [ ] **P2-11.** Delete the now-stale "known real coverage gap" comment
+- [x] **P2-11.** Delete the now-stale "known real coverage gap" comment
       (`sh2.rs:1445-1453`) and replace it with the D-6 exception (Phase 3).
 
 ### Phase 2 architecture note (A-2): `SLEEP` and the no-polling rule
@@ -782,7 +782,7 @@ re-executes itself until an interrupt overwrites PC. Reconciliation:
 **Unblocks:** observability. After this phase, a BIOS path that reaches an unimplemented
 opcode or an unmodelled address stops being silent.
 
-- [ ] **P3-1 (D-6) Illegal-instruction exception.** Replace the fall-through at
+- [x] **P3-1 (D-6) Illegal-instruction exception.** Replace the fall-through at
       `sh2.rs:1445-1453` with HR §9.9's sequence: `R15 -= 4; [R15] = SR`;
       `R15 -= 4; [R15] = PC` (which is already `instr + 2` in Mimas's convention —
       matching HR's `PC + 2`); `PC = [VBR + (4 << 2)]`; `cycles += 1`; set
@@ -791,27 +791,28 @@ opcode or an unmodelled address stops being silent.
       unconditionally) and copy the UNCLEAR note into the comment. **Do not** replicate
       Yabause's BIOS HLE hooks (`BiosBUPInit`, `BiosHandleFunc`) — HR §9.9 explicitly
       labels them "emulator HLE, not hardware".
-- [ ] **P3-2.** Keep the existing `0xFFFF` arm's observable behaviour (an e2e test
+- [x] **P3-2.** Keep the existing `0xFFFF` arm's observable behaviour (an e2e test
       depends on `illegal_instruction_flag`) but route it through P3-1's common path so
       `0xFFFF` and every other illegal encoding behave identically.
-- [ ] **P3-3.** Add a `log_illegal_once`-style dedup log (same shape as
+- [x] **P3-3.** Add a `log_illegal_once`-style dedup log (same shape as
       `log_reg_access_once`, `sh2.rs:242`) printing `[ILLOP] pc=… opcode=…` exactly once
       per distinct `(pc, opcode)`. This is the diagnostic that makes the remaining ISA
       and peripheral gaps greppable from a boot run, the same way `[REGACCESS]` already
       is. Keep it permanently, like `REG_ACCESS_LOG`.
-- [ ] **P3-4 (D-9) Associative purge region.** In `translate()` (`sh2.rs:338`), before
-      the `& 0x0FFF_FFFF` fold, dispatch on `address >> 29`: values **2** (`0x4…`) and
-      **5** (`0xA…`) become a new `MemRegion::CachePurge(usize)`. Reads return
+- [x] **P3-4 (D-9) Associative purge region.** In `translate()` (`sh2.rs:338`), before
+      the `& 0x0FFF_FFFF` fold, dispatch on `address >> 29`: value **2** (`0x4…`)
+      becomes a new `MemRegion::CachePurge(usize)`. Reads return
       `0xFF` per byte (so `read_long` yields `0xFFFFFFFF`, HR §6). Writes: only a
       **longword** write performs the associative purge (HR §12.3.1); byte and word
       writes fall through to an ordinary uncached write. Until Phase 11 exists, a
-      longword write is a no-op with a comment.
-- [ ] **P3-5 (D-9) Cache address array region.** `address >> 29 == 3` (`0x6…`) becomes
+      longword write is a no-op with a comment. (Note: area 5 `0xA...` behaves as
+      cache-through normal memory per Yabause, not cache purge).
+- [x] **P3-5 (D-9) Cache address array region.** `address >> 29 == 3` (`0x6…`) becomes
       `MemRegion::CacheAddressArray(usize)`. Until Phase 11, back it with a flat
       `[u32; 0x100]` field on `Sh2` indexed `(addr & 0x3FC) >> 2` — this is exactly what
       Yabause does when `CACHE_ENABLE` is undefined (HR §12.4's closing paragraph), so
       it is a faithful port of the shipped configuration, not a stub.
-- [ ] **P3-6 (D-9) Cache data array region.** `address >> 29 == 6` (`0xC…`) becomes
+- [x] **P3-6 (D-9) Cache data array region.** `address >> 29 == 6` (`0xC…`) becomes
       `MemRegion::CacheDataArray(usize)`. Back it with a flat `[u8; 0x1000]` field
       indexed `addr & 0xFFF` — again exactly Yabause's non-cache build (HR §12.5). This
       makes the region usable as the 4 KiB scratch RAM real code treats it as, and
@@ -820,18 +821,18 @@ opcode or an unmodelled address stops being silent.
       HR §5.2: that test also matches `0xE…` (the on-chip region), and
       `sh2int.c:55` defines `EXEC_FROM_CACHE` **unconditionally**, so this path is always
       live in the reference.
-- [ ] **P3-7.** Both new arrays are per-CPU state. Add them as `pub` fields with
+- [x] **P3-7.** Both new arrays are per-CPU state. Add them as `pub` fields with
       `Default`-style initialisation inside the existing `Sh2::new()` body — **do not
       change `Sh2::new()`'s 3-argument signature** (`CLAUDE.md` stability constraint;
       many tests in `e2e-tests` and `saturn-core` depend on it).
-- [ ] **P3-8 (part of D-11 prep).** While in `translate()`, confirm the on-chip test
+- [x] **P3-8 (part of D-11 prep).** While in `translate()`, confirm the on-chip test
       `address >= 0xFFFF_FE00` (`sh2.rs:339`) stays *before* the new `>> 29` dispatch —
       `0xFFFFFE00 >> 29 == 7`, which HR §6 also routes to on-chip, so both orders agree,
       but the explicit check must win to preserve the `& 0x1FF` offset.
 
 ### Phase 3 testing
 
-- [ ] **P3-T1.** Execute an opcode from HR §9.10's hole list — pick one per group so the
+- [x] **P3-T1.** Execute an opcode from HR §9.10's hole list — pick one per group so the
       whole list is covered: A=0 D=0 (`0x0000`); A=0 D=2 C=3 (`0x0032`); A=2 D=3
       (`0x2003`); A=3 D=1 (`0x3001`); A=3 D=9 (`0x3009`); A=4 D=12 (`0x400C`); A=4 D=13
       (`0x400D`); A=4 D=4 C=1 (`0x4014`); A=8 B=2 (`0x8200`); A=15 (`0xF000`). For each,
@@ -839,19 +840,18 @@ opcode or an unmodelled address stops being silent.
       and that `R15` moved by exactly 8. The hole list is derived from HR §9.10, which is
       derived from `decode()` — so the *inputs* are independently sourced even though the
       expected *behaviour* is one formula.
-- [ ] **P3-T2.** `read_long(0x4000_0000)` and `read_long(0xA000_0000)` must both return
-      `0xFFFF_FFFF` (HR §6). Assert too that the same physical offset read through
+- [x] **P3-T2.** `read_long(0x4000_0000)` must return `0xFFFF_FFFF` (HR §6) while `0xA000_0000` behaves as cache-through (normal memory). Assert too that the same physical offset read through
       `0x0000_0000` still returns real BIOS bytes — proving the fold was removed for the
       purge region only.
-- [ ] **P3-T3.** Write a long to `0xC000_0010`, read it back from `0xC000_0010`, and
+- [x] **P3-T3.** Write a long to `0xC000_0010`, read it back from `0xC000_0010`, and
       **separately** assert that `read_long(0x0000_0010)` is unchanged — the bug being
       fixed is precisely the aliasing of the two.
-- [ ] **P3-T4.** Same for `0x6000_0000` vs High Work RAM offset 0: write `0xAAAA_AAAA` to
+- [x] **P3-T4.** Same for `0x6000_0000` vs High Work RAM offset 0: write `0xAAAA_AAAA` to
       the address array, assert `read_long(0x0600_0000)` is still 0.
-- [ ] **P3-T5.** Set `PC = 0xC000_0000`, place `MOV #0x2A,R0` (`0xE02A`) in the data
+- [x] **P3-T5.** Set `PC = 0xC000_0000`, place `MOV #0x2A,R0` (`0xE02A`) in the data
       array via `write_word(0xC000_0000, 0xE02A)`, `step()`, assert `R0 == 0x2A` — the
       `EXEC_FROM_CACHE` path of HR §5.2.
-- [ ] **Existing-test breakage to fix in the same commit:** `e2e-tests`'s
+- [x] **Existing-test breakage to fix in the same commit:** `e2e-tests`'s
       `test_tier1_f3_sh2_pc_increment` steps opcode `0x0000` from `0x0600_0000` and
       asserts `pc == 0x0600_0002`; `test_tier2_f3_sh2_max_pc_overflow` steps `0x0000`
       from `0xFFFF_FFFF` and asserts `pc == 1`. Both currently pass *because* illegal

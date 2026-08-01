@@ -129,6 +129,31 @@ impl WorkRam {
         self.write_high_ram_byte(off, (val >> 8) as u8);
         self.write_high_ram_byte(off + 1, val as u8);
     }
+
+    /// Atomic Test-And-Set byte transaction for TAS.B.
+    /// Note that real SH-2 locks the bus, but in Mimas we achieve atomicity
+    /// by holding the stripe/region lock for the whole read-modify-write.
+    pub fn tas_byte(&self, address: u32) -> Option<u8> {
+        let a = address & 0x0FFF_FFFF;
+        if (0x0020_0000..0x0030_0000).contains(&a) {
+            let off = (a - 0x0020_0000) as usize;
+            let mut ram = self.low_ram.write().unwrap();
+            let index = off & (ram.len() - 1);
+            let val = ram[index];
+            ram[index] = val | 0x80;
+            Some(val)
+        } else if (0x0600_0000..0x0700_0000).contains(&a) {
+            let off = (a - 0x0600_0000) as usize;
+            let stripe = (off >> 16) & 31;
+            let index = off & 0xFFFF;
+            let mut ram = self.high_ram[stripe].write().unwrap();
+            let val = ram[index];
+            ram[index] = val | 0x80;
+            Some(val)
+        } else {
+            None
+        }
+    }
 }
 
 impl Default for WorkRam {

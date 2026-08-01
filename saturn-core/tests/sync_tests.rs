@@ -253,6 +253,19 @@ fn test_parked_core_does_not_block_active_cores_drift() {
 fn test_saturn_system_startup_shutdown() {
     assert_completes_within(Duration::from_secs(10), || {
         let mut system = SaturnSystem::with_slack(10);
+        let mut bios = vec![
+            0x00, 0x00, 0x00, 0x08, // Reset PC -> 8
+            0x06, 0x00, 0x00, 0x00, // Reset R15 -> 0x06000000
+        ];
+        for _ in 0..100 {
+            bios.push(0x00);
+            bios.push(0x09); // NOP
+        }
+        bios.push(0xAF);
+        bios.push(0x9A); // BRA 8 (disp = -102)
+        bios.push(0x00);
+        bios.push(0x09); // NOP in delay slot
+        system.load_bios(bios);
 
         // Start system
         system.start();

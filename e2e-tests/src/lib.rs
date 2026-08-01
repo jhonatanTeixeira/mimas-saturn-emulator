@@ -173,8 +173,8 @@ mod tests {
         let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram);
         cpu.pc = 0x06000000;
+        cpu.write_word(0x06000000, 0x0009); // NOP
         cpu.step();
-        // PC should increment by 2 after fetching NOP or instruction (0 in ram)
         assert_eq!(cpu.pc, 0x06000002);
     }
 
@@ -562,6 +562,8 @@ mod tests {
         let arbiter = Arc::new(BusArbiter::new());
         let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram);
+        cpu.cache_data_array[0xFFF] = 0x00;
+        cpu.cache_data_array[0x000] = 0x09; // NOP in cache data array
         cpu.pc = 0xFFFFFFFF;
         // Step should wrap PC to 0 or throw memory exception
         cpu.step();
@@ -727,6 +729,7 @@ mod tests {
         let arbiter = Arc::new(BusArbiter::new());
         let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram);
+        cpu.load_bios(vec![0x00, 0x09]);
         
         assert_eq!(cpu.cycles, 0);
         cpu.step();

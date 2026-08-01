@@ -50,6 +50,8 @@ Always verify code correctness by building and running tests. Use the following 
 * [`saturn-frontend-native/`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/saturn-frontend-native/): Standalone emulator application frontend.
 * [`saturn-frontend-libretro/`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/saturn-frontend-libretro/): Dynamic library frontend exposing the Libretro API (RetroArch).
 * [`.development/`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/.development/): Current blockers, bugs, roadmaps, and detailed task tracking.
+* [`docs/hardware-reference/`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/docs/hardware-reference/): Exhaustive real-Saturn-hardware reference, one file per subsystem, sourced only from the Yabause C/C++ source with a `file:line` citation on every claim. Check here first for exact register/opcode/DMA behavior.
+* [`docs/implementation-plans/`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/docs/implementation-plans/): Phased plan per subsystem (same split as above) closing the gap between that reference and the current Rust code. **Keep these current**: whenever a phase's work actually lands, flip its checklist items to `- [x]` (or annotate `- [ ]` with why it's partial/deferred) in the same change — don't leave them showing not-done once they are.
 
 ---
 
