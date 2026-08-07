@@ -1366,3 +1366,52 @@ What changed in `scu_dsp.rs`:
 Testing: derived every new instruction word and its expected transfer result via a throwaway Python model (`dsp_dma_model.py`, not checked in) rather than hand-typing values that could just mirror the same misunderstanding as the implementation — all 8 tests (one per new variant, with the hold ones asserting *both* the data movement and the register-restore) passed on the first run. Added dedicated D-DSP-1/2/3/5/6 regression tests with hand-derived AC/P values chosen so a reverted fix produces a *different*, not coincidentally-identical, result (e.g. the D-DSP-1 test's `AC=5,P=8` makes the real SUB and the old bug's phantom ADD disagree on both `S` and `C`, not just happen to agree). `cargo test --workspace`: 129 passed (up from 118), 0 failed.
 
 **Left undone, deliberately:** the plan's last testing item asks for the existing real-BIOS-program anchor test to be strengthened with a full independent Python hand-trace asserting final `MD[]`/register/flag state, not just termination. Decoding that 32-word program showed it uses conditional `MVI`, conditional `JMP` with the delayed-branch/loop-back timing, and `dsp_dma03`/`04` — a fully independent re-implementation of all of that is real, separately-scoped effort with its own risk of just being a self-consistent replica of the same code it's meant to check independently. The mechanisms it would exercise (D-DSP-1/2/3) already have dedicated regression tests above; the anchor test itself is unchanged and still passes. Recorded as an open item in `scu.md` rather than silently dropped.
+
+## Chapter 27 — Real-game register capture: a third source of truth alongside the SH-2 manual and Yabause
+
+Everything in `docs/hardware-reference/` up to this point comes from two sources: the SH-2
+hardware manual and Yabause's C source (with `file:line` citations). Both describe what the
+hardware/reference emulator is *capable* of, not what any specific real game actually exercises. To
+get a third, independent data point, we instrumented a Yabause/YabaSanshiro build to hook every
+VDP1/VDP2/SCU/SMPC register write during a real play session of a real commercial game (Magic
+Knight Rayearth) and stream it out for aggregation — recording every **distinct** value written to
+each register offset across the whole session, not just whether it was touched.
+
+**Why this is worth having, concretely, not just in principle:** it's what a real game actually
+writes, not what the reference emulator's C code merely accepts. Where a captured value matches
+this repo's own documentation, that's independent confirmation. Where a register this repo marks
+"not yet implemented" turns out to have real observed traffic, that's a concrete target value to
+build against later instead of only a synthetic one — matching this repo's own rule (`CLAUDE.md`):
+"Write regression tests from independently-derived values... never assert a value you haven't
+independently derived."
+
+**Added `docs/hardware-reference/real-game-capture-appendix.md`** (new file): the real, distinct
+register-write values this session produced for every captured SMPC/VDP1/VDP2/SCU offset, with
+names attached only where the offset could be independently matched against this repo's own
+register tables — SMPC's `0x1F`/COMREG and `0x63`/SF matched exactly, confirming the small-offset
+convention used is the same one already used throughout this directory. Everything else stays a
+bare offset rather than guessing a name from a value pattern alone, which would violate the same
+rule this data exists to serve.
+
+**Cross-referenced into three existing files:**
+
+* **`vdp2.md`** (§A.3, CYCA0L/U etc.): real observed steady-state values (`0x4455`/`0x66FF`/
+  `0x0F1F` family) for the VRAM access cycle pattern registers — concrete target values for Phase 9
+  ("VRAM access cycle patterns: what to actually build"), not yet implemented as of this writing.
+* **`smpc-peripheral.md`** (register table): COMREG's real command distribution (mostly `0x10`/
+  INTBACK, but real low-frequency use of `0x19`/`0x07`/`0x06`/`0x03`/`0x02`/`0x1A` too), and
+  independent confirmation that real code does write DDR2 (`0x7B`) despite this file's own
+  documented `[QUIRK]` that Yabause has no case for it at all.
+* **`cs2-cdblock.md`** (§6.7, `Cs2GetIP`): two real-disc data points from this same game's actual
+  `IP.BIN` — `firstprogsize` (`0xF4`) reads `0` on this real disc (the true executable length was
+  only recoverable from the ISO9660 directory entry, not the IP.BIN header at all — worth checking
+  `Cs2GetIP`'s caller doesn't trust a zero size as "load nothing" once a real disc like this is
+  tested); and a note on this game's runtime overlay-loading pattern (16 `OL00.BIN`-`OL15.BIN`
+  files, CD-read one at a time into a shared fixed high-WRAM range as the game progresses) as a
+  concrete real-world CD-access scenario for whenever CD-ROM gets wired to CS2 (currently not
+  integrated into the emulated system at all, per `CLAUDE.md`).
+
+**Why selective, not a wholesale data dump:** the full session captured 144 distinct VDP2 offsets
+alone, most of which stayed at a constant value the whole session. Only offsets independently
+confirmed against this repo's own register tables, or landing on a not-yet-built phase, were called
+out by name in the appendix and cross-referenced into the files above.

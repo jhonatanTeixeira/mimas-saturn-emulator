@@ -1147,6 +1147,26 @@ Region autodetect from `region[0]` (`cs2.c:4100-4127`): `J`→1, `T`→2, `U`→
 `A`→0xA, `E`→0xC, `L`→0xD, anything else → 0. The sector's block is freed and the partition
 re-sorted before returning.
 
+> **Real disc data point:** on a real commercial game's actual `IP.BIN` (Magic Knight Rayearth,
+> checked byte-for-byte — see `real-game-capture-appendix.md`), `firstprogaddr` at
+> `0xF0` reads `0x06004000` (correct, confirmed against real execution traces) but `firstprogsize`
+> at `0xF4` reads **`0x00000000`** — not populated on this disc at all. The real main executable's
+> true length (835584 bytes) was only recoverable from the ISO9660 filesystem's own directory
+> entry for that file (`isoinfo -l`), confirmed to match exactly. Worth confirming `Cs2GetIP`'s
+> caller doesn't unconditionally trust a zero `firstprogsize` as "load zero bytes" if/when a real
+> disc like this one is tested against Mimas.
+>
+> **Real dynamic overlay loading (game code behavior, not a Saturn hardware fact, but a real
+> CD-access pattern worth having a test case for):** this same disc carries 16 separate files
+> (`OL00.BIN`..`OL15.BIN`, 98304 bytes each) that the running game reads from CD **at runtime**
+> into the SAME fixed high-WRAM address range (just past its main executable's own end), one at a
+> time, swapping which is resident as the game progresses — confirmed by decoding real bytes at
+> that address from each candidate overlay file and finding valid SH-2 code in all 16 of them.
+> Real games doing this kind of runtime CD-load-into-fixed-RAM is
+> exactly the pattern Mimas's CD-ROM integration (currently not wired to CS2 at all, per
+> `CLAUDE.md`) will eventually need to drive correctly, and it's a genuine example to test against
+> once that lands, not a hypothetical one.
+
 ---
 
 ## 7. Timing model summary

@@ -402,6 +402,11 @@ Each bank has two registers giving eight 4-bit timeslot codes. Nibble ordering i
 Decoded into `Vdp2External.AC_VRAM[bank][slot]`, `u8[4][8]` (`vdp2.h:422`), with bank indices
 `0 = A0`, `1 = A1`, `2 = B0`, `3 = B1`.
 
+> **Real-game values (not yet built against, but known):** `real-game-capture-appendix.md` has the
+> actual CYCA0L/U, CYCA1L/U, CYCB0L/U, CYCB1L/U values a real commercial game settles into after
+> boot (`0x4455`/`0x66FF`/`0x0F1F` family) — concrete target values for this phase's test fixtures
+> instead of only synthetic ones.
+
 ### Timeslot codes actually distinguished by the code
 
 | Code | Meaning | Evidence |

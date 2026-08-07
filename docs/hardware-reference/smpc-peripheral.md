@@ -202,6 +202,13 @@ does *in addition to* the unconditional store `SmpcRegsT[addr >> 1] = val` at `s
 | `0x7D` | `0x0010007D` | 62 | **IOSEL** | yes | `SmpcRegs->IOSEL = val` (redundant with the unconditional store) | plain. **Never read by any code in the tree — completely inert** |
 | `0x7F` | `0x0010007F` | 63 | **EXLE** | yes | `SmpcRegs->EXLE = val` (redundant) | plain. Bit 0 is read once, by VDP2 (`vdp2.cpp:1432`, §6.4) |
 
+> **Real-game confirmation:** `real-game-capture-appendix.md` has actual observed values for
+> IREG0-2, COMREG, SF, DDR1/2, IOSEL, EXLE from a live play session of a real commercial game.
+> Notably: COMREG's real command distribution (`0x10` dominant = INTBACK, but also `0x19`/`0x07`/
+> `0x06`/`0x03`/`0x02`/`0x1A` at low frequency — the actual OTHER commands this real game issues),
+> and independent confirmation that real code does write `0x7B` (DDR2) despite this file's own
+> `[QUIRK]` note that Yabause has no case for it at all.
+
 ### 1.3 SF (status flag) — read and write paths
 
 Write (`smpc.c:754-757, 780-782`):
