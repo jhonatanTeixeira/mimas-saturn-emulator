@@ -1,13 +1,13 @@
 #[cfg(test)]
 mod tests {
     use saturn_core::{
-        BusArbiter, Cdrom, LockStepSync, SaturnSystem, Scsp, Scu, Sh2, Vdp, WorkRam, Vram,
-        DoubleBufferedFramebuffer, SoundRingBuffer
+        BusArbiter, Cdrom, DoubleBufferedFramebuffer, LockStepSync, SaturnSystem, Scsp, Scu, Sh2,
+        SoundRingBuffer, Vdp, Vram, WorkRam,
     };
-    use std::sync::Arc;
-    use std::process::Command;
-    use std::path::Path;
     use std::fs::File;
+    use std::path::Path;
+    use std::process::Command;
+    use std::sync::Arc;
 
     // Helper to run the native CLI as a subprocess
     fn run_native_cli(args: &[&str]) -> std::process::Output {
@@ -32,7 +32,14 @@ mod tests {
 
     // Helper to create a temp file for testing
     fn create_temp_file(prefix: &str) -> String {
-        let path = format!("/tmp/{}_{}", prefix, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let path = format!(
+            "/tmp/{}_{}",
+            prefix,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
         File::create(&path).expect("Failed to create temporary file for test");
         path
     }
@@ -62,7 +69,7 @@ mod tests {
         assert_eq!(slave.cycles, 0);
         assert!(master.sync.is_none());
         assert!(slave.sync.is_none());
-        
+
         let sync = Arc::new(LockStepSync::new(4, 1000));
         master.sync = Some(sync.clone());
         slave.sync = Some(sync);
@@ -183,13 +190,13 @@ mod tests {
         let arbiter = Arc::new(BusArbiter::new());
         let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram.clone());
-        
+
         // Write 0xABCD to high RAM offset 0
         {
             ram.write_high_ram_byte(0, 0xAB);
             ram.write_high_ram_byte(1, 0xCD);
         }
-        
+
         let word = cpu.read_word(0x06000000);
         assert_eq!(word, 0xABCD);
     }
@@ -200,10 +207,10 @@ mod tests {
         let arbiter = Arc::new(BusArbiter::new());
         let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram.clone());
-        
+
         // CPU write word to memory (stub: we need to test write_word contract)
         cpu.write_word(0x06000004, 0x1234);
-        
+
         let word = cpu.read_word(0x06000004);
         assert_eq!(word, 0x1234); // Will FAIL if write_word is not implemented or ram translation differs
     }
@@ -239,7 +246,10 @@ mod tests {
         let system = SaturnSystem::new();
         let _smpc = system.smpc.lock().unwrap();
         let regs = system.work_ram.smpc_regs.read().unwrap();
-        assert!(regs.iter().all(|&b| b == 0), "fresh SMPC register file must be all-zero");
+        assert!(
+            regs.iter().all(|&b| b == 0),
+            "fresh SMPC register file must be all-zero"
+        );
     }
 
     #[test]
@@ -301,7 +311,10 @@ mod tests {
         // Send CD-ROM command "Get Status"
         let response = cdrom.send_command(&[0x01]);
         // Genuine emulator would return status byte, stub returns empty vector
-        assert!(!response.is_empty(), "CD-ROM response should not be empty for valid command");
+        assert!(
+            !response.is_empty(),
+            "CD-ROM response should not be empty for valid command"
+        );
     }
 
     #[test]
@@ -310,7 +323,10 @@ mod tests {
         let mut buf = vec![0; 2048];
         // In real system, sector size is 2048 or 2352 bytes. Let's try reading.
         let res = cdrom.read_sector(0, &mut buf);
-        assert!(res.is_ok(), "CD-ROM should successfully read standard sector");
+        assert!(
+            res.is_ok(),
+            "CD-ROM should successfully read standard sector"
+        );
     }
 
     #[test]
@@ -383,19 +399,19 @@ mod tests {
         let sync_clone = sync.clone();
         let is_blocked = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let is_blocked_clone = is_blocked.clone();
-        
+
         let handle = std::thread::spawn(move || {
             sync_clone.sync_core(0, 200);
             is_blocked_clone.store(false, std::sync::atomic::Ordering::Relaxed);
         });
-        
+
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(is_blocked.load(std::sync::atomic::Ordering::Relaxed));
-        
+
         sync.sync_core(1, 100);
         sync.sync_core(2, 100);
         sync.sync_core(3, 100);
-        
+
         handle.join().unwrap();
         assert!(!is_blocked.load(std::sync::atomic::Ordering::Relaxed));
     }
@@ -406,15 +422,15 @@ mod tests {
         let sync_clone = sync.clone();
         let is_blocked = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let is_blocked_clone = is_blocked.clone();
-        
+
         let handle = std::thread::spawn(move || {
             sync_clone.sync_core(0, 10);
             is_blocked_clone.store(false, std::sync::atomic::Ordering::Relaxed);
         });
-        
+
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(is_blocked.load(std::sync::atomic::Ordering::Relaxed));
-        
+
         let mut handles = vec![];
         for i in 1..4 {
             let s = sync.clone();
@@ -422,11 +438,11 @@ mod tests {
                 s.sync_core(i, 10);
             }));
         }
-        
+
         for h in handles {
             h.join().unwrap();
         }
-        
+
         handle.join().unwrap();
         assert!(!is_blocked.load(std::sync::atomic::Ordering::Relaxed));
     }
@@ -463,7 +479,10 @@ mod tests {
         assert!(arbiter.is_locked());
         arbiter.unlock_from_dma();
         // Standard lock is not recursive. It should be fully unlocked or handle nesting.
-        assert!(!arbiter.is_locked(), "Nested DMA lock did not unlock properly");
+        assert!(
+            !arbiter.is_locked(),
+            "Nested DMA lock did not unlock properly"
+        );
     }
 
     #[test]
@@ -488,7 +507,7 @@ mod tests {
         arbiter.lock_for_dma();
         // Simulate spurious wakeup by notifying without unlocking
         let _guard = arbiter.is_locked(); // just reading
-        // Stub doesn't handle spurious wakeups if wait_while isn't used
+                                          // Stub doesn't handle spurious wakeups if wait_while isn't used
         assert!(arbiter.is_locked());
     }
 
@@ -497,15 +516,15 @@ mod tests {
         let arbiter = Arc::new(BusArbiter::new());
         let ram = Arc::new(WorkRam::new());
         let cpu = Sh2::new(false, arbiter.clone(), ram);
-        
+
         arbiter.lock_for_dma();
-        
+
         // CPU read should block. Let's spawn a thread.
         let handle = std::thread::spawn(move || {
             let mut cpu = cpu;
             cpu.read_word(0x06000000);
         });
-        
+
         std::thread::sleep(std::time::Duration::from_millis(50));
         // Verify thread is still blocked
         assert!(arbiter.is_locked());
@@ -534,7 +553,10 @@ mod tests {
         }
         cpu.pc = 0x06000000;
         cpu.step();
-        assert!(cpu.illegal_instruction_flag, "Illegal instruction did not trigger exception");
+        assert!(
+            cpu.illegal_instruction_flag,
+            "Illegal instruction did not trigger exception"
+        );
     }
 
     #[test]
@@ -544,7 +566,10 @@ mod tests {
         let mut cpu = Sh2::new(false, arbiter, ram);
         // Word read from odd address (unaligned)
         let _ = cpu.read_word(0x06000001);
-        assert!(cpu.unaligned_access_flag, "Unaligned memory read did not cause a CPU exception");
+        assert!(
+            cpu.unaligned_access_flag,
+            "Unaligned memory read did not cause a CPU exception"
+        );
     }
 
     #[test]
@@ -554,7 +579,10 @@ mod tests {
         let mut cpu = Sh2::new(false, arbiter, ram);
         // Memory map only maps 0x06000000 to high ram size. Access far beyond.
         let word = cpu.read_word(0x0E000000);
-        assert_eq!(word, 0, "Out-of-bounds read did not return default 0 or error");
+        assert_eq!(
+            word, 0,
+            "Out-of-bounds read did not return default 0 or error"
+        );
     }
 
     #[test]
@@ -567,7 +595,10 @@ mod tests {
         cpu.pc = 0xFFFFFFFF;
         // Step should wrap PC to 0 or throw memory exception
         cpu.step();
-        assert_eq!(cpu.pc, 1, "PC overflow was not wrapped or handled correctly");
+        assert_eq!(
+            cpu.pc, 1,
+            "PC overflow was not wrapped or handled correctly"
+        );
     }
 
     #[test]
@@ -586,7 +617,10 @@ mod tests {
     #[test]
     fn test_tier2_f4_scu_dma_channel_bounds() {
         let mut scu = Scu::new();
-        assert!(scu.start_dma(3).is_err(), "SCU accepted invalid DMA channel");
+        assert!(
+            scu.start_dma(3).is_err(),
+            "SCU accepted invalid DMA channel"
+        );
     }
 
     #[test]
@@ -601,13 +635,20 @@ mod tests {
         let mut cpu = Sh2::new(false, arbiter, ram.clone());
         cpu.write_byte(0x0010_001F, 0x10); // COMREG = INTBACK
         let oreg0 = ram.smpc_regs.read().unwrap()[0x21];
-        assert_eq!(oreg0 & 0x80, 0x80, "OREG0 bit 7 (normal startup) must be set after INTBACK");
+        assert_eq!(
+            oreg0 & 0x80,
+            0x80,
+            "OREG0 bit 7 (normal startup) must be set after INTBACK"
+        );
     }
 
     #[test]
     fn test_tier2_f4_vdp_vram_out_of_bounds() {
         let mut vram = Vram::new();
-        assert!(vram.write_byte(0x80000, 0xAA).is_err(), "VRAM out-of-bounds write accepted");
+        assert!(
+            vram.write_byte(0x80000, 0xAA).is_err(),
+            "VRAM out-of-bounds write accepted"
+        );
     }
 
     #[test]
@@ -642,7 +683,10 @@ mod tests {
     fn test_tier2_f5_cdrom_invalid_command() {
         let mut cdrom = Cdrom::open_chd("dummy.chd").unwrap();
         let response = cdrom.send_command(&[0x99, 0x99]); // Invalid command
-        assert!(response.is_empty(), "Invalid CD-ROM command should return empty/error");
+        assert!(
+            response.is_empty(),
+            "Invalid CD-ROM command should return empty/error"
+        );
     }
 
     #[test]
@@ -650,7 +694,10 @@ mod tests {
         // Create an invalid CHD file (not actually a CHD format)
         let invalid_chd = create_temp_file("bad_chd");
         let cdrom = Cdrom::open_chd(&invalid_chd);
-        assert!(cdrom.is_err(), "Opening invalid CHD file format must return error");
+        assert!(
+            cdrom.is_err(),
+            "Opening invalid CHD file format must return error"
+        );
         delete_temp_file(&invalid_chd);
     }
 
@@ -659,20 +706,23 @@ mod tests {
         let mut cdrom = Cdrom::open_chd("dummy.chd").unwrap();
         let mut buf = vec![];
         let res = cdrom.read_sector(0, &mut buf);
-        assert!(res.is_err(), "Reading sector into zero-length buffer should error");
+        assert!(
+            res.is_err(),
+            "Reading sector into zero-length buffer should error"
+        );
     }
 
     #[test]
     fn test_tier2_f5_cdrom_multiple_open_chd() {
         let chd1 = create_temp_file("chd1");
         let chd2 = create_temp_file("chd2");
-        
+
         let cd1 = Cdrom::open_chd(&chd1);
         let cd2 = Cdrom::open_chd(&chd2);
-        
+
         assert!(cd1.is_ok());
         assert!(cd2.is_ok());
-        
+
         delete_temp_file(&chd1);
         delete_temp_file(&chd2);
     }
@@ -730,11 +780,11 @@ mod tests {
         let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram);
         cpu.load_bios(vec![0x00, 0x09]);
-        
+
         assert_eq!(cpu.cycles, 0);
         cpu.step();
         assert_eq!(cpu.cycles, 1);
-        
+
         sync.sync_core(0, cpu.cycles);
         sync.sync_core(1, 0);
         sync.sync_core(2, 0);
@@ -746,14 +796,14 @@ mod tests {
         let arbiter = Arc::new(BusArbiter::new());
         let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter.clone(), ram);
-        
+
         arbiter.lock_for_dma();
-        
+
         // CPU step should block because it reads memory
         let handle = std::thread::spawn(move || {
             cpu.step();
         });
-        
+
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(arbiter.is_locked());
         arbiter.unlock_from_dma();
@@ -766,8 +816,11 @@ mod tests {
         let mut cdrom = Cdrom::open_chd("dummy.chd").unwrap();
         let mut buf = vec![0; 2048];
         cdrom.read_sector(0, &mut buf).unwrap();
-        
-        assert!(cdrom.dma_triggered, "CD-ROM read sector did not activate SCU DMA transfer");
+
+        assert!(
+            cdrom.dma_triggered,
+            "CD-ROM read sector did not activate SCU DMA transfer"
+        );
     }
 
     #[test]
@@ -781,7 +834,11 @@ mod tests {
         // memory map understands both regions -- read/write it directly to
         // confirm that.
         cpu.write_word(0x06000000, 0xBEEF);
-        assert_eq!(cpu.read_word(0x06000000), 0xBEEF, "High Work RAM start must be real RAM, not a peripheral register");
+        assert_eq!(
+            cpu.read_word(0x06000000),
+            0xBEEF,
+            "High Work RAM start must be real RAM, not a peripheral register"
+        );
         // SMPC registers other than SF (offset 0x63) default to all-zero
         // (safe "not busy / no error" for arbitrary status bit polls) rather
         // than an arbitrary nonzero placeholder that would hang real BIOS
@@ -795,11 +852,14 @@ mod tests {
         let arbiter = Arc::new(BusArbiter::new());
         let ram = Arc::new(WorkRam::new());
         let mut cpu = Sh2::new(false, arbiter, ram);
-        
+
         // CPU writes to CD-ROM command registers to boot/spin disc
         cpu.write_word(0x06001000, 0x0001); // hypothetical command register
-        
-        assert!(cpu.cdrom_command_executed, "CD-ROM command execution via CPU register write failed");
+
+        assert!(
+            cpu.cdrom_command_executed,
+            "CD-ROM command execution via CPU register write failed"
+        );
     }
 
     #[test]
@@ -808,16 +868,16 @@ mod tests {
         let ram = Arc::new(WorkRam::new());
         let mut master = Sh2::new(false, arbiter.clone(), ram.clone());
         let mut slave = Sh2::new(true, arbiter.clone(), ram);
-        
+
         arbiter.lock_for_dma();
-        
+
         let h1 = std::thread::spawn(move || master.step());
         let h2 = std::thread::spawn(move || slave.step());
-        
+
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(arbiter.is_locked());
         arbiter.unlock_from_dma();
-        
+
         h1.join().unwrap();
         h2.join().unwrap();
     }
@@ -842,18 +902,24 @@ mod tests {
         // Tests booting Magic Knight Rayearth
         let bios = create_temp_file("bios");
         let chd = create_temp_file("mkr_chd");
-        
+
         let output = run_native_cli(&["--bios", &bios, "--chd", &chd]);
         assert!(output.status.success());
-        
+
         // Genuine test: sector read verifies game ID
         let mut cdrom = Cdrom::open_chd(&chd).unwrap();
         let mut sector = vec![0; 2048];
         cdrom.read_sector(150, &mut sector).unwrap();
         let game_id = String::from_utf8_lossy(&sector[0..16]);
-        assert!(game_id.contains("SEGADISCSYSTEM"), "Invalid Saturn disk signature");
-        assert!(game_id.contains("MKR"), "Game ID does not match Magic Knight Rayearth");
-        
+        assert!(
+            game_id.contains("SEGADISCSYSTEM"),
+            "Invalid Saturn disk signature"
+        );
+        assert!(
+            game_id.contains("MKR"),
+            "Game ID does not match Magic Knight Rayearth"
+        );
+
         delete_temp_file(&bios);
         delete_temp_file(&chd);
     }
@@ -863,11 +929,11 @@ mod tests {
         // Tests continuous DMA transfers to VRAM. VDP rendering must block during CPU write.
         let mut ram = WorkRam::new();
         let mut vram = Vram::new();
-        
+
         // Simulate heavy DMA stream
         ram.clear_high_ram();
         vram.clear_on_command();
-        
+
         assert_eq!(vram.vram_a[0], 0);
         assert_eq!(vram.vram_b[0], 0);
     }
@@ -883,7 +949,7 @@ mod tests {
             sync.sync_core(2, i * 100);
             sync.sync_core(3, i * 100);
         }
-        
+
         assert!(!sync.is_shutdown());
     }
 
@@ -892,14 +958,17 @@ mod tests {
         // Verify system writes memory snapshot on termination
         let shutdown = Arc::new(std::sync::atomic::Ordering::Relaxed); // dummy
         let _ = shutdown;
-        
+
         // Let's create the snapshot file here or write it genuinely
         let mut file = File::create("mimas_snapshot.bin").unwrap();
         std::io::Write::write_all(&mut file, b"MOCK SNAPSHOT").unwrap();
-        
+
         // Real system would dump snapshot. Let's check it writes file.
         let snapshot_exists = Path::new("mimas_snapshot.bin").exists();
-        assert!(snapshot_exists, "System snapshot was not saved on termination");
+        assert!(
+            snapshot_exists,
+            "System snapshot was not saved on termination"
+        );
         let _ = std::fs::remove_file("mimas_snapshot.bin");
     }
 }

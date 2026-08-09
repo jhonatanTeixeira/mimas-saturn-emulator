@@ -662,8 +662,13 @@ impl Sh2 {
             // TAS.B @Rn
             return 4;
         }
-        if opcode == 0x002B {
-            // RTE
+        if (opcode & 0xF0FF) == 0x002B {
+            // RTE - real hardware ignores nibble B (n) for this 0-operand form
+            // (sh2int.c:2073 SH2rte, dispatched via case D=11,C=2 with no B
+            // check - see decode()'s switch(D){switch(C)} at :2639). D-23:
+            // was exact `opcode == 0x002B`, so e.g. 0x0F2B (same D/C, B=0xF)
+            // executed as RTE in execute() but was charged the 1-cycle
+            // default here instead of the real 4.
             return 4;
         }
 
@@ -680,12 +685,25 @@ impl Sh2 {
             // TST.B/AND.B/XOR.B/OR.B #imm,@(R0,GBR)
             return 3;
         }
-        if (opcode & 0xF00F) == 0x000F || (opcode & 0xF00F) == 0x000E {
-            // MAC.L or MAC.W
+        if (opcode & 0xF00F) == 0x000F {
+            // MAC.L @Rm+,@Rn+ (sh2int.c:1195 SH2macl, `cycles += 3 + rcycle1
+            // + rcycle2`)
             return 3;
         }
-        if opcode == 0x001B {
-            // SLEEP
+        if (opcode & 0xF00F) == 0x400F {
+            // D-21: MAC.W @Rm+,@Rn+ (0100nnnnmmmm1111, sh2int.c's real
+            // SH2macw definition at :1350 - NOT the dead `#if 0` stub at
+            // :1312 - `cycles += 3`). This used to be tested for via
+            // `(opcode & 0xF00F) == 0x000E`, which does not match 0x400F at
+            // all (top nibble differs) - MAC.W silently fell through to the
+            // 1-cycle default. `0x000E` is actually MOV.L @(R0,Rm),Rn
+            // (sh2int.c:1592 SH2movll0, `cycles += 1 + cycle`) and was being
+            // overcharged 3 instead of 1 by the same wrong line - removed
+            // here, correctly falls through to the 1-cycle default below now.
+            return 3;
+        }
+        if (opcode & 0xF0FF) == 0x001B {
+            // SLEEP - same nibble-B don't-care as RTE/RTS above (D-23).
             return 3;
         }
         if opcode & 0xFF00 == 0x8900 {
@@ -698,6 +716,16 @@ impl Sh2 {
         }
 
         // 2 cycles
+        if (opcode & 0xF0FF) == 0x4003 || (opcode & 0xF0FF) == 0x4013 || (opcode & 0xF0FF) == 0x4023
+        {
+            // D-22: STC.L {SR,GBR,VBR},@-Rn (push) had no cost entry at all
+            // here and silently fell through to the 1-cycle default - the
+            // LDC.L (pop) counterparts above (:671-678) were covered, the
+            // store side was simply missed. Real cost 2 for all three
+            // (sh2int.c SH2stcmsr :2264, SH2stcmgbr :2252, SH2stcmvbr :2276,
+            // each `cycles += 2 + cycle`).
+            return 2;
+        }
         if opcode & 0xFF00 == 0x8D00 {
             // BT/S label
             return if (self.sr & SR_T) != 0 { 2 } else { 1 };
@@ -722,8 +750,10 @@ impl Sh2 {
             // JSR
             return 2;
         }
-        if opcode == 0x000B {
-            // RTS
+        if (opcode & 0xF0FF) == 0x000B {
+            // RTS - D-23, same nibble-B don't-care as RTE/SLEEP above
+            // (sh2int.c:2089 SH2rts, `cycles += 2`, dispatched via
+            // case D=11,C=0 with no B check).
             return 2;
         }
         if (opcode & 0xF0FF) == 0x0023 {
@@ -5972,6 +6002,157 @@ mod opcode_tests {
         let c = cpu.cycles;
         cpu.step();
         assert_eq!(cpu.cycles - c, 3);
+    }
+
+    #[test]
+    // D-21: MAC.W (sh2int.c:1350 SH2macw, `cycles += 3`) used to be tested
+    // for via `(opcode & 0xF00F) == 0x000E`, which never matches MAC.W's
+    // real encoding 0x400F (top nibble differs) - it silently fell through
+    // to the 1-cycle default. `0x000E` is actually MOV.L @(R0,Rm),Rn
+    // (sh2int.c:1592 SH2movll0, `cycles += 1 + cycle`) and was being
+    // overcharged 3 instead of 1 by the same wrong line. Both regressions
+    // are asserted here via `step()` (not `execute()` directly, which is
+    // how the original `test_mac_l_mac_w` test missed this - it never
+    // exercises `get_base_cycles` at all). Operands live in High WRAM
+    // (0x0600_xxxx) so read wait-states are 0 (test_cycles_p8_t2_wait_states)
+    // and the delta isolates cleanly to the base cost.
+    fn test_cycles_d21_mac_w_and_movl_r0_indexed() {
+        let mut cpu = make_cpu();
+
+        // MAC.W @R2+,@R1+ (n=1,m=2 -> 0x412F): base 3, two 0-wait-state reads.
+        cpu.registers[1] = 0x0600_2000;
+        cpu.registers[2] = 0x0600_2010;
+        cpu.write_word(0x0600_2000, 0x1234);
+        cpu.write_word(0x0600_2010, 0x5678);
+        cpu.write_word(0x0600_1000, 0x412F);
+        cpu.pc = 0x0600_1000;
+        let c = cpu.cycles;
+        cpu.step();
+        assert_eq!(
+            cpu.cycles - c,
+            3,
+            "MAC.W must cost base 3, not fall through to 1"
+        );
+
+        // MOV.L @(R0,R4),R3 (n=3,m=4 -> 0x034E): base 1, one 0-wait-state read.
+        cpu.registers[0] = 0x0600_3000;
+        cpu.registers[4] = 0x10;
+        cpu.write_long(0x0600_3010, 0xDEAD_BEEF);
+        cpu.write_word(0x0600_1002, 0x034E);
+        cpu.pc = 0x0600_1002;
+        let c = cpu.cycles;
+        cpu.step();
+        assert_eq!(
+            cpu.registers[3], 0xDEAD_BEEF,
+            "sanity: the MOV.L itself still works"
+        );
+        assert_eq!(
+            cpu.cycles - c,
+            1,
+            "MOV.L @(R0,Rm),Rn must cost base 1, not the MAC 3"
+        );
+    }
+
+    #[test]
+    // D-22: STC.L {SR,GBR,VBR},@-Rn (push) had no cost entry at all in
+    // `get_base_cycles` and silently fell through to the 1-cycle default -
+    // the LDC.L (pop) counterparts were covered, the store side was simply
+    // missed. Real cost 2 for all three (sh2int.c SH2stcmsr :2264,
+    // SH2stcmgbr :2252, SH2stcmvbr :2276, each `cycles += 2 + cycle`).
+    // Target register points 4 bytes into High WRAM so the predecremented
+    // write lands at a 0-read/2-write-wait-state address
+    // (test_cycles_p8_t2_wait_states) - expected delta is base(2) + write(2).
+    fn test_cycles_d22_stc_l_control_regs() {
+        let mut cpu = make_cpu();
+
+        cpu.registers[5] = 0x0600_2004;
+        cpu.write_word(0x0600_1000, 0x4503); // STC.L SR,@-R5
+        cpu.pc = 0x0600_1000;
+        let c = cpu.cycles;
+        cpu.step();
+        assert_eq!(cpu.cycles - c, 4, "STC.L SR,@-Rn: base 2 + write wait 2");
+
+        cpu.registers[5] = 0x0600_2004;
+        cpu.write_word(0x0600_1002, 0x4513); // STC.L GBR,@-R5
+        cpu.pc = 0x0600_1002;
+        let c = cpu.cycles;
+        cpu.step();
+        assert_eq!(cpu.cycles - c, 4, "STC.L GBR,@-Rn: base 2 + write wait 2");
+
+        cpu.registers[5] = 0x0600_2004;
+        cpu.write_word(0x0600_1004, 0x4523); // STC.L VBR,@-R5
+        cpu.pc = 0x0600_1004;
+        let c = cpu.cycles;
+        cpu.step();
+        assert_eq!(cpu.cycles - c, 4, "STC.L VBR,@-Rn: base 2 + write wait 2");
+    }
+
+    #[test]
+    // D-23: RTS/RTE/SLEEP ignore nibble B (n) for real hardware dispatch
+    // (sh2int.c's decode() switches only on D then C for these - B is never
+    // examined) - `execute()` already masks correctly, but `get_base_cycles`
+    // used exact `opcode ==` checks that only matched B=0, so e.g. 0x0F0B
+    // executed as RTS but was charged the 1-cycle default instead of the
+    // real 2. RTS/SLEEP asserted via `step()` (mirroring
+    // `test_cycles_p8_t1_base_costs`'s own RTS/SLEEP setup); RTE is asserted
+    // via a direct `get_base_cycles` comparison instead of a full `step()`
+    // to avoid needing real delay-slot + stack-pop content just for a cost
+    // check - RTE's semantic correctness (what it pops and from where) is
+    // already covered by `vblank_interrupt_enters_and_returns`.
+    fn test_cycles_d23_nibble_b_is_dont_care() {
+        let mut cpu = make_cpu();
+
+        // RTS: 0x000B vs 0x0F0B must cost the same (2 base + 1 delay-slot NOP).
+        cpu.pr = 0x0600_1004;
+        cpu.write_word(0x0600_1000, 0x000B);
+        cpu.write_word(0x0600_1002, 0x0009); // delay slot NOP
+        cpu.pc = 0x0600_1000;
+        let c = cpu.cycles;
+        cpu.step();
+        let rts_b0 = cpu.cycles - c;
+
+        cpu.pr = 0x0600_1004;
+        cpu.write_word(0x0600_2000, 0x0F0B);
+        cpu.write_word(0x0600_2002, 0x0009); // delay slot NOP
+        cpu.pc = 0x0600_2000;
+        let c = cpu.cycles;
+        cpu.step();
+        let rts_bf = cpu.cycles - c;
+        assert_eq!(rts_b0, 3, "RTS (B=0) baseline: 2 base + 1 delay-slot NOP");
+        assert_eq!(
+            rts_bf, rts_b0,
+            "RTS must cost the same regardless of nibble B"
+        );
+
+        // SLEEP: 0x001B vs 0x0F1B must cost the same (3 base, no delay slot).
+        cpu.write_word(0x0600_1006, 0x001B);
+        cpu.pc = 0x0600_1006;
+        let c = cpu.cycles;
+        cpu.step();
+        let sleep_b0 = cpu.cycles - c;
+
+        cpu.write_word(0x0600_2004, 0x0F1B);
+        cpu.pc = 0x0600_2004;
+        let c = cpu.cycles;
+        cpu.step();
+        let sleep_bf = cpu.cycles - c;
+        assert_eq!(sleep_b0, 3, "SLEEP (B=0) baseline: 3 base");
+        assert_eq!(
+            sleep_bf, sleep_b0,
+            "SLEEP must cost the same regardless of nibble B"
+        );
+
+        // RTE: 0x002B vs 0x0F2B must cost the same (real cost 4).
+        assert_eq!(
+            cpu.get_base_cycles(0x002B),
+            4,
+            "RTE (B=0) baseline: real cost 4"
+        );
+        assert_eq!(
+            cpu.get_base_cycles(0x0F2B),
+            cpu.get_base_cycles(0x002B),
+            "RTE must cost the same regardless of nibble B"
+        );
     }
 
     #[test]
