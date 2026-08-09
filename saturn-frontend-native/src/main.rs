@@ -1,10 +1,10 @@
+use saturn_core::{Cdrom, SaturnSystem, ThrottleSpeed};
 use std::env;
 use std::path::Path;
 use std::process;
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant};
-use saturn_core::{SaturnSystem, Cdrom, ThrottleSpeed};
 
 /// Write the current VDP2 frame out as a real PNG -- the point is to be
 /// able to actually *look* at what BIOS boot has rendered so far (e.g.
@@ -20,13 +20,18 @@ fn write_framedump(frame: &saturn_core::vdp::Framebuffer, path: &str) -> Result<
         rgb.push(((p >> 8) & 0xFF) as u8);
         rgb.push((p & 0xFF) as u8);
     }
-    let file = std::fs::File::create(path).map_err(|e| format!("failed to create {}: {}", path, e))?;
+    let file =
+        std::fs::File::create(path).map_err(|e| format!("failed to create {}: {}", path, e))?;
     let w = std::io::BufWriter::new(file);
     let mut encoder = png::Encoder::new(w, frame.width as u32, frame.height as u32);
     encoder.set_color(png::ColorType::Rgb);
     encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header().map_err(|e| format!("failed to write PNG header for {}: {}", path, e))?;
-    writer.write_image_data(&rgb).map_err(|e| format!("failed to write PNG data for {}: {}", path, e))?;
+    let mut writer = encoder
+        .write_header()
+        .map_err(|e| format!("failed to write PNG header for {}: {}", path, e))?;
+    writer
+        .write_image_data(&rgb)
+        .map_err(|e| format!("failed to write PNG data for {}: {}", path, e))?;
     Ok(())
 }
 
@@ -168,7 +173,10 @@ fn main() {
     println!("Core 0 (Master SH-2) reset PC: {:#010X}", start_pc);
     // Override with MIMAS_BOOT_WATCH_SECS=N for interactive boot-progress
     // exploration without needing to edit and rebuild each time.
-    let watch_secs: u64 = env::var("MIMAS_BOOT_WATCH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(2);
+    let watch_secs: u64 = env::var("MIMAS_BOOT_WATCH_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2);
     let deadline = Instant::now() + Duration::from_secs(watch_secs);
     let mut last_pc = start_pc;
     let mut last_change = Instant::now();
@@ -178,7 +186,10 @@ fn main() {
         let pc = system.cpu0_pc.load(Ordering::Relaxed);
         samples += 1;
         if pc != last_pc {
-            println!("Core 0 PC advanced: {:#010X} -> {:#010X} (sample {})", last_pc, pc, samples);
+            println!(
+                "Core 0 PC advanced: {:#010X} -> {:#010X} (sample {})",
+                last_pc, pc, samples
+            );
             last_pc = pc;
             last_change = Instant::now();
         } else if last_change.elapsed() > Duration::from_millis(500) {
@@ -186,14 +197,20 @@ fn main() {
             // certainly parked in a real wait loop (hardware polling) rather
             // than just a slow bounded loop -- no point burning the rest of
             // the window sampling something that isn't moving.
-            println!("Core 0 PC settled at {:#010X} (unchanged for 500ms) -- stopping early", pc);
+            println!(
+                "Core 0 PC settled at {:#010X} (unchanged for 500ms) -- stopping early",
+                pc
+            );
             break;
         }
     }
     if last_pc == start_pc {
         println!("Core 0 PC did not move from the reset vector -- BIOS boot code at this address either loops in place or the opcode there isn't decoded yet.");
     } else {
-        println!("Core 0 executed real BIOS instructions: PC moved from {:#010X} to {:#010X}.", start_pc, last_pc);
+        println!(
+            "Core 0 executed real BIOS instructions: PC moved from {:#010X} to {:#010X}.",
+            start_pc, last_pc
+        );
     }
 
     // VDP2 backdrop rendering is real (see `vdp::render_backdrop`, run by

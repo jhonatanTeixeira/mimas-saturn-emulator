@@ -808,6 +808,25 @@ The disassembler also flags `DT`, `BRAF`, `BSRF`, `DMULS.L`, `DMULU.L`, `MUL.L`,
 `BF/S`, `BT/S` with `sh2 = 1`, i.e. "SH-2 only, not present on SH-1" — an SH-1/SH-2 distinction
 that has no effect in the Saturn context but is preserved in the table.
 
+**A third independent cross-check now exists (2026-08-08).** `saturn-core/src/sh2.rs`'s
+own decode cascade (`execute()`, `sh2.rs:2536-3513`) was diffed against a transcription of
+`decode()` (`:2639-2921`) over all 65536 possible 16-bit opcodes: 53,616 decode
+identically on both sides, 11,920 correctly reach the illegal-instruction path on both
+sides, 0 disagree. This agrees with `sh2d.c`'s two tables above — three independent
+sources (interpreter, disassembler, and now an independently-written Rust reimplementation)
+converge on the same decode set. See `docs/implementation-plans/sh2-cpu.md` §0.2's status
+update for the method and for three *cycle-cost* defects (D-21/D-22/D-23) this same pass
+found in the separately-decoding `get_base_cycles`.
+
+**Line-number caveat for anyone citing `sh2int.c` from a fresh checkout:** the sibling
+project `portal_to_another_world` (a Sega Saturn static-recompilation tool, unrelated to
+mimas except for sharing this same hardware target and having independently audited its
+own SH-2 decoder against the same real opcode table the same day) vendors its own copy of
+`vendor/yabause/src/sh2int.c` with `portal_trace.c` instrumentation hooks inserted —
+its line numbers are shifted (+2 in the decode region, +45 past line ~3150) relative to
+this project's own `../yabause/` checkout. Always cite from `retroarch-cores/yabause/`,
+never from another project's vendored copy, even though the underlying code is identical.
+
 ---
 
 ## 10. Interrupt handling

@@ -86,6 +86,33 @@ independently cross-referenced against this file's own register table and worth 
 | `0xA0` | 114805 (32-bit) | Dominated by `FFFFFFFF`(×9393)/`FFFFFFFE`(×9351) — looks like an interrupt mask/ack register given the near-all-ones traffic |
 | `0xA4` | 68 (32-bit) | `FFFFFFFF×37` plus scattered other near-all-ones values |
 
+## SH-2 real workload profile (different capture tool, same game/session family)
+
+The sections above come from a register-*write* hook. This section comes from a different
+instrumentation point in the same sibling project (`portal_to_another_world`'s `portal_trace.c`,
+built into the same instrumented Yabause/YabaSanshiro lineage): a call/return hook on every
+`JSR`/`BSR`/`JMP`/`BRAF`/`BSRF`, aggregated into `tools/portal_trace_report.json`. It answers a
+different question than the register-write data above — not "what values does real code write to
+hardware" but "which SH-2 *routines* does real code actually spend its time in, and how often." Real
+counts from one real Magic Knight Rayearth play session (~59M total calls across 1468 distinct call
+targets):
+
+| Address | Real calls | What it is |
+|---|---|---|
+| `0x06055958` | **4,755,141** | Compiler-generated signed 64/32-bit division: `DIV0S`×2, then a 32-iteration `DIV1`+`ROTCL` bit-serial loop, `ADDC` at the end. The single most-called routine in the whole session — real, ordinary game code apparently divides constantly. At ~65 real SH-2 instructions per call, that's over 300 million real `DIV1`/`ROTCL` executions in this one session alone. |
+| `0x060B1BC4` | 4,483,066 | Q16.16 fixed-point integer-part extraction: `MOV R4,R0` / `SHLR16 R0` / `RTS` (delay slot `EXTS.W R0,R0`) — arithmetically `(x >> 16)` sign-extended. |
+| `0x060B1B94` | 1,769,550 | Q16.16 fixed-point multiply: `DMULS.L R4,R5` (signed 32×32→64) then `XTRCT` to pull out the middle 32 bits — the standard `(a*b) >> 16` idiom compiled without a real fixed-point multiply instruction. |
+
+**Why this earns a place here rather than being a bulk data dump** (unlike the full 1468-entry call
+table and per-site register-argument samples the source tool also has, deliberately *not* included
+— no concrete Mimas use today): it converts `DIV1`/`ROTCL`/`DMULS.L`'s cycle costs and edge-case
+behavior from "one line in a hardware-reference table" into "the hottest path in a real commercial
+game, executed hundreds of millions of times per session." `docs/implementation-plans/sh2-cpu.md`'s
+own testing checklist (item **P1-T7**) already flags `DIV1`'s real multi-step hardware behavior as a
+still-open question (`div1_single_step_matches_hand_traced_algorithm` explicitly disclaims full
+coverage) — this data is the concrete argument for why that item, and `DMULS.L`'s own cycle
+accounting, matter in practice rather than only in principle.
+
 ## How to use this
 
 1. Before implementing or fixing a register this file lists, check whether it's here too.

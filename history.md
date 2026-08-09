@@ -1415,3 +1415,66 @@ rule this data exists to serve.
 alone, most of which stayed at a constant value the whole session. Only offsets independently
 confirmed against this repo's own register tables, or landing on a not-yet-built phase, were called
 out by name in the appendix and cross-referenced into the files above.
+
+## Chapter 28 — An independent opcode-by-opcode audit of the SH-2 core against Yabause
+
+`docs/implementation-plans/sh2-cpu.md` §0's opcode-coverage numbers ("133 decode, 9 missing, 4
+wrong, silent no-op fallthrough") had sat unrefreshed since Phase 0/1 despite Phase 1 and Phase 2
+both landing and being marked `[x]` further down the *same* document — a real instance of exactly
+the staleness `CLAUDE.md`'s own documentation-tracking rule exists to prevent. This chapter is
+about finally re-verifying what's actually true, prompted by a concrete, external data point: a
+sibling project on this machine (`portal_to_another_world`, a separate Sega Saturn
+static-recompilation tool, unrelated to mimas except for targeting the same hardware and having its
+own from-scratch SH-2 disassembler) spent a session auditing its own opcode table line-by-line
+against `sh2int.c` and found 8 real decode-table bugs — missing `LDS.L`/`STS.L`/`STC.L`/`LDC.L`
+control-register variants, a missing `TAS.B`, `MAC.W`/`MAC.L` only partially covered, and a group of
+0-operand pseudo-instructions requiring an exact 16-bit match when real hardware ignores the n
+field. Given that project independently found real bugs with this exact method, the obvious question
+was whether the same method, pointed at mimas's own, much more mature SH-2 core, would find
+anything.
+
+**Two machine-checked, exhaustive results, run first before touching any code:**
+
+1. **Decode-set equivalence.** All 65536 possible opcodes, decoded both by a transcription of
+   `sh2int.c`'s real `decode()` (`retroarch-cores/yabause/src/sh2int.c:2639-2921` — the sibling
+   project's *own* vendored copy of this file has `portal_trace.c` instrumentation shifting its line
+   numbers, so this checkout is the one to cite, never that one) and by walking `execute()`'s 7
+   sequential `match opcode & mask` blocks (`sh2.rs:2536-3513`) in dispatch order. Result: 53,616
+   encodings decode identically, 11,920 correctly reach the illegal-instruction path on both sides,
+   **0 disagree, 0 arms shadowed**. `execute()`'s decode cascade is exactly as correct as this
+   project's own docs already claimed it to be, verified rather than asserted.
+2. **Cycle-cost equivalence.** The same treatment applied to `get_base_cycles` (`sh2.rs:654-753`) —
+   a function that exists purely to *cost* opcodes and re-decodes them independently of `execute()`.
+   This one **was not** clean: **D-21, D-22, D-23**, three real, previously-undocumented defects
+   (full detail in `docs/implementation-plans/sh2-cpu.md` §0.9 and `.development/current_bugs.md`).
+   In short: `MAC.W` and a common `MOV.L` addressing form had their cycle costs swapped by a wrong
+   mask; `STC.L {SR,GBR,VBR},@-Rn` had no cost entry at all; and `RTS`/`RTE`/`SLEEP` used exact
+   16-bit equality where real hardware (and `execute()` itself, correctly) treats the n field as a
+   don't-care — the identical mistake `execute()` had already been fixed for once (D-5), made again
+   independently in the separate cost function and never caught, because the existing
+   `test_mac_l_mac_w` test calls `cpu.execute()` directly, bypassing `step()` and therefore
+   `get_base_cycles` entirely.
+
+All three fixed in `saturn-core/src/sh2.rs`, each backed by a new `#[test]` whose expected value was
+derived from `sh2int.c`'s real `cycles +=` lines, never from running the code being tested — the
+same discipline `CLAUDE.md` already requires. D-21's test was deliberately checked for real
+regression-catching power, not just written and trusted: reverted the fix locally, reran just that
+test, watched it fail with the exact wrong value (`left: 1, right: 3`), then restored the fix and
+confirmed green again. `cargo test --package saturn-core`: 79 passed in the `sh2` module (was 76), 0
+failed. `cargo test --workspace`: 226 passed, 0 failed. `cargo fmt` applied clean.
+
+**What this chapter does not claim:** decode-set equivalence proves every opcode reaches *a*
+handler, not that the handler's *behavior* is correct — that's a separate axis (semantic
+correctness per mnemonic) that this pass did not exhaustively re-walk. A handful of handlers were
+spot-checked along the way (`ROTL`/`ROTR`, `DIV0S`, `CMP/STR`, `SUBV`, `NEGC`, `MOVA`, the `0xC?00`
+immediate group including the already-fixed D-1 `OR`/`XOR` swap, the `MOV.B/W @(disp,Rm),R0` nibble
+forms) and all matched HR, but that is not the same as re-deriving all 142 mnemonics from scratch.
+Recorded as open, not silently assumed done — see the status update inserted at the top of
+`docs/implementation-plans/sh2-cpu.md` §0.2, and `.development/current_bugs.md`'s own "not
+individually re-verified" section for D-1 through D-20.
+
+**Documentation touched:** `docs/implementation-plans/sh2-cpu.md` (§0.2 status-update block, §0.9
+D-21/22/23), `docs/hardware-reference/sh2-cpu.md` (§9.11, a third independent cross-check alongside
+the interpreter and `sh2d.c`), `.development/current_bugs.md` (seeded from zero bytes — this file
+existed empty since the project's first commit despite Phase 1's own text asking for it to be
+populated).

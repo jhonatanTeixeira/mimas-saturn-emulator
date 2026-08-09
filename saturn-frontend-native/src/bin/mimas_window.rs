@@ -3,11 +3,11 @@
 // window, continuously. Separate from `saturn-frontend-native`'s main
 // binary, which is the headless/timed CLI the E2E test suite drives; this
 // one runs until the window is closed.
+use minifb::{Window, WindowOptions};
+use saturn_core::SaturnSystem;
 use std::env;
 use std::path::Path;
 use std::process;
-use minifb::{Window, WindowOptions};
-use saturn_core::SaturnSystem;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -75,7 +75,10 @@ fn main() {
                 "Mimas -- Sega Saturn (real BIOS boot)",
                 win_w,
                 win_h,
-                WindowOptions { resize: true, ..WindowOptions::default() },
+                WindowOptions {
+                    resize: true,
+                    ..WindowOptions::default()
+                },
             )
             .expect("failed to resize window");
             window.set_target_fps(60);

@@ -54,6 +54,54 @@ not parity.
 
 ### 0.2 Opcode coverage — headline numbers
 
+> **STATUS UPDATE (2026-08-08 — see D-21/D-22/D-23 in §0.9).** Everything below this
+> point through §0.3 is the **original, pre-Phase-1/2 snapshot** and is now stale — it
+> was never refreshed when Phase 1 and Phase 2 (both marked `[x]` further down this same
+> document) actually landed. Left in place as a historical record per this project's own
+> documentation convention (superseded content stays visible, not deleted), but do not
+> treat its counts or per-row `MISSING`/`WRONG` verdicts as current. What is actually true
+> today, independently re-verified by a fresh audit against the same oracle
+> (`yabause/src/sh2int.c`, cross-checked from the sibling `retroarch-cores/yabause/`
+> checkout — see `portal_to_another_world`'s own SH-2 disassembler audit the same day,
+> which found and fixed 8 analogous decode-table bugs in a *different* project's tooling
+> and prompted re-running the same method here):
+>
+> - **Decode-set equivalence (exhaustive, machine-checked): 0 divergence.** Every one of
+>   the 65536 possible 16-bit opcodes was decoded both by a transcription of
+>   `sh2int.c:decode()` (`:2639-2921`) and by walking `execute()`'s real match cascade
+>   (`sh2.rs:2536-3513`, 7 sequential blocks) in dispatch order. Result: 53,616 encodings
+>   decode identically on both sides, 11,920 correctly reach the illegal-instruction path
+>   on both sides, **0 encodings disagree**, and **0 arms are shadowed** by an earlier
+>   block (the cascade's own claim, HR/plan's original "verified non-aliasing" note, is
+>   independently confirmed). The silent-no-op fallthrough this section originally warned
+>   about is also gone in current code: an unresolved opcode raises a real
+>   illegal-instruction exception (`sh2.rs:3501-3512`, `illegal_instruction_flag`,
+>   `log_illegal_once`), not a silent `PC += 2`.
+> - **Cycle-cost equivalence (exhaustive, machine-checked): 3 real defects found and
+>   fixed.** `get_base_cycles` (`sh2.rs:654-753`) is a *separate* function that re-decodes
+>   opcodes purely to cost them, and had drifted independently from `execute()`'s correct
+>   dispatch — see **D-21, D-22, D-23** below. All three are fixed, each with a new
+>   `#[test]` derived independently from the real `sh2int.c` cycle counts (never from
+>   running the code), verified failing-then-passing (reverted D-21's fix locally,
+>   confirmed `test_cycles_d21_...` fails with the exact wrong value, restored the fix,
+>   confirmed green again). `cargo test --package saturn-core` after the fix: **79
+>   passed, 0 failed** in the `sh2::opcode_tests` module (was 76); `cargo test
+>   --workspace`: **226 passed, 0 failed** across the whole workspace.
+> - **Per-handler semantic correctness (Axis 2, NOT exhaustively re-verified).** Proving
+>   an opcode *decodes* to the right handler (above) is not the same as proving that
+>   handler's *behavior* is correct — the original D-1 (`OR`/`XOR` swap) is exactly the
+>   kind of bug invisible to a decode-equivalence check. This 2026-08-08 pass did **not**
+>   re-derive all 142 mnemonics' semantics from scratch; it spot-checked a representative
+>   set while investigating the cycle-cost defects (`ROTL`/`ROTR`, `DIV0S`, `CMP/STR`,
+>   `SUBV`, `NEGC`, `MOVA`, the `0xC?00` immediate group including the already-fixed D-1
+>   swap, `MOV.B/W @(disp,Rm),R0`) and found no new issues, but does **not** claim full
+>   Axis-2 coverage. Treat that as open, tracked work — a natural next pass would walk HR
+>   §9.1→§9.9 in order the same way this pass walked cycle costs.
+>
+> The original §0.2/§0.3 text (unmodified below) predates all of this — `sh2.rs` was 2377
+> lines then (6330+ now), decode lived at `sh2.rs:975-1453` (now `:2536-3513`), and there
+> were 35 tests (now 79 in the `sh2` module alone, 132 in `saturn-core`, 226 workspace-wide).
+
 HR §9 documents **142 distinct mnemonics**. Of those:
 
 - **133 decode** in `execute()`.
@@ -66,6 +114,10 @@ interpreter: an unimplemented opcode does not stop, does not log, and does not r
 illegal-instruction exception — PC simply advances 2 and execution continues into
 whatever follows. Every one of the 9 gaps below is therefore a *silent* wrong-execution
 bug, not a crash.
+
+*(The rest of §0.2's original numbers and all of §0.3's per-opcode table below are the
+same 2026-07 snapshot — historical, see the status update above for what's actually true
+today.)*
 
 ### 0.3 Opcode coverage — full enumeration
 
@@ -505,6 +557,51 @@ into `.development/current_bugs.md`.**
 - **D-20 — no `SH2NMI` path.** HR §10.4 (`ICR |= 0x8000`, vector `0xB`, level `0x10`,
   clamped to `SR.I = 0xF` on entry per HR §10.3). SMPC's `MSHNMI`/`SYSRES` commands have
   nowhere to land.
+
+> **D-1 through D-20 resolved/open status.** Not individually re-verified in this pass —
+> cross-check each against the Phase checklists below (most were closed during Phase 1/2,
+> per `.development/phased_development_plan.md`'s "Phases 1-8 were all marked done" and
+> `history.md`); this document's own convention (per `CLAUDE.md`) is to annotate each with
+> `**Resolved** — Phase N, history.md Ch<n>` the moment it's confirmed, which hasn't been
+> done here yet. Left as an explicit gap rather than guessed at.
+
+**D-21 through D-23 — found 2026-08-08, in `get_base_cycles` (`sh2.rs:654-753`), a
+function that independently re-decodes opcodes purely to cost them and had drifted from
+`execute()`'s correct dispatch.** Found via the same exhaustive-audit method described in
+the §0.2 status update above (a sibling project, `portal_to_another_world`, ran this
+method on its own SH-2 disassembler the same day and found 8 analogous bugs, prompting a
+re-run here). All three fixed, each with a `#[test]` in `sh2.rs`'s test module deriving
+the expected value independently from `sh2int.c`, never from the code being tested; D-21
+was verified to actually fail before the fix (reverted locally, confirmed
+`test_cycles_d21_mac_w_and_movl_r0_indexed` fails with `left: 1, right: 3`, restored).
+
+- **D-21 — `MAC.W` costs 1 instead of 3; `MOV.L @(R0,Rm),Rn` costs 3 instead of 1.**
+  `sh2.rs:683` (pre-fix) read `(opcode & 0xF00F) == 0x000F || (opcode & 0xF00F) == 0x000E`
+  under a `// MAC.L or MAC.W` comment. `0x000F` is correctly MAC.L
+  (`sh2int.c:1195` `SH2macl`, `cycles += 3 + rcycle1 + rcycle2`). `0x000E` is **not**
+  MAC.W — MAC.W's real encoding is `0100 nnnn mmmm 1111` = `0x400F`
+  (`sh2int.c:1350` `SH2macw`, `cycles += 3`; not the dead `#if 0` stub at `:1312`).
+  `0x000E` is actually `MOV.L @(R0,Rm),Rn` (`sh2int.c:1592` `SH2movll0`,
+  `cycles += 1 + cycle`) — a very common addressing form, silently overcharged 3 instead
+  of 1 on every use, while real MAC.W silently fell through to the 1-cycle default. Same
+  "comment says X, mask does Y" failure shape as D-1. `test_mac_l_mac_w` (semantic-only,
+  calls `execute()` directly) never caught this because it never exercises
+  `get_base_cycles` — only `step()` does.
+- **D-22 — `STC.L {SR,GBR,VBR},@-Rn` (push) had no cost entry at all**, silently falling
+  through to the 1-cycle default. Real cost 2 for all three
+  (`sh2int.c:2264` `SH2stcmsr`, `:2252` `SH2stcmgbr`, `:2276` `SH2stcmvbr`, each
+  `cycles += 2 + cycle`). The `LDC.L @Rm+,...` (pop) counterparts (`sh2.rs:676-682`) were
+  already correct — only the store side was missed.
+- **D-23 — `RTS`/`RTE`/`SLEEP` used exact `opcode ==` instead of `& 0xF0FF`, so nibble B
+  (n) being non-zero silently dropped the cost to the 1-cycle default even though
+  `execute()` already dispatches these correctly regardless of B** (real hardware's
+  `decode()` never examines B for these — `sh2int.c:2639`'s `switch(D){switch(C)}`
+  structure has no B check). This is the same class of bug as **D-5** above, but D-5 was
+  about `execute()`'s dispatch (fixed in Phase 1) — this is the identical mistake made
+  independently, and missed, in the separate cost function. `0x0F0B` executes as RTS but
+  was charged 1 cycle instead of the real 2 (`sh2int.c:2089` `SH2rts`, `cycles += 2`);
+  `0x0F1B` as SLEEP, 1 instead of 3 (`sh2int.c:2632`, `cycles += 3`); `0x0F2B` as RTE, 1
+  instead of 4 (`sh2int.c:2073`, `cycles += 4 + rcycle + wcycle`).
 
 ---
 
