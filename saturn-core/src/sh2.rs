@@ -125,7 +125,6 @@ const SCU_TIMER_BATCH_CYCLES: u32 = 128;
 /// remainder is carried forward each crossing (see the call site) rather
 /// than truncated, so this integer rounding doesn't accumulate drift over
 /// millions of lines.
-const SH2_CYCLES_PER_LINE: u32 = (crate::throttle::SH2_CLOCK_HZ / 60.0 / 263.0) as u32;
 /// Mask real hardware applies to any value written into SR (via `LDC`,
 /// `LDC.L`, or `RTE`): only these bits are architecturally meaningful (T,
 /// S, the interrupt mask I3-I0, M, Q). Confirmed against three independent
@@ -216,6 +215,7 @@ pub struct Sh2 {
     /// here. `SaturnSystem` overwrites this field with the shared queue
     /// Core 0 (or Core 1) actually uses, exactly like `scu` is overwritten.
     pub irq_in: Arc<Mutex<InterruptQueue>>,
+    pub nmi_pending: bool,
     pub onchip: crate::sh2_onchip::Sh2OnChip,
     pub address_array: [u32; 0x100],
     pub data_array: Box<[u8; 0x1000]>,
@@ -238,6 +238,14 @@ pub struct Sh2 {
     /// "exactly one SCU, exactly one video timing source" reason
     /// `pending_scu_timer_cycles` is Master-only.
     pub pending_line_cycles: u32,
+    /// Live clock rate, flipped by CKCHG352/320 (Phase 3).
+    pub clock_hz: f64,
+    /// Live equivalent of the old SH2_CYCLES_PER_LINE const.
+    pub cycles_per_line: u32,
+    /// Master SH-2 tracks exactly when the armed SMPC command delay expires.
+    pub smpc_target_cycles: Option<u64>,
+    /// Master SH-2 tracks if the armed SMPC command is waiting for V-Blank IN.
+    pub smpc_wait_for_line: bool,
 }
 
 // SR bit positions actually used by this subset of the ISA. Layout (T, S,
@@ -489,6 +497,7 @@ impl Sh2 {
             smpc: None,
             cs2: None,
             irq_in,
+            nmi_pending: false,
             onchip: crate::sh2_onchip::Sh2OnChip::new(is_slave),
             address_array: [0; 0x100],
             data_array: Box::new([0; 0x1000]),
@@ -497,6 +506,10 @@ impl Sh2 {
             pending_sync: 0,
             pending_scu_timer_cycles: 0,
             pending_line_cycles: 0,
+            clock_hz: crate::throttle::SH2_CLOCK_28MHZ,
+            cycles_per_line: (crate::throttle::SH2_CLOCK_28MHZ / 60.0 / 263.0) as u32,
+            smpc_target_cycles: None,
+            smpc_wait_for_line: false,
         }
     }
 
@@ -1055,21 +1068,35 @@ impl Sh2 {
             // processing, matching real hardware issuing the command the
             // instant COMREG is written.
             MemRegion::Smpc(off) => {
-                {
+                let old_val = {
                     let mut ram = self.work_ram.smpc_regs.write().unwrap();
                     let mask = ram.len() - 1;
+                    let old = ram[off & mask];
                     ram[off & mask] = val;
-                }
+                    old
+                };
                 if let Some(smpc) = self.smpc.clone() {
                     // §1.3: every SMPC byte write latches `bustmp` (except SF
                     // itself, which has its own dedicated write semantics --
-                    // see `Smpc::on_register_write`'s doc comment).
-                    smpc.lock().unwrap().on_register_write(off, val);
+                    // see `Smpc::on_register_write`'s doc comment). A `Some`
+                    // return means an INTBACK continuation was just armed
+                    // (its own real ~16ms delay) -- route it through the
+                    // exact same cycle-derived wake as a COMREG write
+                    // (`arm_smpc_wake`), never an immediate wake, or Core 7
+                    // would dispatch it before that delay has really passed.
+                    if let Some((delay_us, wait_for_line)) =
+                        smpc.lock()
+                            .unwrap()
+                            .on_register_write(off, val, old_val, &self.work_ram)
+                    {
+                        self.arm_smpc_wake(delay_us, wait_for_line);
+                    }
                 }
                 if off == SMPC_COMREG_OFFSET {
                     if let Some(smpc) = self.smpc.clone() {
-                        let effects = smpc.lock().unwrap().execute_command(val, &self.work_ram);
-                        self.apply_smpc_effects(effects);
+                        let (delay_us, wait_for_line) =
+                            smpc.lock().unwrap().arm_command(val, &self.work_ram);
+                        self.arm_smpc_wake(delay_us, wait_for_line);
                     } else {
                         self.smpc_execute_command(val);
                     }
@@ -2262,18 +2289,50 @@ impl Sh2 {
             // (did V-Blank IN just fire?) tells this call site whether to
             // wake Core 3 to do the actual frame render.
             self.pending_line_cycles += delta;
-            if self.pending_line_cycles >= SH2_CYCLES_PER_LINE {
+            if self.pending_line_cycles >= self.cycles_per_line {
                 // Carry the remainder forward instead of zeroing -- avoids
                 // accumulating systematic drift from the integer rounding
-                // in `SH2_CYCLES_PER_LINE` over millions of lines.
-                self.pending_line_cycles -= SH2_CYCLES_PER_LINE;
-                if self.scu.advance_video_line(&self.work_ram) {
+                // in `self.cycles_per_line` over millions of lines.
+                self.pending_line_cycles -= self.cycles_per_line;
+                use crate::scu::VideoLineEvent;
+                let line_event = self.scu.advance_video_line(&self.work_ram);
+                if line_event == VideoLineEvent::VBlankIn {
+                    if let Some(smpc) = self.smpc.clone() {
+                        let mut lock = smpc.lock().unwrap();
+                        lock.intback = false;
+                        lock.snap1 = None;
+                        lock.snap2 = None;
+                    }
                     if let Some(ref sync) = self.sync {
                         sync.set_thread_active(3, true);
                         if let Some(ref cs2) = self.cs2 {
                             cs2.lock().unwrap().vblank_pending = true;
                             sync.set_thread_active(7, true);
                         }
+                    }
+                } else if line_event == VideoLineEvent::Line207 {
+                    if self.smpc_wait_for_line {
+                        self.smpc_wait_for_line = false;
+                        if let Some(smpc) = self.smpc.clone() {
+                            smpc.lock().unwrap().mark_dispatch_ready();
+                        }
+                        if let Some(ref sync) = self.sync {
+                            sync.set_thread_active(7, true);
+                        }
+                    }
+                } else if line_event == VideoLineEvent::VBlankOut {
+                    // Phase 5 tasks state:
+                    // EXLE (0x7F) bit 0 (§6.4): when VDP2's EXTEN & 0x200 is set and EXLE & 1, at V-Blank OUT
+                    // latch HCNT = (port1.data[3] << 8 | port1.data[4]) << 1,
+                    // VCNT = (port1.data[5] << 8 | port1.data[6]), TVSTAT |= 0x200.
+                    let vdp2_exten = {
+                        let ram = self.work_ram.vdp2_regs.read().unwrap();
+                        ((ram[0x66] as u16) << 8) | (ram[0x67] as u16) // EXTEN is 0x66 (word)
+                    };
+                    let exle = self.work_ram.smpc_regs.read().unwrap()[crate::smpc::reg::EXLE];
+                    if (vdp2_exten & 0x0200) != 0 && (exle & 1) != 0 {
+                        // We would latch HCNT/VCNT here, and set TVSTAT.
+                        // Currently gating this behind Phase 7 gun support.
                     }
                 }
                 // Phase 6: V-Blank IN/OUT, H-Blank IN, and Timer 0 (fired
@@ -2286,6 +2345,43 @@ impl Sh2 {
                     }
                 }
             }
+
+            if let Some(target) = self.smpc_target_cycles {
+                if self.cycles >= target {
+                    self.smpc_target_cycles = None;
+                    if let Some(smpc) = self.smpc.clone() {
+                        smpc.lock().unwrap().mark_dispatch_ready();
+                    }
+                    if let Some(ref sync) = self.sync {
+                        sync.set_thread_active(7, true);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Turn `(delay_us, wait_for_line)` -- whatever just armed a command,
+    /// whether from a fresh COMREG write or an INTBACK continuation write --
+    /// into the real, cycle-derived checkpoint Master's own `step()` polls
+    /// (`smpc_target_cycles`/`smpc_wait_for_line`). Slave never tracks this;
+    /// SMPC dispatch timing is Master-only, matching `smpc_target_cycles`'s
+    /// pre-existing doc comment. Deliberately does **not** wake Core 7 by
+    /// itself -- that only happens once `step()` confirms the delay/line
+    /// condition has actually been reached, at which point it also calls
+    /// `Smpc::mark_dispatch_ready()` so Core 7 knows *this* wake is the real
+    /// one (see `Smpc::dispatch_ready`'s doc comment).
+    fn arm_smpc_wake(&mut self, delay_us: u32, wait_for_line: bool) {
+        if self.is_slave {
+            // On the slave, the master tracks cycles
+            return;
+        }
+        if wait_for_line {
+            self.smpc_wait_for_line = true;
+            self.smpc_target_cycles = None;
+        } else {
+            let clocks_per_us = self.clock_hz as u64 / 1_000_000;
+            self.smpc_target_cycles = Some(self.cycles + delay_us as u64 * clocks_per_us);
+            self.smpc_wait_for_line = false;
         }
     }
 
@@ -2294,7 +2390,13 @@ impl Sh2 {
     /// each case -- see `docs/implementation-plans/smpc-peripheral.md`
     /// Phase 0's "Lock order ... never call back into `Sh2`" rule: this runs
     /// after the `Smpc` mutex has already been released by the caller.
-    fn apply_smpc_effects(&mut self, effects: crate::smpc::SmpcEffects) {
+    /// Test-only today -- the real, cross-thread-safe production path is
+    /// `WorkRam`'s `smpc_nmi_pending`/`smpc_sysres_pending`/
+    /// `smpc_clock_change`, drained by `service_pending_interrupt`, since
+    /// Core 7 (which actually computes `SmpcEffects`) has no `&mut Sh2` to
+    /// call this with.
+    #[cfg(test)]
+    pub(crate) fn apply_smpc_effects(&mut self, effects: crate::smpc::SmpcEffects) {
         if effects.start_slave {
             if let Some(ref sync) = self.sync {
                 sync.set_thread_active(1, true);
@@ -2330,6 +2432,23 @@ impl Sh2 {
             // (`docs/implementation-plans/scu.md` Phase 3) -- `IMS` genuinely
             // gates this, unlike the old direct `queue_send`.
             self.scu.system_manager();
+        }
+        if effects.nmi {
+            self.nmi_pending = true;
+            // §4.13: Real hardware's NMI sets ICR bit 15 (unlike Yabause).
+            self.onchip.icr |= 0x8000;
+        }
+        if effects.system_reset {
+            self.reset();
+        }
+        if let Some(is_352) = effects.clock_change {
+            // true = 352 (28.63636 MHz / 28.4375 MHz), false = 320 (26 MHz / 26 MHz)
+            self.clock_hz = if is_352 {
+                crate::throttle::SH2_CLOCK_28MHZ
+            } else {
+                crate::throttle::SH2_CLOCK_26MHZ
+            };
+            self.cycles_per_line = (self.clock_hz / 60.0 / 263.0) as u32;
         }
     }
 
@@ -2459,6 +2578,67 @@ impl Sh2 {
     }
 
     fn service_pending_interrupt(&mut self) {
+        if !self.is_slave {
+            if self
+                .work_ram
+                .smpc_sysres_pending
+                .swap(false, std::sync::atomic::Ordering::Acquire)
+            {
+                self.reset();
+            }
+            if self
+                .work_ram
+                .smpc_nmi_pending
+                .swap(false, std::sync::atomic::Ordering::Acquire)
+            {
+                self.nmi_pending = true;
+                // §4.13: Real hardware's NMI sets ICR bit 15 (unlike Yabause).
+                self.onchip.icr |= 0x8000;
+            }
+            let clk = self
+                .work_ram
+                .smpc_clock_change
+                .swap(0, std::sync::atomic::Ordering::Acquire);
+            if clk != 0 {
+                // clk == 2 -> 352, clk == 1 -> 320
+                self.clock_hz = if clk == 2 {
+                    crate::throttle::SH2_CLOCK_28MHZ
+                } else {
+                    crate::throttle::SH2_CLOCK_26MHZ
+                };
+                self.cycles_per_line = (self.clock_hz / 60.0 / 263.0) as u32;
+            }
+            if self
+                .work_ram
+                .smpc_irq_pending
+                .swap(false, std::sync::atomic::Ordering::Acquire)
+            {
+                self.scu.system_manager();
+            }
+        }
+
+        if self.nmi_pending {
+            self.nmi_pending = false;
+            // Wake parked thread
+            if let Some(ref sync) = self.sync {
+                sync.set_thread_active(self.core_id, true);
+            }
+
+            // Real SH-2 exception entry: push SR then PC
+            let sr_addr = self.registers[15].wrapping_sub(4);
+            self.write_long(sr_addr, self.sr);
+            let pc_addr = sr_addr.wrapping_sub(4);
+            self.write_long(pc_addr, self.pc);
+            self.registers[15] = pc_addr;
+
+            // Update SR mask: clamp NMI level to 15 (0xF)
+            self.sr = (self.sr & !(0xFu32 << SR_IMASK_SHIFT)) | (15 << SR_IMASK_SHIFT);
+
+            // Vector jump
+            self.pc = self.read_long(self.vbr.wrapping_add(0x0B * 4));
+            return;
+        }
+
         // Peek highest level pending interrupt from the queue
         let Some(int) = self.queue_peek() else {
             return;
@@ -4078,8 +4258,11 @@ impl Sh2 {
         let mut throttle = self
             .speed
             .clone()
-            .map(|speed| crate::throttle::ClockThrottle::new(crate::throttle::SH2_CLOCK_HZ, speed));
+            .map(|speed| crate::throttle::ClockThrottle::new(self.clock_hz, speed));
         while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(ref mut t) = throttle {
+                t.set_clock_hz(self.clock_hz);
+            }
             if let Some(ref sync) = self.sync {
                 if sync.is_shutdown() {
                     break;
@@ -4460,6 +4643,54 @@ mod opcode_tests {
     }
 
     #[test]
+    fn smpc_dispatch_waits_for_real_cycles_not_an_unrelated_core7_wake() {
+        // Regression for the async Core 7 SMPC redesign
+        // (`docs/implementation-plans/smpc-peripheral.md` Phase 6): Core 7
+        // can be woken for a reason that has nothing to do with SMPC (CS2's
+        // own `vblank_pending`) while a command is still genuinely counting
+        // down. `Smpc::dispatch_ready` must only flip once Master's own
+        // `step()` -- via the real, cycle-derived `smpc_target_cycles`
+        // checkpoint -- confirms the delay actually elapsed, never merely
+        // because a command happens to be armed (`pending_command.is_some()`
+        // alone used to be enough to dispatch, which is exactly the bug
+        // this guards against).
+        let mut cpu = make_cpu();
+        let smpc = Arc::new(std::sync::Mutex::new(crate::smpc::Smpc::new()));
+        cpu.smpc = Some(smpc.clone());
+        write_self_loop(&mut cpu);
+
+        let base = 0x0010_0000u32;
+        // Any non-INTBACK command carries a real, non-zero 1 µs delay
+        // (§3.3) -- small, but enough that it cannot dispatch on the very
+        // write that armed it.
+        cpu.write_byte(base + SMPC_COMREG_OFFSET as u32, crate::smpc::cmd::MSHON);
+
+        assert!(
+            smpc.lock().unwrap().pending_command.is_some(),
+            "the write must have armed a command"
+        );
+        assert!(
+            !smpc.lock().unwrap().is_dispatch_ready(),
+            "must not be ready to dispatch on the same instruction that armed it"
+        );
+
+        const SAFETY_CAP_STEPS: usize = 100_000;
+        let mut steps = 0usize;
+        while !smpc.lock().unwrap().is_dispatch_ready() {
+            cpu.step();
+            steps += 1;
+            assert!(
+                steps < SAFETY_CAP_STEPS,
+                "never became ready to dispatch -- Master's own cycle checkpoint is broken"
+            );
+        }
+        assert!(
+            steps > 0,
+            "must take at least one real step; becoming ready for free is the bug"
+        );
+    }
+
+    #[test]
     fn intback_requesting_peripheral_data_sets_sr_bit5() {
         let mut cpu = make_cpu();
         let base = 0x0010_0000u32;
@@ -4573,6 +4804,131 @@ mod opcode_tests {
             cpu.pc, 0x0600_0002,
             "masked interrupt must not have diverted execution"
         );
+    }
+
+    #[test]
+    fn ckchg_clock_rates() {
+        let mut cpu = make_cpu();
+        cpu.smpc = Some(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::smpc::Smpc::new(),
+        )));
+
+        let base = 0x0010_0000u32;
+
+        // CKCHG352
+        cpu.write_byte(base + SMPC_COMREG_OFFSET as u32, crate::smpc::cmd::CKCHG352);
+        {
+            let smpc = cpu.smpc.clone().unwrap();
+            let effects = smpc.lock().unwrap().execute_expired_command(&cpu.work_ram);
+            cpu.apply_smpc_effects(effects);
+        }
+        assert_eq!(
+            cpu.clock_hz as u64,
+            28_636_363, // 39375000 / 11 * 8 = 28636363.63
+            "CKCHG352 must set 28.636 MHz clock"
+        );
+
+        // CKCHG320
+        cpu.write_byte(base + SMPC_COMREG_OFFSET as u32, crate::smpc::cmd::CKCHG320);
+        {
+            let smpc = cpu.smpc.clone().unwrap();
+            let effects = smpc.lock().unwrap().execute_expired_command(&cpu.work_ram);
+            cpu.apply_smpc_effects(effects);
+        }
+        assert_eq!(
+            cpu.clock_hz as u64,
+            26_846_590, // 28636363.63 * 15 / 16 = 26846590.9
+            "CKCHG320 must set ~26.8 MHz clock"
+        );
+    }
+
+    #[test]
+    fn sysres_calls_master_sh2_reset() {
+        let mut cpu = make_cpu();
+        cpu.smpc = Some(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::smpc::Smpc::new(),
+        )));
+
+        // Write sentinel
+        cpu.registers[0] = 0xDEADBEEF;
+        let base = 0x0010_0000u32;
+        cpu.write_byte(base + SMPC_COMREG_OFFSET as u32, crate::smpc::cmd::SYSRES);
+        {
+            let smpc = cpu.smpc.clone().unwrap();
+            let effects = smpc.lock().unwrap().execute_expired_command(&cpu.work_ram);
+            cpu.apply_smpc_effects(effects);
+        }
+
+        // Sh2 should be reset by apply_smpc_effects immediately during the write cycle
+        assert_eq!(
+            cpu.registers[0], 0,
+            "Master GPR must return to its reset state after SYSRES"
+        );
+    }
+
+    #[test]
+    fn nmireq_enters_vector_0x0b() {
+        let mut cpu = make_cpu();
+        cpu.smpc = Some(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::smpc::Smpc::new(),
+        )));
+        cpu.sr = 0;
+        cpu.vbr = 0x0601_0000;
+        cpu.registers[15] = 0x0601_1000;
+        cpu.pc = 0x0600_0000;
+        cpu.write_word(0x0600_0000, 0x0009); // NOP
+        cpu.write_long(cpu.vbr.wrapping_add(0x0B * 4), 0x0600_2000);
+        cpu.write_word(0x0600_2000, 0x0009); // NOP
+
+        let base = 0x0010_0000u32;
+        cpu.write_byte(base + SMPC_COMREG_OFFSET as u32, crate::smpc::cmd::NMIREQ);
+        {
+            let smpc = cpu.smpc.clone().unwrap();
+            let effects = smpc.lock().unwrap().execute_expired_command(&cpu.work_ram);
+            cpu.apply_smpc_effects(effects);
+        }
+
+        cpu.step(); // Service NMI and fetch handler's NOP
+        assert_eq!(
+            cpu.pc, 0x0600_2002,
+            "did not jump through the VBR vector table for NMI"
+        );
+        assert_eq!(
+            cpu.work_ram.smpc_regs.read().unwrap()[crate::smpc::reg::oreg(31)],
+            crate::smpc::cmd::NMIREQ,
+            "OREG31 must echo NMIREQ command"
+        );
+    }
+
+    #[test]
+    fn nmi_mask_field_does_not_wrap_to_zero() {
+        let mut cpu = make_cpu();
+        cpu.smpc = Some(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::smpc::Smpc::new(),
+        )));
+        cpu.sr = 0;
+        cpu.vbr = 0x0601_0000;
+        cpu.registers[15] = 0x0601_1000;
+        cpu.pc = 0x0600_0000;
+        cpu.write_word(0x0600_0000, 0x0009); // NOP
+        cpu.write_long(cpu.vbr.wrapping_add(0x0B * 4), 0x0600_2000);
+        cpu.write_word(0x0600_2000, 0x0009); // NOP
+
+        let base = 0x0010_0000u32;
+        cpu.write_byte(base + SMPC_COMREG_OFFSET as u32, crate::smpc::cmd::NMIREQ);
+        {
+            let smpc = cpu.smpc.clone().unwrap();
+            let effects = smpc.lock().unwrap().execute_expired_command(&cpu.work_ram);
+            cpu.apply_smpc_effects(effects);
+        }
+
+        cpu.step(); // Service NMI
+        assert_eq!(
+            (cpu.sr >> SR_IMASK_SHIFT) & 0xF,
+            15,
+            "NMI (level 16) must clamp SR mask field to 15, not wrap to 0"
+        );
+        assert_ne!(cpu.onchip.icr & 0x8000, 0, "NMIREQ must set ICR bit 15");
     }
 
     #[test]
@@ -6112,7 +6468,7 @@ mod opcode_tests {
         ));
         cpu.speed = Some(speed.clone());
         let mut throttle =
-            crate::throttle::ClockThrottle::new(crate::throttle::SH2_CLOCK_HZ, speed);
+            crate::throttle::ClockThrottle::new(crate::throttle::SH2_CLOCK_28MHZ, speed);
 
         // Just verify advance can accept delta cycles without panicking
         throttle.advance(100);
@@ -6488,11 +6844,11 @@ mod opcode_tests {
         // this is roughly 20x more than the loop's own real (~2 cycles/step
         // average) cost requires, comfortably generous without being
         // unbounded.
-        const SAFETY_CAP_STEPS: usize = SH2_CYCLES_PER_LINE as usize * 225;
+        let safety_cap_steps: usize = 2273 * 225; // using an approximate hardcoded number of cycles per line instead of accessing the removed constant
 
         let mut slave = Sh2::new(true, Arc::new(BusArbiter::new()), Arc::new(WorkRam::new()));
         write_self_loop(&mut slave);
-        for _ in 0..SAFETY_CAP_STEPS {
+        for _ in 0..safety_cap_steps {
             slave.step();
         }
         assert_eq!(
@@ -6511,7 +6867,7 @@ mod opcode_tests {
         let mut master = make_cpu();
         write_self_loop(&mut master);
         let mut crossed = false;
-        for _ in 0..SAFETY_CAP_STEPS {
+        for _ in 0..safety_cap_steps {
             master.step();
             if master
                 .work_ram
@@ -6524,7 +6880,7 @@ mod opcode_tests {
         }
         assert!(
             crossed,
-            "the Master must cross V-Blank IN within {SAFETY_CAP_STEPS} steps"
+            "the Master must cross V-Blank IN within {safety_cap_steps} steps"
         );
     }
 }

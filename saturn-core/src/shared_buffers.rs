@@ -62,6 +62,12 @@ pub struct WorkRam {
     /// with `Acquire`, paired with Core 3's `Release` store, mirroring
     /// `mem4b`'s existing cross-thread-flag discipline just above.
     pub vblank_active: std::sync::atomic::AtomicBool,
+    /// System Manager IRQ (SMPC level 8 interrupt). Set by Core 7 when an
+    /// SMPC command finishes, polled by Master SH-2 in `service_pending_interrupt`.
+    pub smpc_irq_pending: std::sync::atomic::AtomicBool,
+    pub smpc_nmi_pending: std::sync::atomic::AtomicBool,
+    pub smpc_sysres_pending: std::sync::atomic::AtomicBool,
+    pub smpc_clock_change: std::sync::atomic::AtomicU8, // 0 = None, 1 = 320, 2 = 352
 }
 
 impl WorkRam {
@@ -84,6 +90,10 @@ impl WorkRam {
             smpc_regs: RwLock::new(vec![0; 0x80].into_boxed_slice().try_into().unwrap()),
             mem4b: std::sync::atomic::AtomicBool::new(false),
             vblank_active: std::sync::atomic::AtomicBool::new(false),
+            smpc_irq_pending: std::sync::atomic::AtomicBool::new(false),
+            smpc_nmi_pending: std::sync::atomic::AtomicBool::new(false),
+            smpc_sysres_pending: std::sync::atomic::AtomicBool::new(false),
+            smpc_clock_change: std::sync::atomic::AtomicU8::new(0),
         }
     }
 

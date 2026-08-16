@@ -249,9 +249,9 @@ graph TD
 
 The System Manager and Peripheral Control (SMPC) manages system boots, resets, region configuration, and peripheral scanning. Full register map, every command's handshake, and the INTBACK peripheral-polling byte format: `docs/hardware-reference/smpc-peripheral.md`.
 
-**Current implementation status**: a partial set of SMPC commands (INTBACK, SNDON, SNDOFF) is implemented **directly inline inside `Sh2`'s memory read/write handlers** in `sh2.rs` — not in a separate `Smpc` type or on a separate thread. `saturn-core/src/smpc.rs`'s `Smpc` struct is dead code (unit-test only). No general peripheral/digital-pad input protocol exists. See `docs/implementation-plans/smpc-peripheral.md`.
+**Current implementation status**: `Sh2`'s memory write handler arms the command (`Smpc::arm_command`, sets `SF = 1`) and computes when it's really due from Master's own executed cycles (`Sh2::arm_smpc_wake`) -- Master's `step()` marks it `Smpc::dispatch_ready` and wakes Core 7 only once that real delay has actually elapsed, and Core 7 dispatches it (`Smpc::execute_expired_command`) with no timer of its own. Peripheral report shapes exist for every single-peripheral-per-port type (`PeripheralState`: pad, wheel, mission stick, 3D pad, twin sticks, mouse, keyboard, a gun's status-only presence) and the INTBACK/PDR/DDR paths that expose them, but live input plumbing only reaches player 1's digital pad (via `mimas_window.rs`'s keyboard mapping) -- multi-tap and any other live input source (analog axes, mouse motion, a second pad) remain unwired. See `docs/implementation-plans/smpc-peripheral.md`.
 
-### 6.1 Diagram: SMPC Command Handshake (target shape — today this happens synchronously inline on the SH-2 master thread, not as a cross-thread message)
+### 6.1 Diagram: SMPC Command Handshake (implemented via cross-thread arming to Core 7)
 
 ```mermaid
 sequenceDiagram

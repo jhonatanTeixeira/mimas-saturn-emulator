@@ -18,7 +18,10 @@ use std::time::{Duration, Instant};
 /// implement the SMPC CKCHG352/CKCHG320 commands that would switch modes
 /// at runtime, so this is a fixed constant for now, not yet
 /// region/mode-aware -- revisit once those commands exist.
-pub const SH2_CLOCK_HZ: f64 = (39_375_000.0 / 11.0) * 8.0;
+pub const SH2_CLOCK_28MHZ: f64 = (39_375_000.0 / 11.0) * 8.0;
+
+/// Real Saturn SH-2 clock rate, NTSC 320-dot/26MHz mode.
+pub const SH2_CLOCK_26MHZ: f64 = SH2_CLOCK_28MHZ * 15.0 / 16.0;
 
 /// Real SCSP onboard M68000 clock rate, same for NTSC/PAL -- cross-checked
 /// against Yabause's `scsp2.c:128-129` (`SCSP_CLOCK_FREQ`, explicitly
@@ -97,6 +100,13 @@ impl ClockThrottle {
             accumulated: 0,
             speed,
             next_batch_due: Instant::now(),
+        }
+    }
+
+    pub fn set_clock_hz(&mut self, clock_hz: f64) {
+        if self.clock_hz != clock_hz {
+            self.clock_hz = clock_hz;
+            self.batch_cycles = ((clock_hz * BATCH_DURATION_SECS) as u64).max(1);
         }
     }
 

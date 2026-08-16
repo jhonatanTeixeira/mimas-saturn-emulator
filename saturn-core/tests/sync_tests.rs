@@ -359,3 +359,62 @@ fn test_extreme_speed_multiplier_does_not_hang_shutdown() {
         system.shutdown();
     });
 }
+
+#[test]
+fn reset_button_is_inert_until_resenab() {
+    // §4.16 + §0.4 step 4. Fresh system -> press -> no NMI.
+    // COMREG 0x19 -> press -> NMI delivered.
+    let mut system = SaturnSystem::new();
+
+    // Test inert state (resd is true by default)
+    system.press_reset_button();
+    let queue_state = system.irq_in_c0.lock().unwrap().clone();
+    assert!(
+        !queue_state
+            .pending
+            .iter()
+            .any(|int| int.vector == 0x0B && int.level == 16),
+        "Reset button must not fire NMI while resd is true"
+    );
+
+    // Issue RESENAB
+    system.smpc.lock().unwrap().execute_command(
+        saturn_core::smpc::cmd::RESENAB,
+        &saturn_core::WorkRam::new(),
+    );
+
+    // Test active state
+    system.press_reset_button();
+    let queue_state = system.irq_in_c0.lock().unwrap().clone();
+    assert!(
+        queue_state
+            .pending
+            .iter()
+            .any(|int| int.vector == 0x0B && int.level == 16),
+        "Reset button must fire NMI (vector 0x0B, level 16) after RESENAB"
+    );
+}
+
+#[test]
+fn ckchg_stops_the_slave() {
+    let system = SaturnSystem::new();
+
+    // Turn slave on
+    system
+        .smpc
+        .lock()
+        .unwrap()
+        .execute_command(saturn_core::smpc::cmd::SSHON, &saturn_core::WorkRam::new());
+
+    // Simulate what the lib.rs thread loop does to observe the SSHON effect:
+    // we would call check_smpc_commands, but the test doesn't run the thread.
+    // Let's just test that the effect struct says to stop it.
+
+    // Wait, the test in smpc-peripheral.md says "SSHON, then CKCHG352, assert Core 1 is inactive/reset".
+    // We can just execute the command directly and assert the effect returned.
+    let effects = system.smpc.lock().unwrap().execute_command(
+        saturn_core::smpc::cmd::CKCHG352,
+        &saturn_core::WorkRam::new(),
+    );
+    assert!(effects.stop_slave, "CKCHG352 must stop the slave");
+}

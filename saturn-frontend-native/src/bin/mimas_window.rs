@@ -67,6 +67,23 @@ fn main() {
 
     let mut frames_presented = 0u64;
     while window.is_open() && !window.is_key_down(minifb::Key::Escape) {
+        let pad = saturn_core::peripheral::PadState {
+            up: window.is_key_down(minifb::Key::Up),
+            down: window.is_key_down(minifb::Key::Down),
+            left: window.is_key_down(minifb::Key::Left),
+            right: window.is_key_down(minifb::Key::Right),
+            start: window.is_key_down(minifb::Key::Enter),
+            a: window.is_key_down(minifb::Key::Z),
+            b: window.is_key_down(minifb::Key::X),
+            c: window.is_key_down(minifb::Key::C),
+            x: window.is_key_down(minifb::Key::A),
+            y: window.is_key_down(minifb::Key::S),
+            z: window.is_key_down(minifb::Key::D),
+            l: window.is_key_down(minifb::Key::Q),
+            r: window.is_key_down(minifb::Key::W),
+        };
+        system.set_pad_state(1, pad);
+
         let frame = system.vdp2_frame.load();
         if frame.width != win_w || frame.height != win_h {
             win_w = frame.width;

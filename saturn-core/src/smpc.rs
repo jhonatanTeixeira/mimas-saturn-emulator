@@ -95,21 +95,26 @@ pub mod region {
 /// apply it. Keeps every existing cross-thread handshake (see
 /// `Sh2::apply_smpc_effects`) byte-for-byte identical while moving the
 /// *decision* into `Smpc`.
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub struct SmpcEffects {
-    /// SSHON §4.3.
+    /// Indicates whether `cmd::SSHON` was executed.
     pub start_slave: bool,
-    /// SSHOFF §4.4 -- real hardware fully resets the slave, not merely halts
-    /// it (see `docs/implementation-plans/smpc-peripheral.md` Phase 1).
+    /// Indicates whether `cmd::SSHOFF` was executed.
     pub stop_slave: bool,
-    /// SNDON §4.5.
+    /// Indicates whether `cmd::SNDON` was executed.
     pub sound_on: bool,
-    /// SNDOFF §4.6.
+    /// Indicates whether `cmd::SNDOFF` was executed.
     pub sound_off: bool,
-    /// Real hardware fires the SCU "System Manager" interrupt (vector 0x47,
+    /// Indicates whether `cmd::INTBACK` requests a System Manager IRQ (SH-2
     /// level 8) when a command completes -- today, only INTBACK requests it
     /// (§2.3).
     pub system_manager_irq: bool,
+    /// NMIREQ §4.13, reset button §4.16.
+    pub nmi: bool,
+    /// SYSRES §4.8.
+    pub system_reset: bool,
+    /// CKCHG352/320 §4.9/§4.10. true = 352, false = 320.
+    pub clock_change: Option<bool>,
 }
 
 /// Where INTBACK's RTC bytes (OREG1-7) come from. Mirrors §7.1's
@@ -190,7 +195,7 @@ fn bcd(v: u8) -> u8 {
 pub struct Smpc {
     /// Reset-disable flag (§0.4 step 4: `true` at power-on/reset). Gates
     /// OREG0 bit 6 and, later (Phase 3), whether the reset button is inert.
-    resd: bool,
+    pub resd: bool,
     /// Shadow of "whatever byte value is currently sitting on the shared
     /// internal SMPC data bus" (§1.3). Every byte write to any SMPC offset
     /// *other than SF itself* latches this; reading SF folds its own bit 0
@@ -221,6 +226,22 @@ pub struct Smpc {
     cdres: bool,
     /// Where INTBACK's RTC bytes come from; see `ClockSource`.
     clock: ClockSource,
+    /// Peripheral port 1.
+    pub port1: std::sync::Arc<std::sync::Mutex<crate::peripheral::PeripheralState>>,
+    /// Peripheral port 2.
+    pub port2: std::sync::Arc<std::sync::Mutex<crate::peripheral::PeripheralState>>,
+    /// Cached port 1 data for chunking continuation.
+    pub snap1: Option<crate::peripheral::PortData>,
+    /// Cached port 2 data for chunking continuation.
+    pub snap2: Option<crate::peripheral::PortData>,
+    /// Whether the next INTBACK peripheral fetch is the first in a sequence.
+    pub first_peri: bool,
+    /// Whether an INTBACK command is currently active.
+    pub intback: bool,
+    /// The pending command, its delay in microseconds, and whether it waits for line 207.
+    pub pending_command: Option<(u8, u32, bool)>,
+    /// Whether the pending command has met its dispatch criteria.
+    pub dispatch_ready: bool,
 }
 
 impl Default for Smpc {
@@ -252,7 +273,26 @@ impl Smpc {
             sysres: false,
             sndres: false,
             cdres: false,
-            clock: ClockSource::default(),
+            clock: ClockSource::HostWallClock,
+            // Port 1: a digital pad is connected by default (the common
+            // single-player case). Port 2: genuinely disconnected --
+            // `PeripheralState::default()` (`Disconnected`) is correct
+            // there, but was wrongly also used for port 1 here at one
+            // point, making the "connected" default port look
+            // indistinguishable from the "nothing here" port to both the
+            // INTBACK peripheral path and the DDR1 ID-nibble path.
+            port1: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::peripheral::PeripheralState::Pad(crate::peripheral::PadState::default()),
+            )),
+            port2: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::peripheral::PeripheralState::default(),
+            )),
+            snap1: None,
+            snap2: None,
+            first_peri: false,
+            intback: false,
+            pending_command: None,
+            dispatch_ready: false,
         }
     }
 
@@ -262,6 +302,57 @@ impl Smpc {
     /// all yet).
     pub fn set_region(&mut self, regionid: u8) {
         self.regionid = regionid;
+    }
+
+    pub fn set_port_peripheral(
+        &mut self,
+        port: usize,
+        kind: Option<crate::peripheral::PeripheralKind>,
+    ) {
+        use crate::peripheral::{
+            GunState, KeyboardState, MissionStickState, MouseState, Pad3DState, PadState,
+            PeripheralKind, PeripheralState, TwinSticksState, WheelState,
+        };
+        let state = match kind {
+            None => PeripheralState::Disconnected,
+            Some(PeripheralKind::Pad) => PeripheralState::Pad(PadState::default()),
+            Some(PeripheralKind::Wheel) => PeripheralState::Wheel(WheelState::default()),
+            Some(PeripheralKind::MissionStick) => {
+                PeripheralState::MissionStick(MissionStickState::default())
+            }
+            Some(PeripheralKind::Pad3D) => PeripheralState::Pad3D(Pad3DState::default()),
+            Some(PeripheralKind::TwinSticks) => {
+                PeripheralState::TwinSticks(TwinSticksState::default())
+            }
+            Some(PeripheralKind::Gun) => PeripheralState::Gun(GunState::default()),
+            Some(PeripheralKind::Keyboard) => PeripheralState::Keyboard(KeyboardState::default()),
+            Some(PeripheralKind::Mouse) => PeripheralState::Mouse(MouseState::default()),
+        };
+        if port == 1 {
+            *self.port1.lock().unwrap() = state;
+        } else if port == 2 {
+            *self.port2.lock().unwrap() = state;
+        }
+    }
+
+    pub fn set_pad_state(&mut self, port: usize, state: crate::peripheral::PadState) {
+        self.set_peripheral_state(port, crate::peripheral::PeripheralState::Pad(state));
+    }
+
+    /// General form of `set_pad_state` -- sets any connected peripheral's
+    /// *live* state directly (button presses, axis values, mouse deltas...),
+    /// as opposed to `set_port_peripheral`, which only changes *what kind*
+    /// is connected (resetting it to that kind's idle default).
+    pub fn set_peripheral_state(&mut self, port: usize, state: crate::peripheral::PeripheralState) {
+        if port == 1 {
+            *self.port1.lock().unwrap() = state;
+        } else if port == 2 {
+            *self.port2.lock().unwrap() = state;
+        }
+    }
+
+    pub fn is_resd(&self) -> bool {
+        self.resd
     }
 
     /// Pin the RTC to a fixed UNIX timestamp (UTC seconds) instead of the
@@ -276,9 +367,157 @@ impl Smpc {
     /// of the `sf_read_returns_bustmp_high_bits` test: a write to SF must
     /// not clobber `bustmp`, or a subsequent SF read couldn't recover the
     /// high bits a prior non-SF write latched).
-    pub fn on_register_write(&mut self, off: usize, val: u8) {
+    pub fn on_register_write(
+        &mut self,
+        off: usize,
+        val: u8,
+        old_val: u8,
+        work_ram: &WorkRam,
+    ) -> Option<(u32, bool)> {
         if off != reg::SF {
             self.bustmp = val;
+        }
+
+        if off == reg::IREG0 && self.intback {
+            if val & 0x40 != 0 {
+                // Break
+                self.intback = false;
+                work_ram.smpc_regs.write().unwrap()[reg::SR] &= 0x0F;
+                self.snap1 = None;
+                self.snap2 = None;
+                return None;
+            } else if val & 0x80 != 0 {
+                // Continue
+                return Some(self.arm_command(cmd::INTBACK, work_ram));
+            }
+        }
+
+        // §6: the direct-access port. `write_byte` (`sh2.rs`) already stored
+        // the raw written byte into `work_ram` unconditionally before
+        // calling here -- every arm below that says "leave unchanged"
+        // means overwriting that raw store back to `old_val`, matching real
+        // hardware's actual PDR/DDR *response synthesis* (§6, opening
+        // paragraph), not "whatever the game happened to write".
+        match off {
+            reg::PDR1 => self.write_pdr(1, val, old_val, work_ram),
+            reg::PDR2 => self.write_pdr(2, val, old_val, work_ram),
+            reg::DDR1 => {
+                let port1 = *self.port1.lock().unwrap();
+                if let Some(nibble) = Self::ddr_id_nibble(&port1) {
+                    work_ram.smpc_regs.write().unwrap()[reg::PDR1] = nibble;
+                }
+            }
+            reg::DDR2 => {
+                // §10.1 #28: real hardware has no DDR2 handler at all --
+                // Mimas deliberately keeps a symmetric one against port 2
+                // (a pre-existing, documented divergence, not new to Phase 7).
+                let port2 = *self.port2.lock().unwrap();
+                if let Some(nibble) = Self::ddr_id_nibble(&port2) {
+                    work_ram.smpc_regs.write().unwrap()[reg::PDR2] = nibble;
+                }
+            }
+            reg::IOSEL => {
+                // §6.4 [QUIRK]: stored only -- real hardware never reads it
+                // either. The raw store `write_byte` already did is correct
+                // as-is.
+            }
+            reg::EXLE => {
+                // §6.4/§6.5: bit 0, combined with VDP2's `EXTEN & 0x200`,
+                // latches the gun's X/Y into VDP2's HCNT/VCNT at V-Blank
+                // OUT. Needs both a live gun-position input source and
+                // VDP2's external-latch registers, neither of which exist
+                // yet -- deliberately deferred (see `GunState`'s doc
+                // comment). Stored only for now, same as `IOSEL`.
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// §6.2: PDR1 (`port == 1`) / PDR2 (`port == 2`) write. Dispatch is on
+    /// the *currently stored* `DDR[n] & 0x7F` (the control method the game
+    /// selected earlier), not on `val` itself -- see `on_register_write`'s
+    /// own doc comment for why `old_val` matters here.
+    fn write_pdr(&mut self, port: usize, val: u8, old_val: u8, work_ram: &WorkRam) {
+        let (ddr_off, pdr_off, state) = if port == 1 {
+            (reg::DDR1, reg::PDR1, *self.port1.lock().unwrap())
+        } else {
+            (reg::DDR2, reg::PDR2, *self.port2.lock().unwrap())
+        };
+        let ddr = work_ram.smpc_regs.read().unwrap()[ddr_off] & 0x7F;
+        let write = |b: u8, work_ram: &WorkRam| {
+            work_ram.smpc_regs.write().unwrap()[pdr_off] = b;
+        };
+        match ddr {
+            0x00 => {
+                // Only meaningful for a light gun: when the game floats all
+                // seven lines high, the gun's trigger/start byte appears in
+                // PDR (`data[2]` in real hardware's flat array == the
+                // first data byte here). Otherwise PDR keeps whatever it
+                // already held.
+                if let crate::peripheral::PeripheralState::Gun(gun) = state {
+                    if val & 0x7F == 0x7F {
+                        let mut b = 0xFF;
+                        if gun.trigger {
+                            b &= !(1 << 4);
+                        }
+                        if gun.start {
+                            b &= !(1 << 5);
+                        }
+                        write(b, work_ram);
+                    } else {
+                        write(old_val, work_ram);
+                    }
+                } else {
+                    write(old_val, work_ram);
+                }
+            }
+            0x40 if port == 1 => {
+                // `do_th_mode` -- Mega Drive ID acquisition [HACK] (§6.2).
+                // PDR2 has no equivalent case at all (§6.1's table).
+                let pd = state.to_port_data();
+                let (b2, b3) = (pd.data[0], pd.data[1]);
+                let res = if val & 0x40 != 0 {
+                    0x70 | (b3 & 0x0C)
+                } else {
+                    0x30 | ((b2 >> 4) & 0x0F)
+                };
+                write(res, work_ram);
+            }
+            0x60 => {
+                let pd = state.to_port_data();
+                let (b2, b3) = (pd.data[0], pd.data[1]);
+                let res = match val & 0x60 {
+                    0x60 => (val & 0x80) | 0x14 | (b3 & 0x08),
+                    0x20 => (val & 0x80) | 0x10 | ((b2 >> 4) & 0x0F),
+                    0x40 => (val & 0x80) | 0x10 | (b2 & 0x0F),
+                    0x00 => (val & 0x80) | 0x10 | ((b3 >> 4) & 0x0F),
+                    _ => unreachable!("val & 0x60 has exactly four values"),
+                };
+                write(res, work_ram);
+            }
+            _ => {
+                // Unrecognised control method (§6.1) -- real hardware logs
+                // and leaves PDR untouched.
+                write(old_val, work_ram);
+            }
+        }
+    }
+
+    /// §6.3's DDR1/DDR2 ID-nibble table: `0xC` = Saturn digital pad or gun,
+    /// `0x1` = analog-incapable-of-TH-ID pad-shaped device (3D pad,
+    /// keyboard) or multi-tap, `0x0` = mouse, `0xF` = nothing connected.
+    /// `None` means "real hardware logs an error and leaves PDR
+    /// untouched" -- the wheel/mission-stick/twin-sticks row.
+    fn ddr_id_nibble(state: &crate::peripheral::PeripheralState) -> Option<u8> {
+        use crate::peripheral::PeripheralState::*;
+        match state {
+            Disconnected => Some(0x7F),
+            Gun(_) => Some(0x7C),
+            Pad(_) => Some(0x7C),
+            Pad3D(_) | Keyboard(_) => Some(0x71),
+            Mouse(_) => Some(0x70),
+            Wheel(_) | MissionStick(_) | TwinSticks(_) => None,
         }
     }
 
@@ -289,6 +528,67 @@ impl Smpc {
         let sf_bit = work_ram.smpc_regs.read().unwrap()[reg::SF] & 1;
         self.bustmp = (self.bustmp & 0xFE) | sf_bit;
         self.bustmp
+    }
+
+    pub fn arm_command(&mut self, command: u8, work_ram: &WorkRam) -> (u32, bool) {
+        let delay_us = if command == cmd::INTBACK {
+            let ireg0 = work_ram.smpc_regs.read().unwrap()[reg::IREG0];
+            let ireg1 = work_ram.smpc_regs.read().unwrap()[reg::IREG1];
+            if self.intback {
+                16000
+            } else if ireg0 == 0x01 {
+                250
+            } else if ireg0 == 0x00 && (ireg1 & 0x08) != 0 {
+                16000
+            } else {
+                1
+            }
+        } else {
+            1
+        };
+
+        let wait_for_line = if command == cmd::INTBACK {
+            let ireg0 = work_ram.smpc_regs.read().unwrap()[reg::IREG0];
+            let ireg1 = work_ram.smpc_regs.read().unwrap()[reg::IREG1];
+            if self.intback {
+                true
+            } else if ireg0 == 0x01 {
+                false
+            } else if ireg0 == 0x00 && (ireg1 & 0x08) != 0 {
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        work_ram.smpc_regs.write().unwrap()[reg::SF] = 1;
+        self.pending_command = Some((command, delay_us, wait_for_line));
+        self.dispatch_ready = false;
+        (delay_us, wait_for_line)
+    }
+
+    pub fn mark_dispatch_ready(&mut self) {
+        self.dispatch_ready = true;
+    }
+
+    pub fn is_dispatch_ready(&self) -> bool {
+        self.dispatch_ready
+    }
+
+    pub fn execute_expired_command(&mut self, work_ram: &WorkRam) -> SmpcEffects {
+        if let Some((cmd, _, _)) = self.pending_command {
+            self.pending_command = None;
+            // Without this, a stale `true` from the command that just
+            // dispatched would make Core 7 try (harmlessly, but pointlessly)
+            // to dispatch again on every later unrelated wake -- e.g. CS2's
+            // `vblank_pending` -- until the *next* `arm_command` reset it.
+            self.dispatch_ready = false;
+            work_ram.smpc_regs.write().unwrap()[reg::SF] = 0;
+            return self.execute_command(cmd, work_ram);
+        }
+        SmpcEffects::default()
     }
 
     /// Execute the command just latched into COMREG, mutating `work_ram`'s
@@ -333,14 +633,19 @@ impl Smpc {
                 // (§4.1).
             }
             cmd::SYSRES => {
-                // §4.8: Yabause's reference does nothing here either. Real
-                // hardware performs a full system reset -- deferred to
-                // Phase 3 (`SmpcEffects::system_reset` doesn't exist yet).
-                // No OREG31 (§4.1).
+                effects.system_reset = true;
             }
-            cmd::CKCHG352 | cmd::CKCHG320 => {
-                // §4.9/§4.10: VDP/SCU/SCSP reset + slave stop + clock change
-                // + NMI, deferred to Phase 3. No OREG31 (§4.1).
+            cmd::CKCHG352 => {
+                effects.clock_change = Some(true);
+                effects.stop_slave = true; // §4.9 step 3
+                self.dotsel = true;
+                effects.nmi = true;
+            }
+            cmd::CKCHG320 => {
+                effects.clock_change = Some(false);
+                effects.stop_slave = true; // §4.10 step 3
+                self.dotsel = false;
+                effects.nmi = true;
             }
             cmd::INTBACK => {
                 effects.system_manager_irq = true;
@@ -395,10 +700,56 @@ impl Smpc {
                     ram[reg::oreg(31)] = cmd::INTBACK;
                     ram[reg::SR] = 0x4F | (wants_peripheral << 5);
                 } else if (ireg1 >> 3) & 1 != 0 {
-                    // Peripheral-only path (IREG0&1==0, IREG1&8!=0): real
-                    // hardware returns a peripheral report here
-                    // (`SmpcINTBACKPeripheral`). Deferred to Phase 4.
-                } // else: genuine no-op (`smpc.c:499` fall-through, §5.2).
+                    if ireg0 & 0x40 != 0 {
+                        self.intback = false;
+                        ram[reg::SR] &= 0x0F;
+                        return effects;
+                    }
+                    if ireg0 == 0 {
+                        self.intback = true;
+                        self.first_peri = true;
+                    }
+                    let is_continuation = !self.first_peri;
+
+                    let (mut p1_data, mut p2_data);
+                    if !is_continuation {
+                        let mut pad1 = self.port1.lock().unwrap();
+                        let mut pad2 = self.port2.lock().unwrap();
+
+                        p1_data = pad1.to_port_data();
+                        p2_data = pad2.to_port_data();
+                        // §5.4 step 2: `PerFlush` runs on the *live* port
+                        // state immediately after the snapshot is taken, so
+                        // the mouse's accumulated deltas don't carry over
+                        // into the next accumulation period. Applied after
+                        // snapshotting, not before -- this frame's already-
+                        // captured deltas must still reach the OREGs.
+                        pad1.flush_mouse_deltas();
+                        pad2.flush_mouse_deltas();
+                        self.snap1 = Some(p1_data);
+                        self.snap2 = Some(p2_data);
+                    } else {
+                        p1_data = self.snap1.unwrap_or_default();
+                        p2_data = self.snap2.unwrap_or_default();
+                    }
+
+                    Self::chunk_port_data(&mut p1_data, &mut p2_data, &mut ram);
+
+                    self.snap1 = Some(p1_data);
+                    self.snap2 = Some(p2_data);
+
+                    // §5.3: the peripheral-chunk SR formula is its own,
+                    // separate from the status-block path above -- 0xC0 for
+                    // the first chunk of a sequence, 0x80 for every
+                    // subsequent one, both OR'd with IREG1's own high
+                    // nibble. There is deliberately no "more chunks remain"
+                    // bit here (§5.3's own [QUIRK]) -- do not synthesize one
+                    // by checking `offset < size`; real hardware genuinely
+                    // never signals exhaustion, and the game is expected to
+                    // derive it from the port-status/size bytes instead.
+                    ram[reg::SR] = (if self.first_peri { 0xC0 } else { 0x80 }) | (ireg1 >> 4);
+                    self.first_peri = false;
+                }
             }
             cmd::SETSMEM => {
                 // §4.12: IREG0..IREG3 -> SMEM[0..3], no validity check. SMEM
@@ -416,8 +767,7 @@ impl Smpc {
                 Self::echo_oreg31(work_ram, cmd::SETSMEM);
             }
             cmd::NMIREQ => {
-                // §4.13: full NMI-raise (`Sh2` vector 0x0B, level 16)
-                // deferred to Phase 3 (no NMI plumbing in `Sh2` yet).
+                effects.nmi = true;
                 Self::echo_oreg31(work_ram, cmd::NMIREQ);
             }
             cmd::RESENAB => {
@@ -442,6 +792,63 @@ impl Smpc {
         effects
     }
 
+    /// §5.4/§5.5's 32-byte-at-a-time chunker. The OREG stream is simply
+    /// port 1's own status byte, then (if connected) its ID byte and data
+    /// bytes, then port 2's status byte and the same -- confirmed against
+    /// §5.5's own worked examples (`F1 02 FF FF | F0` for one idle pad on
+    /// port 1, nothing on port 2). There is deliberately **no** separate
+    /// combined header byte anywhere in this stream; an earlier version of
+    /// this code invented one (`0xF0` fixed + a `(p1.size<<4|p2.size)`
+    /// byte) that has no basis in the real format and does not appear in
+    /// any of §5.5's worked examples.
+    fn chunk_port_data(
+        p1: &mut crate::peripheral::PortData,
+        p2: &mut crate::peripheral::PortData,
+        ram: &mut [u8; 128],
+    ) {
+        let mut oreg_idx = 0;
+
+        // Port 1: status byte, then (for a real single peripheral -- not
+        // "nothing connected" and not a gun, which has no ID byte at all)
+        // its ID byte, then its data bytes.
+        if p1.offset == 0 && oreg_idx < 32 {
+            ram[reg::oreg(oreg_idx)] = p1.status;
+            oreg_idx += 1;
+            if p1.status != crate::peripheral::status::NOT_CONNECTED
+                && p1.status != crate::peripheral::status::GUN_DIRECT
+                && oreg_idx < 32
+            {
+                ram[reg::oreg(oreg_idx)] = p1.id;
+                oreg_idx += 1;
+            }
+        }
+
+        while p1.offset < p1.size && oreg_idx < 32 {
+            ram[reg::oreg(oreg_idx)] = p1.data[p1.offset];
+            oreg_idx += 1;
+            p1.offset += 1;
+        }
+
+        // Port 2: same shape.
+        if p2.offset == 0 && oreg_idx < 32 {
+            ram[reg::oreg(oreg_idx)] = p2.status;
+            oreg_idx += 1;
+            if p2.status != crate::peripheral::status::NOT_CONNECTED
+                && p2.status != crate::peripheral::status::GUN_DIRECT
+                && oreg_idx < 32
+            {
+                ram[reg::oreg(oreg_idx)] = p2.id;
+                oreg_idx += 1;
+            }
+        }
+
+        while p2.offset < p2.size && oreg_idx < 32 {
+            ram[reg::oreg(oreg_idx)] = p2.data[p2.offset];
+            oreg_idx += 1;
+            p2.offset += 1;
+        }
+    }
+
     fn echo_oreg31(work_ram: &WorkRam, command: u8) {
         work_ram.smpc_regs.write().unwrap()[reg::oreg(31)] = command;
     }
@@ -450,6 +857,18 @@ impl Smpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn execute_smpc(cpu: &mut crate::sh2::Sh2, work_ram: &crate::shared_buffers::WorkRam) {
+        let effects = cpu
+            .smpc
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .execute_expired_command(work_ram);
+        cpu.apply_smpc_effects(effects);
+    }
+
     use std::sync::Arc;
 
     #[test]
@@ -489,6 +908,7 @@ mod tests {
         let (mut cpu, work_ram, _smpc) = wired_cpu();
         cpu.write_byte(SMPC_BASE + reg::IREG0 as u32, 0x01);
         cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::INTBACK);
+        execute_smpc(&mut cpu, &work_ram);
         assert_eq!(
             work_ram.smpc_regs.read().unwrap()[reg::oreg(0)],
             0xC0,
@@ -496,7 +916,9 @@ mod tests {
         );
 
         cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::RESENAB);
+        execute_smpc(&mut cpu, &work_ram);
         cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::INTBACK);
+        execute_smpc(&mut cpu, &work_ram);
         assert_eq!(
             work_ram.smpc_regs.read().unwrap()[reg::oreg(0)],
             0x80,
@@ -504,7 +926,9 @@ mod tests {
         );
 
         cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::RESDISA);
+        execute_smpc(&mut cpu, &work_ram);
         cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::INTBACK);
+        execute_smpc(&mut cpu, &work_ram);
         assert_eq!(
             work_ram.smpc_regs.read().unwrap()[reg::oreg(0)],
             0xC0,
@@ -519,6 +943,7 @@ mod tests {
         cpu.write_byte(SMPC_BASE + reg::IREG1 as u32, 0x02);
         cpu.write_byte(SMPC_BASE + reg::IREG0 as u32, 0x01);
         cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::INTBACK);
+        execute_smpc(&mut cpu, &work_ram);
         assert_eq!(
             work_ram.smpc_regs.read().unwrap()[reg::SR],
             0x4F,
@@ -527,6 +952,7 @@ mod tests {
 
         cpu.write_byte(SMPC_BASE + reg::IREG1 as u32, 0x0A);
         cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::INTBACK);
+        execute_smpc(&mut cpu, &work_ram);
         assert_eq!(
             work_ram.smpc_regs.read().unwrap()[reg::SR],
             0x6F,
@@ -564,6 +990,7 @@ mod tests {
             // every other command in this list.
             cpu.write_byte(SMPC_BASE + reg::IREG0 as u32, 0x01);
             cpu.write_byte(SMPC_BASE + reg::COMREG as u32, command);
+            execute_smpc(&mut cpu, &work_ram);
             assert_eq!(
                 work_ram.smpc_regs.read().unwrap()[reg::oreg(31)],
                 command,
@@ -575,6 +1002,7 @@ mod tests {
             let (mut cpu, work_ram, _smpc) = wired_cpu();
             work_ram.smpc_regs.write().unwrap()[reg::oreg(31)] = 0x5A; // sentinel
             cpu.write_byte(SMPC_BASE + reg::COMREG as u32, command);
+            execute_smpc(&mut cpu, &work_ram);
             assert_eq!(
                 work_ram.smpc_regs.read().unwrap()[reg::oreg(31)],
                 0x5A,
@@ -589,12 +1017,13 @@ mod tests {
         // Replays the real BIOS's own INTBACK handshake byte for byte (§0.6,
         // BIOS 0x1D48-0x1D64) -- the exact loop that hangs the machine if
         // "clear SF after dispatch" is missing.
-        let (mut cpu, _work_ram, _smpc) = wired_cpu();
+        let (mut cpu, work_ram, _smpc) = wired_cpu();
         cpu.write_byte(SMPC_BASE + reg::SF as u32, 0x01);
         cpu.write_byte(SMPC_BASE + reg::IREG0 as u32, 0x01);
         cpu.write_byte(SMPC_BASE + reg::IREG1 as u32, 0x02);
         cpu.write_byte(SMPC_BASE + reg::IREG2 as u32, 0xF0);
         cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::INTBACK);
+        execute_smpc(&mut cpu, &work_ram);
         let sf = cpu.read_byte(SMPC_BASE + reg::SF as u32);
         assert_eq!(
             sf & 1,
@@ -621,7 +1050,8 @@ mod tests {
         let (mut cpu, work_ram, _smpc) = wired_cpu();
         work_ram.smpc_regs.write().unwrap()[reg::oreg(0)] = 0x5A; // sentinel
         cpu.write_byte(SMPC_BASE + reg::SF as u32, 0x01);
-        cpu.write_byte(SMPC_BASE + reg::COMREG as u32, 0x05); // not in §3.4's table
+        cpu.write_byte(SMPC_BASE + reg::COMREG as u32, 0x05);
+        execute_smpc(&mut cpu, &work_ram); // not in §3.4's table
         assert_eq!(
             cpu.read_byte(SMPC_BASE + reg::SF as u32) & 1,
             0,
@@ -648,9 +1078,10 @@ mod tests {
         (cpu, work_ram)
     }
 
-    fn do_intback_status(cpu: &mut crate::sh2::Sh2) {
+    fn do_intback_status(cpu: &mut crate::sh2::Sh2, work_ram: &crate::shared_buffers::WorkRam) {
         cpu.write_byte(SMPC_BASE + reg::IREG0 as u32, 0x01);
         cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::INTBACK);
+        execute_smpc(cpu, work_ram);
     }
 
     #[test]
@@ -659,7 +1090,7 @@ mod tests {
         // formulas (see docs/implementation-plans/smpc-peripheral.md
         // Phase 2 testing).
         let (mut cpu, work_ram) = wired_cpu_with_clock(ClockSource::Fixed(946_684_800));
-        do_intback_status(&mut cpu);
+        do_intback_status(&mut cpu, &work_ram);
         {
             let ram = work_ram.smpc_regs.read().unwrap();
             assert_eq!(ram[reg::oreg(1)], 0x20, "OREG1 (year thousands/hundreds)");
@@ -685,7 +1116,7 @@ mod tests {
         // month >= 10 (nibble 0xC, NOT BCD-carried) and two-digit
         // day/hour/minute/second.
         let (mut cpu, work_ram) = wired_cpu_with_clock(ClockSource::Fixed(1_009_287_959));
-        do_intback_status(&mut cpu);
+        do_intback_status(&mut cpu, &work_ram);
         {
             let ram = work_ram.smpc_regs.read().unwrap();
             assert_eq!(
@@ -708,7 +1139,7 @@ mod tests {
     #[test]
     fn oreg10_encodes_dot_clock() {
         let (mut cpu, work_ram) = wired_cpu_with_clock(ClockSource::Fixed(0));
-        do_intback_status(&mut cpu);
+        do_intback_status(&mut cpu, &work_ram);
         assert_eq!(
             work_ram.smpc_regs.read().unwrap()[reg::oreg(10)],
             0x34,
@@ -737,6 +1168,7 @@ mod tests {
         cpu.write_byte(SMPC_BASE + reg::IREG2 as u32, 0xBE);
         cpu.write_byte(SMPC_BASE + reg::IREG3 as u32, 0xEF);
         cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::SETSMEM);
+        execute_smpc(&mut cpu, &work_ram);
         assert_eq!(
             work_ram.smpc_regs.read().unwrap()[reg::oreg(31)],
             cmd::SETSMEM
@@ -747,6 +1179,7 @@ mod tests {
         // test isolates the SMEM round-trip.
         cpu.write_byte(SMPC_BASE + reg::IREG0 as u32, 0x01);
         cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::INTBACK);
+        execute_smpc(&mut cpu, &work_ram);
         let ram = work_ram.smpc_regs.read().unwrap();
         assert_eq!(ram[reg::oreg(12)], 0xDE, "OREG12");
         assert_eq!(ram[reg::oreg(13)], 0xAD, "OREG13");
@@ -782,7 +1215,7 @@ mod tests {
             // (§0.2: it's autodetected from the CD, or configured out of
             // band), so this is a direct API call, not a register write.
             cpu.smpc.as_ref().unwrap().lock().unwrap().set_region(r);
-            do_intback_status(&mut cpu);
+            do_intback_status(&mut cpu, &work_ram);
             assert_eq!(
                 work_ram.smpc_regs.read().unwrap()[reg::oreg(9)],
                 r,
@@ -801,11 +1234,264 @@ mod tests {
             .lock()
             .unwrap()
             .set_region(region::AUTODETECT);
-        do_intback_status(&mut cpu);
+        do_intback_status(&mut cpu, &work_ram);
         assert_eq!(
             work_ram.smpc_regs.read().unwrap()[reg::oreg(9)],
             region::JAPAN,
             "AUTODETECT -> JAPAN fallback"
+        );
+    }
+
+    // ---- Restored/extended for Phase 7: PDR/DDR direct-access port,
+    // CKCHG, port defaults, and INTBACK peripheral chunking against the
+    // real §5.5 byte stream (no fabricated header). ----
+
+    #[test]
+    fn port1_defaults_to_a_connected_pad_port2_to_disconnected() {
+        let smpc = Smpc::new();
+        assert_eq!(
+            *smpc.port1.lock().unwrap(),
+            crate::peripheral::PeripheralState::Pad(crate::peripheral::PadState::default()),
+            "port 1 defaults to a connected, idle pad"
+        );
+        assert_eq!(
+            *smpc.port2.lock().unwrap(),
+            crate::peripheral::PeripheralState::Disconnected,
+            "port 2 must default to disconnected, not a phantom idle pad"
+        );
+    }
+
+    #[test]
+    fn set_port_peripheral_and_set_peripheral_state_both_reach_ddr_and_intback() {
+        use crate::peripheral::{PeripheralKind, PeripheralState};
+        let mut smpc = Smpc::new();
+        let work_ram = WorkRam::new();
+
+        smpc.set_port_peripheral(2, Some(PeripheralKind::Mouse));
+        assert_eq!(
+            *smpc.port2.lock().unwrap(),
+            PeripheralState::Mouse(crate::peripheral::MouseState::default())
+        );
+        let old = work_ram.smpc_regs.read().unwrap()[reg::DDR2];
+        smpc.on_register_write(reg::DDR2, 0x00, old, &work_ram);
+        assert_eq!(
+            work_ram.smpc_regs.read().unwrap()[reg::PDR2],
+            0x70,
+            "mouse's own DDR nibble must show up on port 2 too"
+        );
+
+        smpc.set_port_peripheral(2, None);
+        let old = work_ram.smpc_regs.read().unwrap()[reg::DDR2];
+        smpc.on_register_write(reg::DDR2, 0x00, old, &work_ram);
+        assert_eq!(work_ram.smpc_regs.read().unwrap()[reg::PDR2], 0x7F);
+    }
+
+    #[test]
+    fn ckchg352_sets_dotsel_and_ckchg320_clears_it() {
+        let (mut cpu, work_ram) = wired_cpu_with_clock(ClockSource::Fixed(0));
+        cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::CKCHG352);
+        execute_smpc(&mut cpu, &work_ram);
+        do_intback_status(&mut cpu, &work_ram);
+        assert_eq!(
+            work_ram.smpc_regs.read().unwrap()[reg::oreg(10)] & 0x40,
+            0x40,
+            "OREG10 bit 6 (dotsel) must be set after CKCHG352"
+        );
+
+        cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::CKCHG320);
+        execute_smpc(&mut cpu, &work_ram);
+        do_intback_status(&mut cpu, &work_ram);
+        assert_eq!(
+            work_ram.smpc_regs.read().unwrap()[reg::oreg(10)] & 0x40,
+            0,
+            "OREG10 bit 6 must clear after CKCHG320"
+        );
+    }
+
+    #[test]
+    fn pdr1_four_phase_idle_pad() {
+        // §6.2 mode 0x60, idle pad: b2 = b3 = 0xFF, hand-derived per phase.
+        let mut smpc = Smpc::new();
+        let work_ram = WorkRam::new();
+        work_ram.smpc_regs.write().unwrap()[reg::DDR1] = 0x60;
+
+        let cases: &[(u8, u8)] = &[
+            (0x60, 0x1C), // 1st Data: 0x14 | (0xFF & 0x08)
+            (0x20, 0x1F), // 2nd Data: 0x10 | ((0xFF >> 4) & 0xF)
+            (0x40, 0x1F), // 3rd Data: 0x10 | (0xFF & 0xF)
+            (0x00, 0x1F), // 4th Data: 0x10 | ((0xFF >> 4) & 0xF)
+        ];
+        for &(val, expected) in cases {
+            let old = work_ram.smpc_regs.read().unwrap()[reg::PDR1];
+            smpc.on_register_write(reg::PDR1, val, old, &work_ram);
+            assert_eq!(
+                work_ram.smpc_regs.read().unwrap()[reg::PDR1],
+                expected,
+                "phase select {val:#04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn pdr1_four_phase_a_and_right() {
+        // A + Right pressed: b2 = 0xFF & !(1<<7) & !(1<<2) = 0x7B, b3 = 0xFF.
+        let mut smpc = Smpc::new();
+        let work_ram = WorkRam::new();
+        let mut pad = crate::peripheral::PadState::default();
+        pad.a = true;
+        pad.right = true;
+        smpc.set_pad_state(1, pad);
+        work_ram.smpc_regs.write().unwrap()[reg::DDR1] = 0x60;
+
+        let cases: &[(u8, u8)] = &[
+            (0x60, 0x1C), // 0x14 | (0xFF & 0x08)
+            (0x20, 0x17), // 0x10 | ((0x7B >> 4) & 0xF) = 0x10 | 0x07
+            (0x40, 0x1B), // 0x10 | (0x7B & 0xF) = 0x10 | 0x0B
+            (0x00, 0x1F), // 0x10 | ((0xFF >> 4) & 0xF)
+        ];
+        for &(val, expected) in cases {
+            let old = work_ram.smpc_regs.read().unwrap()[reg::PDR1];
+            smpc.on_register_write(reg::PDR1, val, old, &work_ram);
+            assert_eq!(
+                work_ram.smpc_regs.read().unwrap()[reg::PDR1],
+                expected,
+                "phase select {val:#04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn pdr1_preserves_written_bit7() {
+        let mut smpc = Smpc::new();
+        let work_ram = WorkRam::new();
+        work_ram.smpc_regs.write().unwrap()[reg::DDR1] = 0x60;
+        let old = work_ram.smpc_regs.read().unwrap()[reg::PDR1];
+        smpc.on_register_write(reg::PDR1, 0x80 | 0x60, old, &work_ram); // bit7 set + phase 1
+        assert_eq!(
+            work_ram.smpc_regs.read().unwrap()[reg::PDR1],
+            0x80 | 0x1C,
+            "the written bit 7 must survive into the result"
+        );
+    }
+
+    #[test]
+    fn pdr1_gun_button_read_at_mode_0x00() {
+        // §6.2 mode 0x00: only meaningful for a gun, only when all seven
+        // lines are floated high (`val & 0x7F == 0x7F`).
+        let mut smpc = Smpc::new();
+        let work_ram = WorkRam::new();
+        let mut gun = crate::peripheral::GunState::default();
+        gun.trigger = true;
+        smpc.set_peripheral_state(1, crate::peripheral::PeripheralState::Gun(gun));
+        work_ram.smpc_regs.write().unwrap()[reg::DDR1] = 0x00;
+
+        let old = work_ram.smpc_regs.read().unwrap()[reg::PDR1];
+        smpc.on_register_write(reg::PDR1, 0x7F, old, &work_ram);
+        assert_eq!(
+            work_ram.smpc_regs.read().unwrap()[reg::PDR1],
+            0xFF & !(1 << 4),
+            "trigger pressed must clear bit 4"
+        );
+    }
+
+    #[test]
+    fn unknown_control_method_leaves_pdr_untouched() {
+        let mut smpc = Smpc::new();
+        let work_ram = WorkRam::new();
+        work_ram.smpc_regs.write().unwrap()[reg::DDR1] = 0x20; // not 0x00/0x40/0x60
+        work_ram.smpc_regs.write().unwrap()[reg::PDR1] = 0xAA;
+
+        let old = work_ram.smpc_regs.read().unwrap()[reg::PDR1];
+        smpc.on_register_write(reg::PDR1, 0x55, old, &work_ram);
+        assert_eq!(
+            work_ram.smpc_regs.read().unwrap()[reg::PDR1],
+            0xAA,
+            "an unrecognised control method must leave PDR1 exactly as it was"
+        );
+    }
+
+    #[test]
+    fn intback_peripheral_one_pad_port1_matches_the_worked_example() {
+        // §5.5's own worked example, verbatim: "One digital pad on port 1,
+        // nothing on port 2: F1 02 FF FF | F0" -- no header of any kind.
+        let (mut cpu, work_ram) = wired_cpu_with_clock(ClockSource::Fixed(0));
+        cpu.write_byte(SMPC_BASE + reg::IREG1 as u32, 0x08); // peripheral data wanted
+        cpu.write_byte(SMPC_BASE + reg::IREG0 as u32, 0x00); // peripheral-only path
+        cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::INTBACK);
+        execute_smpc(&mut cpu, &work_ram);
+
+        let ram = work_ram.smpc_regs.read().unwrap();
+        assert_eq!(ram[reg::oreg(0)], 0xF1);
+        assert_eq!(ram[reg::oreg(1)], 0x02);
+        assert_eq!(ram[reg::oreg(2)], 0xFF);
+        assert_eq!(ram[reg::oreg(3)], 0xFF);
+        assert_eq!(ram[reg::oreg(4)], 0xF0);
+    }
+
+    #[test]
+    fn intback_peripheral_both_ports_empty_matches_the_worked_example() {
+        // §5.5: "Nothing on either port: F0 | F0 -- OREG0 = 0xF0, OREG1 = 0xF0."
+        let (mut cpu, work_ram) = wired_cpu_with_clock(ClockSource::Fixed(0));
+        cpu.smpc
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .set_port_peripheral(1, None);
+        cpu.write_byte(SMPC_BASE + reg::IREG1 as u32, 0x08);
+        cpu.write_byte(SMPC_BASE + reg::IREG0 as u32, 0x00);
+        cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::INTBACK);
+        execute_smpc(&mut cpu, &work_ram);
+
+        let ram = work_ram.smpc_regs.read().unwrap();
+        assert_eq!(ram[reg::oreg(0)], 0xF0);
+        assert_eq!(ram[reg::oreg(1)], 0xF0);
+    }
+
+    #[test]
+    fn intback_peripheral_sr_first_vs_subsequent() {
+        // §5.3: SR's high nibble is 0xC on the first chunk of a sequence,
+        // 0x8 on every later one (0x40's low bits come from IREG1's own
+        // high nibble, held at 0 here to isolate the bit under test).
+        let (mut cpu, work_ram) = wired_cpu_with_clock(ClockSource::Fixed(0));
+        cpu.write_byte(SMPC_BASE + reg::IREG1 as u32, 0x08);
+        cpu.write_byte(SMPC_BASE + reg::IREG0 as u32, 0x00);
+        cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::INTBACK);
+        execute_smpc(&mut cpu, &work_ram);
+        assert_eq!(
+            work_ram.smpc_regs.read().unwrap()[reg::SR] & 0xC0,
+            0xC0,
+            "first chunk: bit7|bit6 set"
+        );
+
+        // Continue: IREG0 bit 7 set.
+        cpu.write_byte(SMPC_BASE + reg::IREG0 as u32, 0x80);
+        execute_smpc(&mut cpu, &work_ram);
+        assert_eq!(
+            work_ram.smpc_regs.read().unwrap()[reg::SR] & 0xC0,
+            0x80,
+            "subsequent chunk: only bit7 set"
+        );
+    }
+
+    #[test]
+    fn intback_break_clears_sr_high_nibble_and_drops_the_snapshot() {
+        let (mut cpu, work_ram) = wired_cpu_with_clock(ClockSource::Fixed(0));
+        cpu.write_byte(SMPC_BASE + reg::IREG1 as u32, 0x08);
+        cpu.write_byte(SMPC_BASE + reg::IREG0 as u32, 0x00);
+        cpu.write_byte(SMPC_BASE + reg::COMREG as u32, cmd::INTBACK);
+        execute_smpc(&mut cpu, &work_ram);
+
+        // Break: IREG0 bit 6 set.
+        cpu.write_byte(SMPC_BASE + reg::IREG0 as u32, 0x40);
+        assert_eq!(
+            work_ram.smpc_regs.read().unwrap()[reg::SR] & 0xF0,
+            0,
+            "break must clear SR's high nibble immediately (synchronous, no dispatch needed)"
+        );
+        assert!(
+            cpu.smpc.as_ref().unwrap().lock().unwrap().snap1.is_none(),
+            "the in-progress snapshot must be dropped, not resumed by a later INTBACK"
         );
     }
 }

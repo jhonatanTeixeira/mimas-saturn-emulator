@@ -551,32 +551,32 @@ Fills out the §3.4 dispatch table. Ordered after Phase 2 because none of these 
 §0.6 boot trace, but before peripherals because they are small, self-contained, and CKCHG is
 already anticipated in the code (`throttle.rs:18`).
 
-- [ ] **`0x18` NMIREQ** (§4.13): raise the SH-2 NMI — **vector `0x0B`, level `16`**;
+- [x] **`0x18` NMIREQ** (§4.13): raise the SH-2 NMI — **vector `0x0B`, level `16`**;
       `OREG31 = 0x18`. §4.13 flags a `[QUIRK]`: Yabause does *not* set `ICR` bit 15 here (unlike
       the CKCHG path, §4.9). Real hardware's NMI does. Recommend **setting ICR bit 15**, and
       documenting the divergence from the reference.
-- [ ] **`Sh2` NMI plumbing**: add `pub nmi_pending: bool` and give it top priority in
+- [x] **`Sh2` NMI plumbing**: add `pub nmi_pending: bool` and give it top priority in
       `service_pending_interrupt` (`sh2.rs:908-952`), above `VBLANK_IN_LEVEL`.
       **Watch out for a real bug this creates**: `sh2.rs:950` does
       `self.sr = (self.sr & !(0xF << SR_IMASK_SHIFT)) | (level << SR_IMASK_SHIFT)`. With
       `level = 16`, `16 << 4` overflows the 4-bit mask field and writes **`0`** — the exact
       opposite of masking. Clamp the value written into the mask field to `15` while keeping
       `16` as the acceptance-comparison level, and add a regression test for it.
-- [ ] **Reset button** (§4.16): `SaturnSystem::press_reset_button()` → no-op when `resd`
+- [x] **Reset button** (§4.16): `SaturnSystem::press_reset_button()` → no-op when `resd`
       (§4.16: inert until the game issues RESENAB, because `resd = 1` at reset), else the same
       NMI path as NMIREQ. Wire nothing in the frontends yet; the API is the deliverable.
-- [ ] **`0x00` MSHON** (§4.2): no inputs, no outputs, no OREG31. Real hardware turns the master
+- [x] **`0x00` MSHON** (§4.2): no inputs, no outputs, no OREG31. Real hardware turns the master
       SH-2 on; there is no state in which Mimas's master is off. Implement as an explicit,
       commented accepted-no-op — **not** a silent fall-through — so it is distinguishable from
       an unimplemented command in the log.
-- [ ] **`0x08` CDON / `0x09` CDOFF** (§4.7): accepted no-ops with a comment pointing at
+- [x] **`0x08` CDON / `0x09` CDOFF** (§4.7): accepted no-ops with a comment pointing at
       `docs/implementation-plans/cs2-cdblock.md`; revisit when the CD block is integrated (it
       currently is not wired into the system at all — `CLAUDE.md`). No OREG31 (§4.1).
-- [ ] **`0x0D` SYSRES** (§4.8): §4.8 records that Yabause does nothing here. Real hardware
+- [x] **`0x0D` SYSRES** (§4.8): §4.8 records that Yabause does nothing here. Real hardware
       performs a full system reset. Implement `SmpcEffects::system_reset` and have `sh2.rs`
       re-run `Sh2::reset()` (`sh2.rs:317-336`) on the master; leave the wider system reset
       (VDPs, SCU, SCSP) to whenever those gain reset entry points. No OREG31 (§4.1).
-- [ ] **`0x0E` CKCHG352 / `0x0F` CKCHG320** (§4.9, §4.10), in §4.9's exact order:
+- [x] **`0x0E` CKCHG352 / `0x0F` CKCHG320** (§4.9, §4.10), in §4.9's exact order:
       1. reset VDP1, VDP2, SCU, SCSP (as those reset entry points exist; stub + `TODO` where
          they do not, listing which);
       2. §4.9 notes the "Clear VDP1/VDP2 ram" comment is **not implemented** in the reference —
@@ -587,26 +587,26 @@ already anticipated in the code (`throttle.rs:18`).
       5. `dotsel = true` (352) / `false` (320);
       6. NMI the master (with ICR bit 15, §4.9).
       No OREG31 (§4.1).
-- [ ] **Clock plumbing**: `throttle.rs:18` already flags this as the reason `SH2_CLOCK_HZ` is a
+- [x] **Clock plumbing**: `throttle.rs:18` already flags this as the reason `SH2_CLOCK_HZ` is a
       constant. Turn the SH-2 rate into live state the `ClockThrottle` reads (it already holds
       `Arc<Mutex<ThrottleSpeed>>`, `sh2.rs:156`, `lib.rs:68`) rather than a `const`. Also
       thread `dotsel` to VDP2's dot-clock selection when VDP2 gains one.
 
 **Testing (Phase 3)**
 
-- [ ] `nmireq_enters_vector_0x0b`: mirror `sh2.rs:1969-2003`'s structure — set VBR, seed
+- [x] `nmireq_enters_vector_0x0b`: mirror `sh2.rs:1969-2003`'s structure — set VBR, seed
       `[VBR + 0x0B*4]`, issue COMREG `0x18`, step, assert PC entered the handler and
       `OREG31 == 0x18`.
-- [ ] `nmi_mask_field_does_not_wrap_to_zero`: the `16 << 4` bug above. After NMI entry, assert
+- [x] `nmi_mask_field_does_not_wrap_to_zero`: the `16 << 4` bug above. After NMI entry, assert
       `(sr >> 4) & 0xF == 15`, **not** `0`. Derived from the SH-2 SR layout (`sh2.rs:182-184`),
       independent of the SMPC.
-- [ ] `reset_button_is_inert_until_resenab`: §4.16 + §0.4 step 4. Fresh system → press → no NMI.
+- [x] `reset_button_is_inert_until_resenab`: §4.16 + §0.4 step 4. Fresh system → press → no NMI.
       COMREG `0x19` (RESENAB) → press → NMI. COMREG `0x1A` (RESDISA) → press → no NMI.
-- [ ] `ckchg352_sets_dotsel_and_ckchg320_clears_it`: assert via **OREG10** on a following
+- [x] `ckchg352_sets_dotsel_and_ckchg320_clears_it`: assert via **OREG10** on a following
       INTBACK: `0x74` after `0x0E`, `0x34` after `0x0F` (§5.6 formula, hand-derived in Phase 2).
-- [ ] `ckchg_stops_the_slave`: SSHON, then CKCHG352, assert Core 1 is inactive/reset (§4.9
+- [x] `ckchg_stops_the_slave`: SSHON, then CKCHG352, assert Core 1 is inactive/reset (§4.9
       step 3).
-- [ ] `ckchg_clock_rates`: assert the throttle's target Hz becomes `28_636_360` after CKCHG352
+- [x] `ckchg_clock_rates`: assert the throttle's target Hz becomes `28_636_360` after CKCHG352
       and `28_636_360 * 15 / 16 == 26_846_587` (integer, ±1) after CKCHG320 — derived from
       §4.9's `freq_base`/`freq_mult`, not from `throttle.rs`'s current constant.
 
@@ -620,21 +620,21 @@ the 95 % case — with the report-building code shaped so §9.3's other types dr
 
 ### 4a — The peripheral data model (in `saturn-core`)
 
-- [ ] `saturn-core/src/peripheral.rs` (new module, `pub mod peripheral;` in `lib.rs`).
-- [ ] `PortData { data: [u8; 256], size: usize, offset: usize }` — §0.1's `PortData_struct`. The
+- [x] `saturn-core/src/peripheral.rs` (new module, `pub mod peripheral;` in `lib.rs`).
+- [x] `PortData { data: [u8; 256], size: usize, offset: usize }` — §0.1's `PortData_struct`. The
       `offset` cursor is the chunker's read position (§5.4).
-- [ ] `PeripheralId` constants with their data-byte counts from `ID & 0x0F` (§5.5):
+- [x] `PeripheralId` constants with their data-byte counts from `ID & 0x0F` (§5.5):
       `PAD 0x02` (2), `WHEEL 0x13` (3), `MISSION_STICK 0x15` (5), `PAD_3D 0x16` (6),
       `TWIN_STICKS 0x19` (9), `GUN 0x25` (5), `KEYBOARD 0x34` (4), `MOUSE 0xE3` (3),
       `EMPTY_TAP_SLOT 0xFF` (written as a **single** byte, §5.5).
-- [ ] Port status bytes (§5.5): `NOT_CONNECTED 0xF0` (size 1), `DIRECT 0xF1`, `GUN_DIRECT 0xA0`
+- [x] Port status bytes (§5.5): `NOT_CONNECTED 0xF0` (size 1), `DIRECT 0xF1`, `GUN_DIRECT 0xA0`
       (low nibble 0 ⇒ no entries follow, size forced to 1), `MULTITAP_6 0x16`.
       §5.5 also lists status values the reference *never produces* (`0x04` Sega-tap,
       `0x21`-`0x2F` clock-serial) — record them as constants with a comment, do not synthesise.
-- [ ] `PadState` — the frontend-facing type. A plain `bool`-per-button struct (or a bitflags
+- [x] `PadState` — the frontend-facing type. A plain `bool`-per-button struct (or a bitflags
       `u16`), **not** the wire format. Buttons: `up, down, left, right, start, a, b, c, x, y,
       z, l, r` (13, matching §9.8's `perpadbaseconfig[13]`).
-- [ ] `PadState::to_report_bytes(&self) -> [u8; 2]` implementing §9.4's **active-low** layout
+- [x] `PadState::to_report_bytes(&self) -> [u8; 2]` implementing §9.4's **active-low** layout
       exactly:
       - byte 0 bit 7 Right, 6 Left, 5 Down, 4 Up, 3 Start, 2 A, 1 C, 0 B;
       - byte 1 bit 7 R-trigger, 6 X, 5 Y, 4 Z, 3 L-trigger, bits 2:0 **unused, always 1**
@@ -642,18 +642,18 @@ the 95 % case — with the report-building code shaped so §9.3's other types dr
       - a released button is `1`, a pressed button is `0`; idle is `FF FF` (§9.3).
       Note the **non-obvious ordering** in byte 0: `Start, A, C, B` — `C` before `B`. Getting
       this from intuition rather than §9.4 is exactly how this goes wrong.
-- [ ] `PeripheralPorts { port1: PortData, port2: PortData }` owned by `Smpc`, plus the two
+- [x] `PeripheralPorts { port1: PortData, port2: PortData }` owned by `Smpc`, plus the two
       INTBACK snapshots `snap1`/`snap2` (§0.1).
-- [ ] `PeripheralPorts::rebuild(port, config)` producing the byte stream per §9.2/§9.3. For
+- [x] `PeripheralPorts::rebuild(port, config)` producing the byte stream per §9.2/§9.3. For
       Phase 4: nothing connected → `[0xF0]`, size 1 (§9.3 / `PerPortReset`); one pad → `[0xF1,
       0x02, b0, b1]`, size 4.
-- [ ] `Smpc::set_pad_state(port: usize, state: PadState)` — writes the two live report bytes
+- [x] `Smpc::set_pad_state(port: usize, state: PadState)` — writes the two live report bytes
       in place. This is the **only** mutation path the frontend gets.
 
 ### 4b — The INTBACK peripheral path
 
-- [ ] `Smpc` state: `intback: bool`, `first_peri: bool` (§0.1).
-- [ ] **`SmpcINTBACKPeripheral` equivalent** (§5.4), in order:
+- [x] `Smpc` state: `intback: bool`, `first_peri: bool` (§0.1).
+- [x] **`SmpcINTBACKPeripheral` equivalent** (§5.4), in order:
       1. **SR** (§5.3): `0xC0 | (IREG1 >> 4)` when `first_peri`, else `0x80 | (IREG1 >> 4)`;
          then `first_peri = false`.
       2. **Snapshot**, only when *both* snapshots are drained (`snap1.size == 0 &&
@@ -668,26 +668,26 @@ the 95 % case — with the report-building code shaped so §9.3's other types dr
       reproduce.
       **Fix §5.4's `[QUIRK]`** where `port2.size` is not cleared on an exact-fit boundary,
       forcing a spurious empty continuation round.
-- [ ] **Peripheral-only INTBACK path** (§5.2, `IREG0 & 1 == 0 && IREG1 & 8 != 0`):
+- [x] **Peripheral-only INTBACK path** (§5.2, `IREG0 & 1 == 0 && IREG1 & 8 != 0`):
       `first_peri = true`, `intback = true`, run the chunker, raise the System Manager IRQ.
       **Do not port `OREG[31] = 0x10`** here — §5.4 `[BUG]` #16: it clobbers the 32nd byte of
       real peripheral data and is applied inconsistently (not on continuations). Also skip
       §5.2's `SR = 0x40` dead store (`[DEAD]` #18).
-- [ ] **Status-then-peripherals path** (§5.2, `IREG0 & 1 == 1`): `first_peri = true`,
+- [x] **Status-then-peripherals path** (§5.2, `IREG0 & 1 == 1`): `first_peri = true`,
       `intback = (IREG1 & 8) != 0`, emit the status block, `SR = 0x4F | (intback << 5)`, raise
       the IRQ. Already partly in place from Phase 1; this adds the `intback` latch.
-- [ ] **IREG0 write-side continue/break decode** (§5.2, `smpc.c:760-776`) — in the *register
+- [x] **IREG0 write-side continue/break decode** (§5.2, `smpc.c:760-776`) — in the *register
       write* path, not the command dispatcher, and only while `intback` is set:
       - bit 6 (`0x40`) → **break**: `intback = false`, `SR &= 0x0F`;
       - else bit 7 (`0x80`) → **continue**: internally synthesise `COMREG = 0x10`, arm the
         timing, `SF = 1`.
       Break is tested **first**, so `IREG0 = 0xC0` breaks (§5.2).
-- [ ] **`SmpcINTBACKEnd` at V-Blank IN** (§5.2): `intback = false`. Hook where VBLANK-IN is
+- [x] **`SmpcINTBACKEnd` at V-Blank IN** (§5.2): `intback = false`. Hook where VBLANK-IN is
       raised (`sh2.rs:1691`).
       **Fix §5.4's `[BUG]` #17 while doing it**: also clear `snap1.size`/`snap2.size`, so a
       partially drained frame-old snapshot cannot be resumed by the next INTBACK. Do the same
       on break.
-- [ ] §5.3 `[QUIRK]` #19 (SR carries no "last chunk" bit) is **real hardware behavior** — the
+- [x] §5.3 `[QUIRK]` #19 (SR carries no "last chunk" bit) is **real hardware behavior** — the
       game infers exhaustion from the port-status/size bytes. Do not invent a bit.
 
 ### 4c — Where input comes from (crosses the `saturn-core` / `saturn-frontend-*` boundary)
@@ -697,57 +697,57 @@ latches it at INTBACK time.** Justification: §5.4 step 2 *is* a latch — the S
 data when a peripheral sequence begins. A push-latest model matches that exactly; a channel
 would need draining, could backlog, and has no natural "latest wins" semantics.
 
-- [ ] `SaturnSystem::set_pad_state(port: usize, state: PadState)` — locks `Arc<Mutex<Smpc>>`,
+- [x] `SaturnSystem::set_pad_state(port: usize, state: PadState)` — locks `Arc<Mutex<Smpc>>`,
       calls `Smpc::set_pad_state`, returns. Non-blocking, safe to call from the frontend's
       present loop at 60 Hz. The mutex is contended only against INTBACK (≤ a few times per
       frame), so it will not show up in a profile.
-- [ ] `SaturnSystem::set_port_peripheral(port: usize, kind: Option<PeripheralKind>)` — connect /
+- [x] `SaturnSystem::set_port_peripheral(port: usize, kind: Option<PeripheralKind>)` — connect /
       disconnect, rebuilding the port report (§9.2). Default: pad on port 1, nothing on port 2.
-- [ ] **Rejected alternative, recorded so it is not re-litigated:** `ArcSwap<PortsState>`
+- [x] **Rejected alternative, recorded so it is not re-litigated:** `ArcSwap<PortsState>`
       (the pattern used for `vdp2_frame`, `lib.rs:49`). Cheaper, but the mouse-delta flush
       (§9.6) is a read-modify-write on the same state at snapshot time, which `ArcSwap` makes
       racy. A `Mutex` at 60 Hz is the right trade.
-- [ ] **Rejected alternative:** putting `PadState` in `WorkRam`. `WorkRam` models *physical
+- [x] **Rejected alternative:** putting `PadState` in `WorkRam`. `WorkRam` models *physical
       memory regions* (`shared_buffers.rs:1-61`); controller state is not memory.
-- [ ] `saturn-frontend-native/src/bin/mimas_window.rs`: the `minifb` loop already runs at
+- [x] `saturn-frontend-native/src/bin/mimas_window.rs`: the `minifb` loop already runs at
       `mimas_window.rs:69`. Map keys → `PadState` and call `set_pad_state` once per present
       iteration. Suggested default binding (arrows = D-pad; `Z/X/C` = A/B/C; `A/S/D` = X/Y/Z;
       `Q/W` = L/R; `Enter` = Start) — document it in the file, not here.
-- [ ] `saturn-frontend-libretro/src/lib.rs`: currently 5 lines of stubs. When it is built out,
+- [x] `saturn-frontend-libretro/src/lib.rs`: currently 5 lines of stubs. When it is built out,
       `retro_run` calls `input_poll_cb()` then `input_state_cb(port, RETRO_DEVICE_JOYPAD, 0,
       id)` for each of the 13 buttons and feeds the same `set_pad_state`. §9.8's note that
       libretro's key namespace is `(player << 8) | control_id` is a Yabause implementation
       detail; Mimas's `(port, PadState)` API does not need it.
-- [ ] Deliberately **not** ported: §9.8's whole `PerBaseConfig_struct`/`perkeyconfig` callback
+- [x] Deliberately **not** ported: §9.8's whole `PerBaseConfig_struct`/`perkeyconfig` callback
       registry. It is a host-key-binding layer (with an uninitialised-memory bug, §9.8
       `[BUG]` #45) that belongs in a frontend, not in `saturn-core`.
 
 **Testing (Phase 4)** — pad bit layouts hand-derived from §9.4, report layouts from §5.5's
 worked examples.
 
-- [ ] `pad_report_bytes_idle`: all buttons released → **`[0xFF, 0xFF]`** (§9.3's `PERPAD`
+- [x] `pad_report_bytes_idle`: all buttons released → **`[0xFF, 0xFF]`** (§9.3's `PERPAD`
       initial values).
-- [ ] `pad_report_bytes_a_and_right`: §9.4 — Right is bit 7 (`& 0x7F`), A is bit 2 (`& 0xFB`).
+- [x] `pad_report_bytes_a_and_right`: §9.4 — Right is bit 7 (`& 0x7F`), A is bit 2 (`& 0xFB`).
       Byte 0 = `0xFF & 0x7F & 0xFB` = **`0x7B`**; byte 1 = **`0xFF`**.
-- [ ] `pad_report_bytes_start_and_l`: Start is byte 0 bit 3, L-trigger is byte 1 bit 3 →
+- [x] `pad_report_bytes_start_and_l`: Start is byte 0 bit 3, L-trigger is byte 1 bit 3 →
       **`[0xF7, 0xF7]`**.
-- [ ] `pad_report_unused_bits_stay_set`: press every one of the 13 buttons → byte 1 must be
+- [x] `pad_report_unused_bits_stay_set`: press every one of the 13 buttons → byte 1 must be
       **`0x07`** (bits 7-3 cleared, bits 2:0 still 1 per §9.4), byte 0 **`0x00`**.
-- [ ] `intback_peripheral_one_pad_port1`: §5.5's worked example verbatim. One idle digital pad
+- [x] `intback_peripheral_one_pad_port1`: §5.5's worked example verbatim. One idle digital pad
       on port 1, nothing on port 2, `IREG0 = 0x00`, `IREG1 = 0x08` → OREG0..OREG4
       (`0x21, 0x23, 0x25, 0x27, 0x29`) = **`F1 02 FF FF F0`**, and `port1.size == 4`.
-- [ ] `intback_peripheral_both_ports_empty`: → OREG0 = **`0xF0`**, OREG1 = **`0xF0`** (§5.5).
-- [ ] `intback_peripheral_sr_first_vs_subsequent`: §5.3 with `IREG1 = 0x5A` (bit 3 set, high
+- [x] `intback_peripheral_both_ports_empty`: → OREG0 = **`0xF0`**, OREG1 = **`0xF0`** (§5.5).
+- [x] `intback_peripheral_sr_first_vs_subsequent`: §5.3 with `IREG1 = 0x5A` (bit 3 set, high
       nibble `0x5`) → first chunk **SR == `0xC5`** (`0xC0 | (0x5A >> 4)`), a continuation →
       **`0x85`**.
-- [ ] `intback_break_clears_sr_high_nibble`: §5.2 — mid-sequence write `IREG0 = 0x40`, assert
+- [x] `intback_break_clears_sr_high_nibble`: §5.2 — mid-sequence write `IREG0 = 0x40`, assert
       `SR == (previous SR) & 0x0F` and that `intback` is cleared. Then `IREG0 = 0xC0` (both
       bits) must also **break**, not continue (§5.2: break is tested first).
-- [ ] `intback_multi_chunk_does_not_resend_first_32_bytes`: build a >32-byte port 1 report
+- [x] `intback_multi_chunk_does_not_resend_first_32_bytes`: build a >32-byte port 1 report
       (six pads on a tap, Phase 7 shape, or a hand-constructed `PortData`), run one chunk plus
       one continuation, and assert the second chunk starts at report byte 32. **This test fails
       against a faithful port of the reference** — that is the point (§5.4 `[BUG]` #15).
-- [ ] `vblank_abandons_an_in_progress_intback_and_drops_the_snapshot`: §5.2 + §5.4 `[BUG]` #17.
+- [x] `vblank_abandons_an_in_progress_intback_and_drops_the_snapshot`: §5.2 + §5.4 `[BUG]` #17.
 - [ ] Cross-crate smoke: `SaturnSystem::set_pad_state(0, PadState { a: true, .. })`, drive an
       INTBACK from a real `Sh2`, and read OREG2 back through `Sh2::read_byte(0x00100025)`.
       Proves the whole frontend → `Smpc` → `WorkRam::smpc_regs` → CPU path.
@@ -760,20 +760,20 @@ worked examples.
 all four of DDR1/DDR2/IOSEL/EXLE during boot (trace #12-15), so this is live boot-path surface,
 not speculative game-compat work.
 
-- [ ] **Control-method selection** (§6.1): every PDR/DDR write switches on `DDR[n] & 0x7F`.
+- [x] **Control-method selection** (§6.1): every PDR/DDR write switches on `DDR[n] & 0x7F`.
       Recognised: `0x00` (all-input), `0x40` (TH control / acquire ID), `0x60` (TH-TR control).
       Anything else: log once, no synthesis. Note §6.1/§10.2's honest framing — Yabause treats
       DDR as a 7-bit **mode enum**, not per-pin direction bits. Mimas may eventually model real
       pins; §6.3's `[QUIRK]` says a pin-accurate model **must still produce the same observable
       ID nibbles**. Start with the enum, comment the intent.
-- [ ] **PDR1/PDR2 write, mode `0x00`** (§6.2): if the port's first peripheral is a gun and
+- [x] **PDR1/PDR2 write, mode `0x00`** (§6.2): if the port's first peripheral is a gun and
       `(val & 0x7F) == 0x7F`, `PDR[n] = data[2]` (the gun button byte). Otherwise nothing.
-- [ ] **PDR1 write, mode `0x40`** — `do_th_mode` (§6.2): `val & 0x40 == 0x40` →
+- [x] **PDR1 write, mode `0x40`** — `do_th_mode` (§6.2): `val & 0x40 == 0x40` →
       `0x70 | (data[3] & 0x0C)`; `val & 0x40 == 0x00` → `0x30 | ((data[2] >> 4) & 0x0F)`.
       §6.2 tags this `[HACK]` (it exists for *World Heroes Perfect*'s Mega Drive-ID probe), and
       §6.2 notes **PDR2 has no `0x40` case** (§10.1 #29). Implement port 1 only, and comment
       why the asymmetry is intentional rather than a copy-paste slip.
-- [ ] **PDR1/PDR2 write, mode `0x60`** — the four-phase TH/TR handshake (§6.2). `val & 0x60`
+- [x] **PDR1/PDR2 write, mode `0x60`** — the four-phase TH/TR handshake (§6.2). `val & 0x60`
       selects the nibble; bit 7 of the written value is preserved; bit 4 is forced:
       | `val & 0x60` | Phase | Result |
       |---|---|---|
@@ -781,7 +781,7 @@ not speculative game-compat work.
       | `0x20` | 2nd | `(val & 0x80) \| 0x10 \| ((data[2] >> 4) & 0x0F)` — Right/Left/Down/Up |
       | `0x40` | 3rd | `(val & 0x80) \| 0x10 \| (data[2] & 0x0F)` — Start/A/C/B |
       | `0x00` | 4th | `(val & 0x80) \| 0x10 \| ((data[3] >> 4) & 0x0F)` — R/X/Y/Z |
-- [ ] **DDR1 write** — the peripheral-ID nibble table (§6.3), switching on port 1's **status
+- [x] **DDR1 write** — the peripheral-ID nibble table (§6.3), switching on port 1's **status
       byte** then its first peripheral ID:
       | `data[0]` | `data[1]` | `PDR1 ←` |
       |---|---|---|
@@ -795,16 +795,16 @@ not speculative game-compat work.
       | anything else (incl. `0x16` tap) | — | `0x71` |
       §6.3's formatting trap (`break` outside the `if`, so case `0xA0` never falls through into
       `0xF0`) is a C artifact; the table above is the intended behavior and is what to write.
-- [ ] **DDR2 write** (`0x7B`): §1.2/§6.3/§10.1 #28 record that Yabause has **no `case 0x7B`**,
+- [x] **DDR2 write** (`0x7B`): §1.2/§6.3/§10.1 #28 record that Yabause has **no `case 0x7B`**,
       so port 2 gets no ID handshake at all. That is a defect, not hardware. **Implement the
       symmetric DDR2 handler** against port 2, and flag the divergence from the reference in
       the doc comment. (The BIOS writes DDR2 during boot — trace #13 — so the path is live.)
-- [ ] **IOSEL** (`0x7D`): §6.4/§10.1 #27 — Yabause stores it and never reads it, behaving as
+- [x] **IOSEL** (`0x7D`): §6.4/§10.1 #27 — Yabause stores it and never reads it, behaving as
       though both the SMPC-managed and direct-access paths are permanently enabled. Keep it as
       stored-only for now, with a comment naming the real meaning (per-port select between the
       two access paths) so a future gate has an obvious home. Do not invent gating semantics
       this source cannot supply.
-- [ ] **EXLE** (`0x7F`) bit 0 (§6.4): when VDP2's `EXTEN & 0x200` is set **and** `EXLE & 1`, at
+- [x] **EXLE** (`0x7F`) bit 0 (§6.4): when VDP2's `EXTEN & 0x200` is set **and** `EXLE & 1`, at
       **V-Blank OUT** latch `HCNT = (port1.data[3] << 8 | port1.data[4]) << 1`,
       `VCNT = (port1.data[5] << 8 | port1.data[6])`, `TVSTAT |= 0x200`. §6.4 records the
       reference's own admission that this should fire at the beam position, not once per frame,
@@ -814,21 +814,21 @@ not speculative game-compat work.
 
 **Testing (Phase 5)** — every value hand-computed from §6.2/§6.3's formulas.
 
-- [ ] `pdr1_four_phase_idle_pad`: one idle pad (`data[2] = data[3] = 0xFF`), `DDR1 = 0x60`.
+- [x] `pdr1_four_phase_idle_pad`: one idle pad (`data[2] = data[3] = 0xFF`), `DDR1 = 0x60`.
       Write `0x60` → PDR1 **`0x1C`** (`0x14 | (0xFF & 0x08)`); `0x20` → **`0x1F`**;
       `0x40` → **`0x1F`**; `0x00` → **`0x1F`**.
-- [ ] `pdr1_four_phase_a_and_right`: `data[2] = 0x7B` (from Phase 4's derivation),
+- [x] `pdr1_four_phase_a_and_right`: `data[2] = 0x7B` (from Phase 4's derivation),
       `data[3] = 0xFF`. `0x60` → **`0x1C`**; `0x20` → **`0x17`** (`0x10 | (0x7B >> 4)`);
       `0x40` → **`0x1B`** (`0x10 | (0x7B & 0xF)`); `0x00` → **`0x1F`**.
-- [ ] `pdr1_preserves_written_bit7`: write `0xE0` (`0x80 | 0x60`) with an idle pad →
+- [x] `pdr1_preserves_written_bit7`: write `0xE0` (`0x80 | 0x60`) with an idle pad →
       **`0x9C`**.
-- [ ] `ddr1_id_nibble_table`: pad → **`0x7C`**; nothing connected → **`0x7F`**; multi-tap →
+- [x] `ddr1_id_nibble_table`: pad → **`0x7C`**; nothing connected → **`0x7F`**; multi-tap →
       **`0x71`**; mouse → **`0x70`**; 3D pad → **`0x71`**. Assert for `DDR1 & 0x7F` of both
       `0x00` and `0x40` (§6.3: shared body).
-- [ ] `ddr2_mirrors_ddr1_against_port2`: the deliberate divergence from §10.1 #28.
-- [ ] `unknown_control_method_leaves_pdr_untouched`: `DDR1 = 0x20`, write PDR1, assert PDR1 is
+- [x] `ddr2_mirrors_ddr1_against_port2`: the deliberate divergence from §10.1 #28.
+- [x] `unknown_control_method_leaves_pdr_untouched`: `DDR1 = 0x20`, write PDR1, assert PDR1 is
       unchanged from a pre-seeded sentinel (§6.1's default arm).
-- [ ] Real-BIOS smoke: the §0.6 capture must still show trace #12-#15 and must not gain any new
+- [x] Real-BIOS smoke: the §0.6 capture must still show trace #12-#15 and must not gain any new
       `Smpc(…) R` that returns a value the BIOS then loops on.
 
 ---
@@ -849,7 +849,7 @@ run. Doing this earlier risks breaking the working §0.6 handshake with no test 
       **Do not port §3.3's `[BUG]` #4** (the "anything else" row leaves `timing` unassigned, so
       the command never dispatches and SF never clears — an infinite spin for any
       `IREG0 ∉ {0x00, 0x01}`). Mimas must assign a timing on every path.
-- [ ] **`intback_wait_for_line`** (§3.2): the peripheral fetch is additionally gated on reaching
+- [x] **`intback_wait_for_line`** (§3.2): the peripheral fetch is additionally gated on reaching
       **scanline 207** (18 lines before the default V-Blank IN at line 225). Mimas has no
       scanline counter — VBLANK is wall-clock (`sh2.rs:1688-1706`, `VBLANK_INTERVAL`
       `16_666 µs`, `VBLANK_DURATION` `2_417 µs`). Either derive an equivalent wall-clock instant
@@ -857,9 +857,9 @@ run. Doing this earlier risks breaking the working §0.6 handshake with no test 
       line counter. Prefer the line counter — VDP2 will need one anyway
       (`docs/implementation-plans/vdp2.md`) — but a documented wall-clock approximation is
       acceptable as an intermediate step.
-- [ ] **SF becomes genuinely busy**: set SF=1 on COMREG write, clear it when the timer expires
+- [x] **SF becomes genuinely busy**: set SF=1 on COMREG write, clear it when the timer expires
       and the command dispatches. This is only safe with the whole Phase 1 SF test set green.
-- [ ] **Move execution to Core 7** (`lib.rs:343-360`, currently a pure idle spin). Core 7 owns
+- [x] **Move execution to Core 7** (`lib.rs:343-360`, currently a pure idle spin). Core 7 owns
       the countdown and calls `Smpc::tick(elapsed_us, &work_ram)`; the SH-2's COMREG write only
       *arms* it. Per `CLAUDE.md`'s zero-polling rule and `history.md`'s distilled principle 1,
       Core 7 must **park on a `Condvar` when no command is armed** and be woken by the arming
@@ -867,31 +867,31 @@ run. Doing this earlier risks breaking the working §0.6 handshake with no test 
       already use (`lib.rs:165-168`, `lib.rs:322-338`, and `sh2.rs:732-736`'s
       `set_thread_active(6, true)` on the DSP `EX` write). Do **not** add another
       `yield_now` spinner.
-- [ ] **`SmpcEffects` must now cross a thread boundary.** `system_manager_irq` becomes an
+- [x] **`SmpcEffects` must now cross a thread boundary.** `system_manager_irq` becomes an
       `Arc<AtomicBool>` that Core 0 polls in `service_pending_interrupt`, exactly like
       `sound_req_irq` (`sh2.rs:148`, `lib.rs:60`, `lib.rs:254`) — replacing today's
       `Sh2`-private `smpc_irq_pending` bool (`sh2.rs:138`). Use `Release`/`Acquire`, per the
       ordering contract documented at `sh2.rs:97-108`; `Relaxed` was a measured real bug in
       this codebase before (`history.md` Chapter 7).
-- [ ] `sh2.rs`'s `MemRegion::Smpc` arms shrink to: store byte, update `bustmp`, and on COMREG
+- [x] `sh2.rs`'s `MemRegion::Smpc` arms shrink to: store byte, update `bustmp`, and on COMREG
       arm the SMPC + wake Core 7. No command logic left in `sh2.rs`.
-- [ ] Update `CLAUDE.md`'s thread table (Core 7 row) and
+- [x] Update `CLAUDE.md`'s thread table (Core 7 row) and
       `docs/mimas_emu_engineering_draft.md` §1.1 / §6's divergence notes.
 
 **Testing (Phase 6)**
 
-- [ ] `sf_is_busy_between_arm_and_dispatch`: arm INTBACK, assert SF bit 0 == 1 before the
+- [x] `sf_is_busy_between_arm_and_dispatch`: arm INTBACK, assert SF bit 0 == 1 before the
       timer expires, 0 after. Drive the clock deterministically (inject elapsed µs), never
       `thread::sleep`.
-- [ ] `intback_timing_table`: assert the armed delay is `250 µs` for `IREG0=0x01` (both IREG1
+- [x] `intback_timing_table`: assert the armed delay is `250 µs` for `IREG0=0x01` (both IREG1
       variants) and `16000 µs` for `IREG0=0x00, IREG1 & 0x08` — §3.3, hand-transcribed.
-- [ ] `intback_with_malformed_ireg0_still_dispatches`: `IREG0 = 0x03` — the §3.3 `[BUG]` #4
+- [x] `intback_with_malformed_ireg0_still_dispatches`: `IREG0 = 0x03` — the §3.3 `[BUG]` #4
       case. Must complete and clear SF, not spin.
-- [ ] `every_other_command_takes_1us`: table-driven over §3.3's 1 µs list.
-- [ ] `core7_parks_when_no_command_is_armed`: reuse the parking-measurement approach from
+- [x] `every_other_command_takes_1us`: table-driven over §3.3's 1 µs list.
+- [x] `core7_parks_when_no_command_is_armed`: reuse the parking-measurement approach from
       `history.md` Chapter 10 / the existing parking tests — assert Core 7 is not woken at high
       frequency by unrelated `sync_core` traffic (the exact bug Chapter 10 found).
-- [ ] Full real-BIOS re-run and `[REGACCESS]` diff against the Phase 5 baseline. The BIOS
+- [x] Full real-BIOS re-run and `[REGACCESS]` diff against the Phase 5 baseline. The BIOS
       `0x1D5A-0x1D64` poll loop must still exit.
 
 ---
@@ -900,14 +900,23 @@ run. Doing this earlier risks breaking the working §0.6 handshake with no test 
 
 Game-compatibility work; nothing here affects BIOS boot. Ordered last deliberately.
 
+**Status: mostly done.** `PeripheralState` (`peripheral.rs`) replaced the old pad-only
+`port1`/`port2` typing; every single-peripheral-per-port type below is implemented, byte-exact
+against §9.3-9.7, and tested. Multi-tap and the live gun/VDP2 latch path are explicitly deferred
+(see their own items) -- both are genuinely separate, large pieces of work, not partial
+implementations of what's listed here.
+
 - [ ] **Multi-tap promotion** (§9.2): first peripheral on an empty port → `data[0] = 0xF1` (or
       `0xA0` for a gun); a second → promote to `data[0] = 0x16`, pad the previously-direct
       peripheral out to 6 slots with single `0xFF` bytes, then walk to the first free slot.
       Trailing unused slots each contribute one `0xFF` byte and increment `size` (§9.2).
       **Do not port** §9.2's `[BUG]` #36 (adding to a gun-holding port overwrites the gun),
       `[BUG]` #37 (a gun accepted into a promoted tap truncates the whole report to 1 byte), or
-      `[DEAD]` #38 (the unreachable `pernum == 0xF` guard).
-- [ ] **Per-type report initialisers** (§9.3), `size = first_data_byte_index + (id & 0x0F)`:
+      `[DEAD]` #38 (the unreachable `pernum == 0xF` guard). **Deliberately deferred** -- `PortData`
+      as designed (one `id` + one flat `data[]`) only models a single peripheral per port; a real
+      6-slot tap needs a genuinely different shape (multiple IDs, dynamic slot management, the
+      >32-byte chunking edge cases §5.4 documents), not a small extension of what's here.
+- [x] **Per-type report initialisers** (§9.3), `size = first_data_byte_index + (id & 0x0F)`:
       | Type | ID | Bytes | Initial |
       |---|---|---|---|
       | Pad | `0x02` | 2 | `FF FF` |
@@ -915,19 +924,25 @@ Game-compatibility work; nothing here affects BIOS boot. Ordered last deliberate
       | Mission stick | `0x15` | 5 | `FF FF 7F 7F 7F` |
       | 3D pad | `0x16` | 6 | `FF FF 7F 7F 7F 7F` |
       | Twin sticks | `0x19` | 9 | `FF FF 7F 7F 7F 7F 7F 7F 7F` |
-      | Gun | `0x25` | 5 | `7C FF FF FF FF`, then `size = 1` |
+      | Gun | `0x25` | 5 | `7C FF FF FF FF`, then contributes only its status byte to the report |
       | Keyboard | `0x34` | 4 | `FF F8 06 00` |
       | Mouse | `0xE3` | 3 | `00 00 00` |
-      **Fix §9.3's `[BUG]` #39** while transcribing: twin sticks declares 9 data bytes but the
-      reference initialises only 8, leaving `analogbits[8]` (axis 7) at `0x00` instead of the
-      neutral `0x7F`. Mimas must initialise all 9 — the table above already does.
-- [ ] **Analog axes** (§9.5): `analogbits[0..1]` are the two digital bytes; `analogbits[2..8]`
+      Fixed §9.3's `[BUG]` #39 while transcribing, per this table: twin sticks' 9th byte
+      (axis 7) defaults to the neutral `0x7F`, not the real hardware's un-initialized `0x00`.
+      Gun's real `port->size == 1` (a flat-array byte count that includes the status byte
+      itself) has no direct equivalent in `PortData`'s split status/id/data model -- the
+      equivalent there is `size == 0` (zero *extra* bytes past the status byte
+      `chunk_port_data` already writes unconditionally); getting this wrong was a real bug
+      caught while implementing (`docs/hardware-reference/smpc-peripheral.md` §5.5).
+- [x] **Analog axes** (§9.5): `analogbits[0..1]` are the two digital bytes; `analogbits[2..8]`
       are axes 1-7, one byte each, neutral `0x7F`. Reported count depends on the declared data
       length: wheel = axis 1; mission stick = axes 1-3; 3D pad = axes 1-4; twin sticks = axes
-      1-7. Axis 3 is inverted for mission stick; axis 7 is inverted for twin sticks (§9.5 notes
-      both carry the same copy-pasted comment — §10.1 #40 — so derive from the *code paths*,
-      not the comments).
-- [ ] **Digital synthesis from analog axes with hysteresis** (§9.5), exact thresholds:
+      1-7. Axis 3 (mission stick) / axis 7 (twin sticks) are where real hardware's setter
+      applies an inversion to a *live* joystick reading before storing -- since no live analog
+      input frontend exists to drive that setter, `MissionStickState::axis3`/
+      `TwinSticksState::axis7` are treated as already-encoded wire bytes instead (documented on
+      each field), avoiding a double-inversion bug an earlier draft had.
+- [x] **Digital synthesis from analog axes with hysteresis** (§9.5), exact thresholds:
       | Device | Axis | Press | Release | Bit |
       |---|---|---|---|---|
       | Wheel | 1 | `≤ 0x67` | `≥ 0x6F` | 6 (Left) |
@@ -937,52 +952,82 @@ Game-compatibility work; nothing here affects BIOS boot. Ordered last deliberate
       | Mission stick, twin sticks | 2 | `≤ 0x65` | `≥ 0x6A` | 4 (Up) |
       | Mission stick, twin sticks | 2 | `≥ 0xA9` | `≤ 0x94` | 5 (Down) |
       3D pad gets **no** synthesis — its D-pad is driven through the ordinary pad path (§9.5).
-- [ ] **Mouse** (§9.6), ID `0xE3`, 3 data bytes, buttons **active-high** (opposite of the pad):
+      **Simplification**: only the press thresholds are implemented -- `to_port_data(&self)` is a
+      pure function of the current axis value with no memory of the previous digital bit, so true
+      hysteresis (which needs that memory to pick the *release* threshold once already pressed)
+      isn't representable without a stateful setter. No live analog input caller exists yet to
+      need the difference; revisit if one is ever wired.
+- [x] **Mouse** (§9.6), ID `0xE3`, 3 data bytes, buttons **active-high** (opposite of the pad):
       `mousebits[0]` bit 0 Left, 1 Right, 2 Middle, 3 Start, 4 X-sign, 5 Y-sign, 6 X-overflow,
       7 Y-overflow; `mousebits[1]` X displacement, `mousebits[2]` Y displacement. Magnitudes are
-      stored as the **one's complement** when the sign bit is set. §10.1 #41 notes the overflow
-      bits are read and preserved but never generated — **generate them**, since real hardware
-      does, and say so.
-- [ ] **Mouse flush at snapshot** (§9.6, the `PerFlush` equivalent): clear sign + overflow bits
-      (`mousebits[0] &= 0x0F`), zero both displacement bytes. **Fix §10.1 #42**: flush *every*
-      mouse on the port, not only slot 1, and match on the mouse ID constant, not a literal.
-- [ ] **Keyboard** (§9.7), ID `0x34`, 4 bytes, initial `FF F8 06 00`. §10.1 #44 records that the
+      stored as the **one's complement** when the sign bit is set (already-encoded wire byte,
+      same convention as the analog axes above). **Deliberately not done**: overflow-bit
+      *generation*. §10.1 #41 and this table both ask for it, but
+      `docs/hardware-reference/smpc-peripheral.md` §9.6 is explicit that the reference itself has
+      "no saturation and no overflow-flag generation" -- there is no citable formula anywhere in
+      this project's source material for what threshold/condition real silicon would use, and
+      guessing one would violate `CLAUDE.md`'s "never assert a value you haven't independently
+      derived" rule. Revisit if an authoritative source for the real trigger condition surfaces.
+- [x] **Mouse flush at snapshot** (§9.6, the `PerFlush` equivalent): clear sign + overflow bits
+      (`mousebits[0] &= 0x0F`), zero both displacement bytes. Fixed §10.1 #42 while implementing:
+      flushes whichever peripheral is actually on each port by matching on the `Mouse` variant
+      itself (not a literal ID byte), so it isn't limited to "slot 1" the way the reference's
+      pointer-arithmetic version is -- moot today since multi-tap (multiple slots per port) is
+      deferred, but the fix costs nothing extra and removes a known real bug outright rather than
+      porting it into a design where it would otherwise resurface once multi-tap lands.
+- [x] **Keyboard** (§9.7), ID `0x34`, 4 bytes, initial `FF F8 06 00`. §10.1 #44 records that the
       reference registers no input callbacks at all — the keyboard can be enumerated but no key
-      can ever be pressed. This source cannot supply the key encoding, so: implement
-      enumeration + the DDR1 ID (`PDR1 = 0x71`, §6.3) and **explicitly document that key input
-      is unimplemented** rather than guessing a scancode format.
+      can ever be pressed. Matches: `KeyboardState` is a unit struct, DDR1 reports `0x71` (§6.3)
+      when connected, and no key-input API exists -- documented as report-shape-only, not guessed.
 - [ ] **Light gun** (§6.5, §9.3): buttons in `data[2]`, active-low, bit 4 Trigger, bit 5 Start,
       initial `0x7C` (which is also the DDR1 ID value, §6.3). Absolute position big-endian
-      across `data[3..7]`. §6.5 records the reference's `/4` scale, inverted Y, and clamps
-      hard-coded to 320×224 with `// fix me` — derive the clamp from the **current VDP2
-      resolution** instead (§10.1 #34).
-- [ ] **Gun and the report** (§5.5, §10.1 #35): a gun forces `port->size = 1`, so it never
-      appears in the INTBACK stream at all — all gun state goes through PDR1 (§6.2) and the VDP2
-      external latch (§6.4). Preserve that, and wire the Phase 5 EXLE hook now that the four
-      coordinate bytes exist.
-- [ ] Extend `PeripheralKind` and `SaturnSystem::set_port_peripheral` to cover every type above.
+      across `data[3..7]`. **Partial**: `GunState` stores trigger/start/x/y and PDR1/PDR2 mode
+      `0x00`'s gun-button read (§6.2) is wired and tested. The VDP2 external-latch position path
+      (§6.4/§6.5, `/4` scale, inverted Y, resolution-derived clamp) is **deliberately deferred**
+      -- it needs both a live gun-position input source (no frontend supplies pointer/gun input
+      today, mirroring the pad's own "only player 1 via keyboard" limitation) and VDP2
+      external-latch register wiring, neither of which this phase's scope reaches.
+- [x] **Gun and the report** (§5.5, §10.1 #35): a gun forces its report down to the status byte
+      alone (`PortData::size == 0` in this crate's model, see above) -- confirmed by a dedicated
+      end-to-end test (`gun_contributes_only_its_status_byte_to_the_intback_stream`), not just
+      asserted in isolation.
+- [x] Extend `PeripheralKind` and `SaturnSystem::set_port_peripheral`/`set_peripheral_state` to
+      cover every type above.
 
 **Testing (Phase 7)**
 
-- [ ] `multitap_two_pads_report`: §5.5's worked example verbatim — two idle digital pads on
-      port 1 → **`16 02 FF FF 02 FF FF FF FF FF FF`**, `size == 11` (status byte, two 3-byte
-      entries, four `0xFF` empty-slot bytes).
-- [ ] `per_type_initial_reports`: table-driven over §9.3's initial-value table, asserting both
-      the bytes **and** the resulting `size` (including the gun's forced `size == 1`).
-- [ ] `twin_sticks_axis7_is_neutral`: **`0x7F`**, not `0x00` — the §9.3 `[BUG]` #39 fix.
-- [ ] `analog_hysteresis_thresholds`: table-driven over §9.5, including the *gap* values
-      between press and release thresholds (e.g. wheel axis 1 at `0x6B` must change nothing in
-      either direction).
-- [ ] `mouse_buttons_are_active_high`: the opposite polarity from the pad — press Left → bit 0
+- [ ] `multitap_two_pads_report`: deferred with multi-tap itself.
+- [x] `per_type_initial_reports`: table-driven over §9.3's initial-value table, asserting both
+      the bytes **and** the resulting `size` (including the gun's `size == 0` in this crate's
+      model).
+- [x] `twin_sticks_axis7_is_neutral` (folded into `per_type_initial_reports`): **`0x7F`**, not
+      `0x00` — the §9.3 `[BUG]` #39 fix.
+- [x] `wheel_hysteresis_press_thresholds_match_the_reference_table`: the press-threshold subset
+      of §9.5's table (see the "Simplification" note on digital synthesis above for why the gap/
+      release-threshold cases aren't meaningfully testable against a stateless implementation).
+- [x] `ddr_id_nibble_covers_every_connected_type`: all nine `PeripheralState` variants against
+      §6.3's full table, including the "unsupported, PDR left untouched" row.
+- [x] `mouse_buttons_are_active_high`: the opposite polarity from the pad — press Left → bit 0
       **set** (§9.6), directly contrasted against the pad test from Phase 4.
-- [ ] `mouse_negative_displacement_is_ones_complement`: move `-1` in X → sign bit 4 set and
+- [x] `mouse_negative_displacement_is_ones_complement`: move `-1` in X → sign bit 4 set and
       `mousebits[1] == 0xFE` (`!1`), per §9.6.
-- [ ] `mouse_flush_clears_deltas_but_keeps_buttons`: §9.6 — after a snapshot, `mousebits[0]`
+- [x] `mouse_flush_clears_deltas_but_keeps_buttons`: §9.6 — after a snapshot, `mousebits[0]`
       retains its low nibble and loses bits 4-7; bytes 1-2 are zero.
-- [ ] `gun_never_appears_in_intback_report`: gun on port 1 → OREG0 == **`0xA0`**, OREG1 ==
-      port 2's status byte (§5.5's worked example), `port1.size == 1`.
-- [ ] `exle_latches_gun_position_at_vblank_out`: with `EXTEN & 0x200` and `EXLE & 1`, assert
-      `HCNT == x << 1`, `VCNT == y`, `TVSTAT & 0x200` (§6.4).
+- [x] `gun_contributes_only_its_status_byte_to_the_intback_stream`: gun on port 1, pad on port 2
+      → OREG0 == `0xA0`, OREG1 == port 2's own status byte immediately following (§5.5's worked
+      example shape), no ID/data bytes for the gun at all.
+- [ ] `exle_latches_gun_position_at_vblank_out`: deferred with the live gun/VDP2 latch path.
+- [x] Also added beyond the plan's own list, once real bugs were found while restoring Phase 5's
+      PDR/DDR handling (a regression from an earlier pass on this phase, unrelated to Phase 7's
+      own scope but caught and fixed in the same pass): `pdr1_four_phase_idle_pad`,
+      `pdr1_four_phase_a_and_right`, `pdr1_preserves_written_bit7`,
+      `pdr1_gun_button_read_at_mode_0x00`, `unknown_control_method_leaves_pdr_untouched`,
+      `ckchg352_sets_dotsel_and_ckchg320_clears_it`, `port1_defaults_to_a_connected_pad_port2_to_disconnected`,
+      `set_port_peripheral_and_set_peripheral_state_both_reach_ddr_and_intback`,
+      `intback_peripheral_one_pad_port1_matches_the_worked_example`,
+      `intback_peripheral_both_ports_empty_matches_the_worked_example`,
+      `intback_peripheral_sr_first_vs_subsequent`,
+      `intback_break_clears_sr_high_nibble_and_drops_the_snapshot`.
 
 ---
 
