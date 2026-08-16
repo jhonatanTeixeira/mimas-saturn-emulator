@@ -233,8 +233,18 @@ mod tests {
 
     #[test]
     fn test_tier1_f4_scu_initialization() {
-        let _scu = Scu::new();
-        // Stub check
+        // Real SCU (docs/implementation-plans/scu.md Phase 2): reset values
+        // from docs/hardware-reference/scu.md §0.1, independently derived
+        // from that table rather than from this module's own defaults.
+        let scu = Scu::new();
+        assert_eq!(scu.raw_read_long(0x0C), 0x101, "D0AD resets to 0x101");
+        assert_eq!(scu.raw_read_long(0x14), 0x7, "D0MD resets to 0x7");
+        assert_eq!(scu.raw_read_long(0xA0), 0xBFFF, "IMS resets to 0xBFFF");
+        assert_eq!(scu.read_long(0xC8), 0x04, "VER is hardwired to 0x04");
+        assert!(
+            !scu.dsp.lock().unwrap().is_executing(),
+            "the DSP must start idle"
+        );
     }
 
     #[test]
@@ -614,14 +624,14 @@ mod tests {
 
     // --- Feature 4: Saturn Peripherals & SCU DSP ---
 
-    #[test]
-    fn test_tier2_f4_scu_dma_channel_bounds() {
-        let mut scu = Scu::new();
-        assert!(
-            scu.start_dma(3).is_err(),
-            "SCU accepted invalid DMA channel"
-        );
-    }
+    // test_tier2_f4_scu_dma_channel_bounds (the old `Scu::start_dma(3)` stub
+    // test) is deleted, not rewritten -- docs/implementation-plans/scu.md
+    // Phase 2: "invalid channel" was never a hardware concept. Real SCU
+    // hardware decodes exactly three DMA levels at fixed offsets (0x00/
+    // 0x20/0x40); there is no "channel number" register or bounds check to
+    // reject, and every offset the real register map doesn't decode just
+    // falls into the ordinary unhandled-register default (covered by
+    // `test_tier1_f4_scu_initialization` and `scu.rs`'s own unit tests).
 
     #[test]
     fn test_tier2_f4_smpc_intback_reports_normal_startup() {

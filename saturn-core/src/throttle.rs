@@ -34,6 +34,16 @@ pub const M68K_CLOCK_HZ: f64 = 44_100.0 * 256.0;
 /// for details on the M68K side.
 pub const M68K_NOMINAL_CYCLES_PER_INSTRUCTION: u64 = 8;
 
+/// Real SCSP output sample rate. Derived from `M68K_CLOCK_HZ` (not a second
+/// independent literal) since that constant's own citation already
+/// establishes it: `SCSP_CLOCK_FREQ` is "11.2896 MHz", and `256` output
+/// samples' worth of that clock is exactly `44_100.0 * 256.0` -- i.e. the
+/// master clock runs at 256 cycles per output sample, a standard ratio for
+/// this class of audio chip. Paces `Scsp::synthesize`'s batches so Core 5
+/// doesn't spin flat-out (unless `ThrottleSpeed::Unthrottled`, the default)
+/// synthesizing audio far faster than anything could ever play it back.
+pub const SCSP_SAMPLE_RATE_HZ: f64 = M68K_CLOCK_HZ / 256.0;
+
 /// Target amount of emulated time per pacing batch. Large enough that OS
 /// sleep-precision error (microseconds at best) is negligible relative to
 /// it; small enough that frame timing and shutdown responsiveness (which

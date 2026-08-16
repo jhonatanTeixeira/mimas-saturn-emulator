@@ -325,9 +325,16 @@ impl ScuDsp {
     /// set -- callers (Core 2's thread loop) should check `is_executing()`
     /// first, matching real hardware only clocking the DSP while it's
     /// actually running a program.
-    pub fn step(&mut self, work_ram: &WorkRam) {
+    /// Returns `true` exactly on the instruction where an `ENDI` (END with
+    /// interrupt-request set) just executed -- the caller (Core 6,
+    /// `lib.rs`) uses that to call `Scu::dsp_end()` *after* this returns,
+    /// once the `dsp` lock this method runs under is released, matching
+    /// the same "signal while locked, act after releasing" shape
+    /// `Scu::tick_timer0_and_arm_timer1` already uses for its own
+    /// same-module callback (`docs/implementation-plans/scu.md` Phase 6).
+    pub fn step(&mut self, work_ram: &WorkRam) -> bool {
         if !self.is_executing() {
-            return;
+            return false;
         }
 
         if self.prog_control & PCP_T0 != 0 {
@@ -349,12 +356,18 @@ impl ScuDsp {
         self.execute_alu(instruction);
 
         let top2 = (instruction >> 30) & 0x3;
-        match top2 {
-            0x0 => self.execute_operation(instruction, work_ram),
-            0x2 => self.execute_load_immediate(instruction, work_ram),
+        let dsp_end = match top2 {
+            0x0 => {
+                self.execute_operation(instruction, work_ram);
+                false
+            }
+            0x2 => {
+                self.execute_load_immediate(instruction, work_ram);
+                false
+            }
             0x3 => self.execute_other(instruction, work_ram),
-            _ => {}
-        }
+            _ => false,
+        };
 
         // Pending CT increments apply after the whole instruction body, but
         // before PC advances (`scu.c:1949-1954`).
@@ -373,6 +386,8 @@ impl ScuDsp {
                 self.delayed = true;
             }
         }
+
+        dsp_end
     }
 
     /// ALU op group, cross-checked against `scu.c`'s switch on
@@ -566,11 +581,19 @@ impl ScuDsp {
     }
 
     /// "Other" group (top2 == 0b11): DMA/JMP/Loop/End, cross-checked
-    /// against `scu.c`'s `case 0x03` block.
-    fn execute_other(&mut self, instruction: u32, work_ram: &WorkRam) {
+    /// against `scu.c`'s `case 0x03` block. Returns `true` exactly for an
+    /// `ENDI` (End Commands, interrupt-request bit set) -- see `step`'s own
+    /// doc comment for how that propagates to `Scu::dsp_end()`.
+    fn execute_other(&mut self, instruction: u32, work_ram: &WorkRam) -> bool {
         match (instruction >> 28) & 0xF {
-            0xC => self.start_dma(instruction, work_ram), // DMA Commands
-            0xD => self.execute_jump(instruction),        // Jump Commands
+            0xC => {
+                self.start_dma(instruction, work_ram); // DMA Commands
+                false
+            }
+            0xD => {
+                self.execute_jump(instruction); // Jump Commands
+                false
+            }
             0xE => {
                 // Loop bottom Commands
                 if instruction & 0x0800_0000 != 0 {
@@ -586,16 +609,21 @@ impl ScuDsp {
                     self.delayed = false;
                     self.lop -= 1;
                 }
+                false
             }
             0xF => {
                 // End Commands
                 self.prog_control &= !PCP_EX;
-                if instruction & 0x0800_0000 != 0 {
+                let is_endi = instruction & 0x0800_0000 != 0;
+                if is_endi {
                     self.prog_control |= PCP_E;
                     // Real hardware also raises the SCU DSP-End interrupt
-                    // here (`ScuSendDSPEnd`) -- not wired to an SH-2
-                    // interrupt vector yet; the BIOS program traced for
-                    // this wall uses plain END (no interrupt requested).
+                    // here (`ScuSendDSPEnd`, vector 0x45, level 10, mask
+                    // 0x0020) -- `docs/implementation-plans/scu.md` Phase 6
+                    // wires this: the caller raises it via `Scu::dsp_end()`
+                    // once this method's `dsp` lock is released, not from
+                    // in here (would violate this crate's `regs`/`irq`
+                    // before `dsp` lock-ordering rule).
                 }
                 // D-DSP-5: real hardware writes PC+1 here (`scu.c`:
                 // `ProgControlPort.part.P = ScuDsp->PC+1;`), anticipating
@@ -603,8 +631,9 @@ impl ScuDsp {
                 // after this switch -- not the pre-increment `PC` a naive
                 // read would use.
                 self.prog_control = (self.prog_control & !0xFF) | (self.pc.wrapping_add(1) as u32);
+                is_endi
             }
-            _ => {}
+            _ => false,
         }
     }
 
@@ -897,7 +926,15 @@ impl Default for ScuDsp {
 }
 
 /// Which `WorkRam` region a DSP-DMA address decodes to (D-DSP-6).
-enum DspRegion {
+///
+/// `pub(crate)`: also reused by `scu.rs`'s Phase 4 DMA engine
+/// (`docs/implementation-plans/scu.md` Phase 4) for its own main-RAM/
+/// peripheral reads and writes -- both engines target the exact same
+/// address space (Low WRAM, Sound RAM, SCSP regs, VDP1/VDP2 RAM/regs, CS2
+/// regs, High WRAM), so sharing this one decode table avoids a third
+/// hand-copied boundary table alongside `Sh2::translate`'s (the doc comment
+/// on `decode` below already notes it's a *second* copy of that one).
+pub(crate) enum DspRegion {
     LowRam,
     SoundRam,
     ScspRegs,
@@ -920,7 +957,7 @@ enum DspRegion {
 /// `sh2.rs`'s `translate` remains the source of truth (cross-checked
 /// against Yabause's `memory.c`). Unmapped A-Bus/cartridge space and
 /// anything else reads `0` / discards writes -- `None`.
-fn decode(address: u32) -> Option<(DspRegion, usize)> {
+pub(crate) fn decode(address: u32) -> Option<(DspRegion, usize)> {
     let a = address & 0x0FFF_FFFF;
     if (0x0020_0000..0x0030_0000).contains(&a) {
         Some((DspRegion::LowRam, (a - 0x0020_0000) as usize))
@@ -949,7 +986,7 @@ fn decode(address: u32) -> Option<(DspRegion, usize)> {
     }
 }
 
-fn read_long(work_ram: &WorkRam, address: u32) -> u32 {
+pub(crate) fn read_long(work_ram: &WorkRam, address: u32) -> u32 {
     match decode(address) {
         Some((DspRegion::LowRam, off)) => {
             read_long_from(&work_ram.low_ram.read().unwrap()[..], off)
@@ -986,7 +1023,7 @@ fn read_long(work_ram: &WorkRam, address: u32) -> u32 {
     }
 }
 
-fn write_long(work_ram: &WorkRam, address: u32, val: u32) {
+pub(crate) fn write_long(work_ram: &WorkRam, address: u32, val: u32) {
     match decode(address) {
         Some((DspRegion::LowRam, off)) => {
             write_long_to(&mut work_ram.low_ram.write().unwrap()[..], off, val)
@@ -1025,7 +1062,7 @@ fn write_long(work_ram: &WorkRam, address: u32, val: u32) {
     }
 }
 
-fn write_word(work_ram: &WorkRam, address: u32, val: u16) {
+pub(crate) fn write_word(work_ram: &WorkRam, address: u32, val: u16) {
     match decode(address) {
         Some((DspRegion::LowRam, off)) => {
             write_word_to(&mut work_ram.low_ram.write().unwrap()[..], off, val)
@@ -1064,6 +1101,48 @@ fn write_word(work_ram: &WorkRam, address: u32, val: u16) {
     }
 }
 
+/// `docs/hardware-reference/scu.md` §2.4's 16-bit copy-mode unit -- not
+/// needed by DSP DMA itself (which never reads the D1 bus, only writes to
+/// it), added here alongside `write_word` purely so `scu.rs`'s Phase 4 DMA
+/// engine can reuse this module's one decode table rather than adding its
+/// own read-only counterpart.
+pub(crate) fn read_word(work_ram: &WorkRam, address: u32) -> u16 {
+    match decode(address) {
+        Some((DspRegion::LowRam, off)) => {
+            read_word_from(&work_ram.low_ram.read().unwrap()[..], off)
+        }
+        Some((DspRegion::SoundRam, off)) => {
+            read_word_from(&work_ram.sound_ram.read().unwrap()[..], off)
+        }
+        Some((DspRegion::ScspRegs, off)) => {
+            read_word_from(&work_ram.scsp_regs.read().unwrap()[..], off)
+        }
+        Some((DspRegion::Vdp1Vram, off)) => {
+            read_word_from(&work_ram.vdp1_vram.read().unwrap()[..], off)
+        }
+        Some((DspRegion::Vdp1Framebuffer, off)) => {
+            read_word_from(&work_ram.vdp1_framebuffer.read().unwrap()[..], off)
+        }
+        Some((DspRegion::Vdp1Regs, off)) => {
+            read_word_from(&work_ram.vdp1_regs.read().unwrap()[..], off)
+        }
+        Some((DspRegion::Vdp2Vram, off)) => {
+            read_word_from(&work_ram.vdp2_vram.read().unwrap()[..], off)
+        }
+        Some((DspRegion::Vdp2Cram, off)) => {
+            read_word_from(&work_ram.vdp2_cram.read().unwrap()[..], off)
+        }
+        Some((DspRegion::Vdp2Regs, off)) => {
+            read_word_from(&work_ram.vdp2_regs.read().unwrap()[..], off)
+        }
+        Some((DspRegion::Cs2Regs, off)) => {
+            read_word_from(&work_ram.cs2_regs.read().unwrap()[..], off)
+        }
+        Some((DspRegion::HighRam, off)) => work_ram.read_high_ram_word(off),
+        None => 0,
+    }
+}
+
 fn read_long_from(buf: &[u8], off: usize) -> u32 {
     let mask = buf.len() - 1;
     let b0 = buf[off & mask] as u32;
@@ -1071,6 +1150,13 @@ fn read_long_from(buf: &[u8], off: usize) -> u32 {
     let b2 = buf[(off + 2) & mask] as u32;
     let b3 = buf[(off + 3) & mask] as u32;
     (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+}
+
+fn read_word_from(buf: &[u8], off: usize) -> u16 {
+    let mask = buf.len() - 1;
+    let b0 = buf[off & mask] as u16;
+    let b1 = buf[(off + 1) & mask] as u16;
+    (b0 << 8) | b1
 }
 
 fn write_long_to(buf: &mut [u8], off: usize, val: u32) {

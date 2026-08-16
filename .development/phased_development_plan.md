@@ -74,13 +74,28 @@ already correct and doesn't need reshuffling against the other subsystems.
 
 - [x] `scu.md` Phase 1 — Finish the SCU DSP (the remaining 6 of 8 DMA addressing modes, and the
       confirmed opcode-mask bug that makes every `JMP` execute a phantom ALU op)
-- [ ] `scu.md` Phase 2 — Real SCU register file (repurpose `scu.rs`, currently dead code)
-- [ ] `scu.md` Phase 3 — SCU interrupt controller
-- [ ] `scu.md` Phase 4 — Independent SCU DMA controller on Core 6 (needed by CS2's sector reads
-      in Milestone 3)
-- [ ] `scu.md` Phase 5 — SCU timers 0 and 1
-- [ ] `scu.md` Phase 6 — Start factors, DSP End, Draw End: closing the loop (needed by VDP1
-      Phase 3 in Milestone 5)
+- [x] `scu.md` Phase 2 — Real SCU register file (repurposed `scu.rs` into a typed 256-byte
+      register file with real reset values and read/write visibility rules, plus `irq`/`dma`/
+      `timers` scaffolding for Phases 3-5; `WorkRam::scu_regs` retired). See `history.md`
+      Chapter 29.
+- [x] `scu.md` Phase 3 — SCU interrupt controller (single `Scu`-owned controller replacing the
+      four ad hoc `Sh2` bools; `Sh2::irq_in` became a plain always-present `Arc`; VBLANK
+      generation centralized on Core 3, fixing a real dual-clock bug; M68K sound-request path
+      made event-driven, removing a per-instruction poll). See `history.md` Chapter 30.
+- [x] `scu.md` Phase 4 — Independent SCU DMA controller on Core 6 (real budgeted engine —
+      direct/indirect/fill/copy modes, per-burst `BusArbiter` locking, `LockStepSync`
+      integration — replacing the synchronous `Sh2::execute_scu_dma` stand-in; fixes
+      D-DMA-1/2/3/4/5/6/7). See `history.md` Chapter 31.
+- [x] `scu.md` Phase 5 — SCU timers 0 and 1 (Timer 0 scanline compare, Timer 1 down-counter
+      driven by real Master SH-2 cycles, deviation #18 fixed not copied). H-Blank IN/V-Blank
+      IN/OUT generation also moved off Core 3's wall-clock loop onto the same cycle-driven
+      source, making Core 3 genuinely event-driven for the first time. See `history.md`
+      Chapters 33-34.
+- [x] `scu.md` Phase 6 — Start factors, DSP End, Draw End: closing the loop (all 7 DMA start
+      factors 0-6, DSP End/`ENDI` interrupt wiring). Sprite Draw End's SCU-side entry point
+      (`draw_end()`) is done and tested, but nothing calls it yet — VDP1's command-list
+      completion trigger is still deliberately deferred to `vdp1.md` Phase 3, which this
+      unblocks. See `history.md` Chapter 35.
 
 ---
 
@@ -91,13 +106,22 @@ above). `cs2-cdblock.md`'s own phase order already sequences correctly; Phase 4 
 2's SCU DMA controller.
 
 - [ ] `cs2-cdblock.md` Phase 1 — Wire the CD block into the system and decode CS2 for real
+      (this is also where Core 7 gets its first real work — replace its permanent busy-spin
+      placeholder loop with real `park_while_inactive` use, see
+      `../docs/lessons-from-yabasanshiro.md` §1)
 - [ ] `cs2-cdblock.md` Phase 2 — The CR1-4/HIRQ handshake, and the commands BIOS boot probes with
       (this is the specific phase most likely to actually move the wall)
 - [ ] `cs2-cdblock.md` Phase 3 — Drive/disc state machine and the two free-running engines
+      (size their dispatch cadence to SMPC/CD-block's own real thresholds, not the generic
+      per-core clamp used today — see `../docs/lessons-from-yabasanshiro.md` §6, including the
+      `if`-vs-`while` threshold-check pitfall a sibling project already hit here)
 - [ ] `cs2-cdblock.md` Phase 4 — Sector buffers, partitions, filters, and getting data to the CPU
       (depends on `scu.md` Phase 4)
 - [ ] `cs2-cdblock.md` Phase 5 — Playback, seek, scan, subcode, CDDA *(game compatibility —
-      lower priority than 1-4)*
+      lower priority than 1-4)* — before/while landing this, replace `Cdrom`'s single-hunk cache
+      (`cdrom.rs`'s `current_hunk_num`) with a small LRU: CDDA interleaved with data reads is
+      exactly the access pattern that thrashes a 1-slot cache, per
+      `../docs/lessons-from-yabasanshiro.md` §2
 - [ ] `cs2-cdblock.md` Phase 6 — Filesystem commands and IP.BIN *(game compatibility)*
 - [ ] `cs2-cdblock.md` Phase 7 — Remaining commands: MPEG stubs, FAD search, MPEG ROM *(game
       compatibility, lowest priority in this file)*
@@ -124,7 +148,9 @@ Three of eight phases already done.
       express "a button is pressed" today)
 - [ ] `smpc-peripheral.md` Phase 5 — The direct-access port: PDR1/PDR2, DDR1/DDR2, IOSEL, EXLE
 - [ ] `smpc-peripheral.md` Phase 6 — Real command timing, and moving the SMPC onto Core 7
-      (**coordinate with `cs2-cdblock.md`'s own Core 7 work** — same physical thread, see above)
+      (**coordinate with `cs2-cdblock.md`'s own Core 7 work** — same physical thread, see above.
+      Also the point to size SMPC's own dispatch cadence to its real ~83µs timing rather than
+      the generic per-core clamp — see `../docs/lessons-from-yabasanshiro.md` §6)
 - [ ] `smpc-peripheral.md` Phase 7 — Extended peripheral types: multi-tap, mouse, keyboard,
       light gun *(game compatibility)*
 
@@ -159,9 +185,15 @@ not twice.
       two-bank framebuffer)
 - [ ] `vdp1.md` Phase 8 — 8-bit framebuffer, interlace, and the long tail *(game compatibility)*
 - [ ] `vdp2.md` Phase 8 — RBG0/RBG1 rotation
-- [ ] `vdp2.md` Phase 9 — VRAM access cycle patterns: what to actually build
+- [ ] `vdp2.md` Phase 9 — VRAM access cycle patterns: what to actually build (if this ends up
+      wanting a frame-to-frame render cache as a Mimas-original optimization — not hardware, see
+      this milestone's own "Not ported" call-outs for `vdp1_clock`/its dirty bitmap — see
+      `../docs/lessons-from-yabasanshiro.md` §4 for the invalidation gotchas a sibling project
+      already learned the hard way)
 - [ ] `vdp1.md` Phase 9 — Move VDP1 to Core 2 **+** `vdp2.md` Phase 10 — Thread topology — **do
-      these together**, last in this milestone
+      these together**, last in this milestone. This is also the point to replace Core 2's
+      permanent busy-spin placeholder loop with real `park_while_inactive` use — see
+      `../docs/lessons-from-yabasanshiro.md` §1
 
 ---
 
@@ -169,6 +201,14 @@ not twice.
 
 Doesn't block visual boot progress, so it trails — but Phase 1's register-offset bugs are real,
 silent correctness bugs worth an early pass on their own merits.
+
+Cross-cutting note for whoever lands this milestone: Cores 4 (`m68k-sound-cpu`) and 5
+(`scsp-synth`) both currently loop via `thread::yield_now()` regardless of whether they have
+real work — Core 4 already has the right gate (`should_run`) and just needs to call
+`set_thread_active`/`park_while_inactive` on its transitions instead of spinning while stopped;
+Core 5 has continuous real work but no `ClockThrottle` of its own, unlike Core 4. See
+`../docs/lessons-from-yabasanshiro.md` §1 for the full comparison against a near-identical bug
+(measured at ~30% of an entire emulator's CPU) a sibling project already hit and fixed.
 
 - [ ] `scsp.md` Phase 1 — Fix the register decode in the existing playback path (confirmed SA/
       FNS/TL offset bugs; TL's attenuation sense is inverted, so max volume is silence today)
@@ -193,7 +233,10 @@ matter much.
 - [ ] `memory-bus.md` Phase 6 — One decoder for the whole system (consolidation/cleanup)
 - [ ] `memory-bus.md` Phase 7 — Cartridge models
 - [ ] `memory-bus.md` Phase 8 — Access cost model and A-Bus timing *(optional — the plan itself
-      says last)*
+      says last)* — if revisited for performance rather than correctness, see
+      `../docs/lessons-from-yabasanshiro.md` §3: `sh2.rs`'s `add_wait_states_r`/`_w` already use
+      the right accumulate-in-place design a sibling project had to retrofit; a precomputed
+      per-region lookup table is the only further idea there, and a low-priority one
 - [x] `sh2-cpu.md` Phase 7 — Free-Running Timer (FRT)
 - [x] `sh2-cpu.md` Phase 8 — Per-opcode cycle costs and memory wait states
 - [x] `sh2-cpu.md` Phase 9 — On-chip DMA controller (DMAC)
@@ -211,3 +254,20 @@ matter much.
   fixing it properly requires `Sh2::run_loop` to check its own core's active/inactive state at
   all (it currently only checks the global shutdown flag), which is a real concurrency change,
   not a register-level fix. Needs its own session; see `history.md` Chapter 14's closing note.
+- **SH-2 idle/spin-loop detection.** A sibling project (yabasanshiro) found that fast-forwarding
+  busy-wait polling loops (VBlank/HBlank/DMA-completion flags — extremely common in Saturn game
+  code) instead of interpreting them cycle-by-cycle was likely its single biggest interpreter
+  win. Not a drop-in here: a large instantaneous cycle jump has to interact correctly with
+  `LockStepSync`'s bounded-slack accounting, and interrupts can arrive from other real OS threads
+  asynchronously in Mimas's model — not just from the same thread's own local peripherals as in
+  yabause's single-threaded one. Worth prototyping once boot progress is far enough along that
+  interpreter throughput (rather than correctness) is the bottleneck. See
+  `../docs/lessons-from-yabasanshiro.md` (no numbered section — it doesn't map to any existing
+  phase there either).
+- **GPU compute-shader fallback pattern, if a GPU renderer is ever added.** yabasanshiro's RBG
+  compute-shader path used to `abort()` the whole process on a driver shader-compile/link
+  failure; fixed to fall back to the non-compute path instead, which is what made it safe to
+  default on across varied GPU drivers. Not applicable today — `saturn-frontend-native` is
+  `minifb`-backed, CPU framebuffer only, no GPU backend exists — but worth applying the same
+  "never let a compile failure take the process down" rule if one is ever built. See
+  `../docs/lessons-from-yabasanshiro.md` §5.

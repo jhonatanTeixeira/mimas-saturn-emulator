@@ -105,6 +105,27 @@ const SMPC_CMD_INTBACK: u8 = 0x10;
 /// `M68KStop` in a real, working SCSP implementation).
 const SMPC_CMD_SNDON: u8 = 0x06;
 const SMPC_CMD_SNDOFF: u8 = 0x07;
+/// `docs/implementation-plans/scu.md` Phase 5: how many real SH-2 cycles
+/// `step()` accumulates before flushing to `Scu::timer1_tick` (which takes
+/// `Scu::timers`'s lock). Not a translation of anything in the reference --
+/// Mimas has no fixed "deciline" batching cadence like real hardware's main
+/// loop does -- just a deliberately small value relative to any plausible
+/// Timer 1 period (real games use this for coarse horizontal-timing-scale
+/// effects, not single-cycle precision), chosen so the lock is taken orders
+/// of magnitude less often than once per instruction.
+const SCU_TIMER_BATCH_CYCLES: u32 = 128;
+/// Real SH-2 cycles per scanline, at 60 fps / 263 lines-per-frame (matching
+/// the `frame_interval`/`NTSC_LINES_PER_FRAME` assumption `lib.rs`'s Core 3
+/// closure already uses elsewhere). Drives H-Blank IN / V-Blank IN / V-Blank
+/// OUT generation directly from Master SH-2's real executed cycles
+/// (`Scu::advance_video_line`, called from `step()` below) instead of a
+/// separate wall-clock timer on Core 3 -- mirroring exactly how the
+/// reference's own main loop ties `yabsys.LineCount`/VBlank generation to
+/// `sh2cycles`, not a host clock (`yabause/src/yabause.c:762-810`). A small
+/// remainder is carried forward each crossing (see the call site) rather
+/// than truncated, so this integer rounding doesn't accumulate drift over
+/// millions of lines.
+const SH2_CYCLES_PER_LINE: u32 = (crate::throttle::SH2_CLOCK_HZ / 60.0 / 263.0) as u32;
 /// Mask real hardware applies to any value written into SR (via `LDC`,
 /// `LDC.L`, or `RTE`): only these bits are architecturally meaningful (T,
 /// S, the interrupt mask I3-I0, M, Q). Confirmed against three independent
@@ -157,45 +178,6 @@ pub struct Sh2 {
     /// `BusArbiter::lock_for_dma`/`is_locked`'s existing use of the same
     /// pair for `locked_by_dma`.
     pub m68k_control: Option<Arc<std::sync::atomic::AtomicBool>>,
-    /// Set when VDP2 has raised the VBLANK-IN interrupt line. Checked once
-    /// per `step()`; serviced (pushes PC/SR, jumps through the VBR vector
-    /// table) if the interrupt mask in SR allows it. Found necessary
-    /// running the real BIOS: it waits for a RAM counter that only a real
-    /// VBLANK interrupt handler (installed by the BIOS itself in the
-    /// vector table) ever increments -- there's no way to satisfy that
-    /// wait without genuine interrupt delivery.
-    pub vblank_pending: bool,
-    /// Wall-clock pacing for `run_loop`'s VBLANK timer (~60Hz), so a CPU
-    /// running at whatever speed this interpreter manages still receives
-    /// VBLANK at roughly the real cadence rather than every single step.
-    next_vblank_due: Option<std::time::Instant>,
-    /// Set when VDP2 has raised the VBLANK-OUT interrupt line -- see
-    /// `VBLANK_OUT_LEVEL`'s doc comment for why this exists as its own
-    /// interrupt, separate from `vblank_pending`.
-    pub vblank_out_pending: bool,
-    /// Wall-clock pacing for VBLANK-OUT, scheduled relative to the same
-    /// `now` sample that advances `next_vblank_due` when VBLANK-IN fires
-    /// (`due + VBLANK_DURATION`) -- kept in lockstep with `tvstat_word()`'s
-    /// existing period_start+VBLANK_DURATION edge instead of running an
-    /// independent timer that could drift against TVSTAT's own bit.
-    next_vblank_out_due: Option<std::time::Instant>,
-    /// SMPC "System Manager" interrupt (real hardware: SCU vector 0x47,
-    /// level 8 -- fired when an SMPC command, e.g. INTBACK, completes). Real
-    /// BIOS INTBACK handshakes wait on this specifically, not just SF --
-    /// see `smpc_execute_command`. Same instant-completion simplification as
-    /// SF: real hardware has command-dependent timing, we fire the
-    /// completion interrupt the same step the command is issued.
-    pub smpc_irq_pending: bool,
-    /// SCU "Sound Request" interrupt (real hardware: vector 0x46, level 9--
-    /// `ScuSendSoundRequest` in a real, working SCU implementation). Fired
-    /// when the SCSP's M68000 sound driver writes a bit into its MCIPD
-    /// register that's also enabled in MCIEB -- see `M68k::write_byte` and
-    /// `mimas/CLAUDE.md`'s "Current wall" section for how this was traced
-    /// (a boot BIOS wait loop polls a RAM counter that only the SH-2's own
-    /// installed handler for *this* interrupt plausibly updates).
-    /// `Option` because it's shared with whatever thread owns the M68K core
-    /// (`SaturnSystem` wires it up in `lib.rs`); `None` in plain unit tests.
-    pub sound_req_irq: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Real wall-clock CPU throttle control (see `crate::throttle`).
     /// `None` (the default) means this core's `run_loop()` never paces at
     /// all -- runs exactly as fast as it does today, so every existing
@@ -204,13 +186,17 @@ pub struct Sh2 {
     /// `ThrottleSpeed::Unthrottled` there too, until a caller opts into a
     /// real speed via `SaturnSystem::set_speed`).
     pub speed: Option<Arc<std::sync::Mutex<crate::throttle::ThrottleSpeed>>>,
-    /// The SCU DSP (Core 2's slot), shared with whatever thread actually
-    /// steps it (`SaturnSystem` wires this up in `lib.rs`). `None` in
-    /// plain unit tests -- SCU DSP register writes then fall through to
-    /// plain byte storage, same as before this existed. See
-    /// `crate::scu_dsp` for why a real DSP interpreter was needed (a boot
-    /// wait loop polling the Program Control Port's `EX` bit).
-    pub scu_dsp: Option<Arc<std::sync::Mutex<crate::scu_dsp::ScuDsp>>>,
+    /// The real SCU: register file, DSP (Core 6's slot), and DMA/interrupt/
+    /// timer scaffolding (`docs/implementation-plans/scu.md` Phase 2).
+    /// **Not** `Option` -- every `Sh2`, including a bare one built by a
+    /// plain unit test, gets its own private `Scu` by default (see
+    /// `Sh2::new`'s struct literal), so SCU register behavior is identical
+    /// whether or not a `SaturnSystem` wired a shared one in. `SaturnSystem`
+    /// overwrites this field with a shared `Arc<Scu>` for Core 0 and Core 6
+    /// so they see the same register file and DSP. See `crate::scu` and
+    /// `crate::scu_dsp` (a boot wait loop polling the DSP's Program Control
+    /// Port's `EX` bit is why a real DSP interpreter was needed at all).
+    pub scu: Arc<crate::scu::Scu>,
     /// The real SMPC command processor, shared with whatever else needs to
     /// reach it (`SaturnSystem` wires this up in `lib.rs`). `None` in plain
     /// unit tests -- COMREG writes then fall through to the old inline
@@ -218,14 +204,38 @@ pub struct Sh2 {
     /// working unchanged. See `crate::smpc` and
     /// `docs/implementation-plans/smpc-peripheral.md` Phase 0.
     pub smpc: Option<Arc<std::sync::Mutex<crate::smpc::Smpc>>>,
-    pub irq_in: Option<Arc<Mutex<InterruptQueue>>>,
-    local_irq_in: InterruptQueue,
+    /// This CPU's own pending-interrupt queue (`docs/implementation-plans/sh2-cpu.md`
+    /// Phase 5) -- real hardware's per-SH-2 `interrupts[]`, polled once per
+    /// `step()` by `service_pending_interrupt`. **Not** `Option` -- every
+    /// `Sh2` gets a fresh, private queue by default (see `Sh2::new`), wired
+    /// to the *same* `Arc` as `self.scu`'s own default `master_target`
+    /// (`docs/implementation-plans/scu.md` Phase 3) so a bare `Sh2` with no
+    /// `SaturnSystem` still sees its own SCU's unmasked deliveries land
+    /// here. `SaturnSystem` overwrites this field with the shared queue
+    /// Core 0 (or Core 1) actually uses, exactly like `scu` is overwritten.
+    pub irq_in: Arc<Mutex<InterruptQueue>>,
     pub onchip: crate::sh2_onchip::Sh2OnChip,
     pub address_array: [u32; 0x100],
     pub data_array: Box<[u8; 0x1000]>,
     pub frc_leftover: u32,
     pub frc_shift: u32,
     pub pending_sync: u32,
+    /// Batches real executed cycles for `Scu::timer1_tick`
+    /// (`docs/implementation-plans/scu.md` Phase 5) so `step()` doesn't take
+    /// `Scu::timers`'s lock on every single instruction -- see `step()`'s
+    /// own call site for the batch-size reasoning. Only the Master SH-2
+    /// (`!is_slave`) ever advances this; the Slave never drives Timer 1,
+    /// since real hardware has exactly one SCU shared between both cores
+    /// and driving it from both would double-count.
+    pub pending_scu_timer_cycles: u32,
+    /// Batches real executed cycles for `Scu::advance_video_line`, which
+    /// drives H-Blank IN / V-Blank IN/OUT generation directly from Master
+    /// SH-2 progress instead of a wall-clock timer -- see
+    /// `SH2_CYCLES_PER_LINE`'s doc comment and `step()`'s own call site.
+    /// Only the Master (`!is_slave`) ever advances this, for the same
+    /// "exactly one SCU, exactly one video timing source" reason
+    /// `pending_scu_timer_cycles` is Master-only.
+    pub pending_line_cycles: u32,
 }
 
 // SR bit positions actually used by this subset of the ISA. Layout (T, S,
@@ -247,43 +257,30 @@ const SR_IMASK_SHIFT: u32 = 4;
 /// vector number turns out wrong for a given BIOS revision, the symptom
 /// will be the CPU jumping into garbage right after the interrupt fires,
 /// which is easy to spot against "PC keeps making forward progress."
+///
+/// These four (vector, level) pairs are no longer read by any dispatch
+/// code -- `docs/implementation-plans/scu.md` Phase 3 moved the real,
+/// production values into `Scu`'s own named source methods
+/// (`Scu::vblank_in`/`vblank_out`/`system_manager`/`sound_request`). Kept
+/// here as test-only documentation constants so this module's own test
+/// suite still reads naturally and cross-checks the same numbers `scu.rs`
+/// hardcodes, independently.
+#[allow(dead_code)]
 const VBLANK_IN_LEVEL: u32 = 15;
+#[allow(dead_code)]
 const VBLANK_IN_VECTOR: u32 = 0x40;
-/// VBLANK-OUT: level 0xE, autovector 0x41 -- a separate, lower-priority
-/// interrupt from VBLANK-IN, not a duplicate of it. Confirmed against
-/// `ScuSendVBlankOUT()` (`SendInterrupt(0x41, 0xE, ...)`, `scu.c`) and
-/// `Vdp2VBlankOUT()` (`vdp2.cpp`), which clears TVSTAT's VBLANK bit and
-/// fires this in the same step -- real hardware raises it once per frame at
-/// the transition from vertical blanking back into active display, i.e.
-/// `VBLANK_DURATION` after each VBLANK-IN. Found necessary running the real
-/// BIOS the same way VBLANK-IN was: a boot wait loop (this one at SH-2
-/// `0x060108ba` against `Sega Saturn BIOS (USA).bin`) polls a RAM counter
-/// that only this BIOS's own vector-table-installed VBLANK-OUT handler
-/// (`0x060102aa` in that trace) ever increments -- traced by dumping High
-/// RAM at the stuck PC and disassembling with `tools/sh2dis.py`, then
-/// resolving the BIOS's own two-level interrupt dispatch table (vector
-/// number -> SR-mask table @ handler-table-base, and a parallel real-handler
-/// table) to see which vector's slot actually pointed at that address.
+#[allow(dead_code)]
 const VBLANK_OUT_LEVEL: u32 = 14;
+#[allow(dead_code)]
 const VBLANK_OUT_VECTOR: u32 = 0x41;
-/// SMPC "System Manager" interrupt: level 8, autovector 0x47 -- confirmed
-/// against `ScuSendSystemManager()` (`SendInterrupt(0x47, 0x8, ...)`) in a
-/// real, working SCU implementation (Yabause `scu.c`), fired whenever an
-/// SMPC command like INTBACK completes.
+#[allow(dead_code)]
 const SMPC_IRQ_LEVEL: u32 = 8;
+#[allow(dead_code)]
 const SMPC_IRQ_VECTOR: u32 = 0x47;
-/// SCU "Sound Request" interrupt: level 9, autovector 0x46 -- confirmed
-/// against `ScuSendSoundRequest()` (`SendInterrupt(0x46, 0x9, ...)`) in a
-/// real, working SCU implementation (Yabause `scu.c`).
+#[allow(dead_code)]
 const SOUND_REQ_IRQ_LEVEL: u32 = 9;
+#[allow(dead_code)]
 const SOUND_REQ_IRQ_VECTOR: u32 = 0x46;
-const VBLANK_INTERVAL: std::time::Duration = std::time::Duration::from_micros(16_666); // ~60Hz
-/// Real VDP2 VBLANK duration within each frame: NTSC has 262 total
-/// scanlines, of which ~38 fall in the vertical blanking period (the rest,
-/// ~224, are active display) -- see `yabsys.VBlankLineCount` vs total line
-/// count driving `Vdp2HBlankIN`/`Vdp2HBlankOUT` in a real, working VDP2
-/// implementation (Yabause `vdp2.cpp`). 38/262 of the ~16.666ms frame.
-const VBLANK_DURATION: std::time::Duration = std::time::Duration::from_micros(2_417);
 /// TVSTAT's VBLANK flag: real hardware sets this bit for the duration of
 /// vertical blanking and clears it once active display resumes, and BIOS
 /// code polls it directly (independent of the VBLANK-IN interrupt) -- see
@@ -456,6 +453,14 @@ impl Sh2 {
     }
 
     pub fn new(is_slave: bool, arbiter: Arc<BusArbiter>, work_ram: Arc<WorkRam>) -> Self {
+        // This CPU's default pending-interrupt queue and its default `Scu`
+        // must share the exact same delivery target from the start (see
+        // `irq_in`'s doc comment) -- otherwise a bare `Sh2` with no
+        // `SaturnSystem` would have its own `Scu` deliver into a queue
+        // nobody ever polls.
+        let irq_in = Arc::new(Mutex::new(InterruptQueue::new()));
+        let scu = Arc::new(crate::scu::Scu::new());
+        scu.set_master_target(irq_in.clone());
         Self {
             is_slave,
             core_id: if is_slave { 1 } else { 0 },
@@ -477,23 +482,18 @@ impl Sh2 {
             cdrom_command_executed: false,
             pc_reporter: None,
             m68k_control: None,
-            vblank_pending: false,
-            next_vblank_due: None,
-            vblank_out_pending: false,
-            next_vblank_out_due: None,
-            smpc_irq_pending: false,
-            sound_req_irq: None,
             speed: None,
-            scu_dsp: None,
+            scu,
             smpc: None,
-            irq_in: None,
-            local_irq_in: InterruptQueue::new(),
+            irq_in,
             onchip: crate::sh2_onchip::Sh2OnChip::new(is_slave),
             address_array: [0; 0x100],
             data_array: Box::new([0; 0x1000]),
             frc_leftover: 0,
             frc_shift: 3,
             pending_sync: 0,
+            pending_scu_timer_cycles: 0,
+            pending_line_cycles: 0,
         }
     }
 
@@ -513,45 +513,27 @@ impl Sh2 {
         self.bios = bios;
     }
 
+    /// Push directly into this CPU's own pending-interrupt queue -- still
+    /// used by NMI and every on-chip source (FRT/DIVU/DMAC/WDT), all of
+    /// which are genuinely SH-2-internal peripherals with no SCU
+    /// involvement (`docs/hardware-reference/scu.md` §4.1's 30-source table
+    /// does not include them). SCU-owned sources (VBLANK, SMPC, sound
+    /// request, ...) go through `self.scu`'s own named methods instead
+    /// (`docs/implementation-plans/scu.md` Phase 3), which call back into
+    /// this same queue via `Scu::set_master_target`'s wiring once unmasked.
     pub fn queue_send(&mut self, vector: u8, level: u8) {
-        if let Some(ref q) = self.irq_in {
-            q.lock().unwrap().send(vector, level);
-        } else {
-            self.local_irq_in.send(vector, level);
-        }
-        if vector == VBLANK_IN_VECTOR as u8 {
-            self.vblank_pending = true;
-        } else if vector == VBLANK_OUT_VECTOR as u8 {
-            self.vblank_out_pending = true;
-        } else if vector == SMPC_IRQ_VECTOR as u8 {
-            self.smpc_irq_pending = true;
-        }
+        self.irq_in.lock().unwrap().send(vector, level);
         if let Some(ref sync) = self.sync {
             sync.set_thread_active(self.core_id, true);
         }
     }
 
     pub fn queue_remove(&mut self, vector: u8) {
-        if let Some(ref q) = self.irq_in {
-            q.lock().unwrap().remove(vector);
-        } else {
-            self.local_irq_in.remove(vector);
-        }
-        if vector == VBLANK_IN_VECTOR as u8 {
-            self.vblank_pending = false;
-        } else if vector == VBLANK_OUT_VECTOR as u8 {
-            self.vblank_out_pending = false;
-        } else if vector == SMPC_IRQ_VECTOR as u8 {
-            self.smpc_irq_pending = false;
-        }
+        self.irq_in.lock().unwrap().remove(vector);
     }
 
     pub fn queue_peek(&self) -> Option<PendingInterrupt> {
-        if let Some(ref q) = self.irq_in {
-            q.lock().unwrap().pending.last().copied()
-        } else {
-            self.local_irq_in.pending.last().copied()
-        }
+        self.irq_in.lock().unwrap().pending.last().copied()
     }
 
     /// Triggers a Non-Maskable Interrupt (NMI).
@@ -585,19 +567,13 @@ impl Sh2 {
         self.illegal_instruction_flag = false;
         self.unaligned_access_flag = false;
 
-        // Reset pending flags
-        self.vblank_pending = false;
-        self.vblank_out_pending = false;
-        self.smpc_irq_pending = false;
-        if let Some(ref f) = self.sound_req_irq {
-            f.store(false, std::sync::atomic::Ordering::Relaxed);
-        }
-
         // Reset on-chip registers
         self.onchip.reset(self.is_slave);
         self.frc_leftover = 0;
         self.frc_shift = 3;
         self.pending_sync = 0;
+        self.pending_scu_timer_cycles = 0;
+        self.pending_line_cycles = 0;
     }
 
     fn translate(&self, address: u32) -> MemRegion {
@@ -945,10 +921,7 @@ impl Sh2 {
                     ram[masked_off]
                 }
             }
-            MemRegion::ScuRegs(off) => {
-                let ram = self.work_ram.scu_regs.read().unwrap();
-                ram[off & (ram.len() - 1)]
-            }
+            MemRegion::ScuRegs(off) => self.scu.read_byte(off),
             MemRegion::Cs2Regs(off) => {
                 let masked_off = off & 0xFFFFF;
                 if masked_off < 0x1000 {
@@ -1073,9 +1046,7 @@ impl Sh2 {
                 ram[off & mask] = val;
             }
             MemRegion::ScuRegs(off) => {
-                let mut ram = self.work_ram.scu_regs.write().unwrap();
-                let mask = ram.len() - 1;
-                ram[off & mask] = val;
+                self.scu.write_byte(off, val);
             }
             MemRegion::Cs2Regs(off) => {
                 let masked_off = off & 0xFFFFF;
@@ -1337,11 +1308,14 @@ impl Sh2 {
                 }
             }
             MemRegion::ScuRegs(off) => {
-                let ram = self.work_ram.scu_regs.read().unwrap();
-                let mask = ram.len() - 1;
-                let b0 = ram[off & mask] as u16;
-                let b1 = ram[(off + 1) & mask] as u16;
-                (b0 << 8) | b1
+                // §1.1 deviation #20: real hardware makes 16-bit SCU access
+                // a no-op; Mimas keeps it live as two byte accesses over
+                // the modelled register file instead of copying that
+                // emulator shortcut -- see `docs/implementation-plans/scu.md`
+                // §9 item 20.
+                let b0 = self.raw_read_byte_region(MemRegion::ScuRegs(off));
+                let b1 = self.raw_read_byte_region(MemRegion::ScuRegs(off + 1));
+                ((b0 as u16) << 8) | (b1 as u16)
             }
             MemRegion::Cs2Regs(off) => {
                 let masked_off = off & 0xFFFFF;
@@ -1503,13 +1477,7 @@ impl Sh2 {
                 if let Some(val) = self.read_scu_dsp_port(off) {
                     val
                 } else {
-                    let ram = self.work_ram.scu_regs.read().unwrap();
-                    let mask = ram.len() - 1;
-                    let b0 = ram[off & mask] as u32;
-                    let b1 = ram[(off + 1) & mask] as u32;
-                    let b2 = ram[(off + 2) & mask] as u32;
-                    let b3 = ram[(off + 3) & mask] as u32;
-                    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+                    self.scu.read_long(off)
                 }
             }
             MemRegion::Cs2Regs(off) => {
@@ -1641,10 +1609,8 @@ impl Sh2 {
                 ram[(off + 1) & mask] = val as u8;
             }
             MemRegion::ScuRegs(off) => {
-                let mut ram = self.work_ram.scu_regs.write().unwrap();
-                let mask = ram.len() - 1;
-                ram[off & mask] = (val >> 8) as u8;
-                ram[(off + 1) & mask] = val as u8;
+                self.raw_write_byte(address, (val >> 8) as u8);
+                self.raw_write_byte(address.wrapping_add(1), val as u8);
             }
             MemRegion::Cs2Regs(off) => {
                 let masked_off = off & 0xFFFFF;
@@ -1789,27 +1755,26 @@ impl Sh2 {
                 if self.write_scu_dsp_port(off, val) {
                     return;
                 }
-                {
-                    let mut ram = self.work_ram.scu_regs.write().unwrap();
-                    let bytes = val.to_be_bytes();
-                    if off + 3 < ram.len() {
-                        ram[off] = bytes[0];
-                        ram[off + 1] = bytes[1];
-                        ram[off + 2] = bytes[2];
-                        ram[off + 3] = bytes[3];
-                    }
-                }
-                if off == 0x10 {
-                    if val & 1 != 0 {
-                        self.execute_scu_dma(0);
-                    }
-                } else if off == 0x30 {
-                    if val & 1 != 0 {
-                        self.execute_scu_dma(1);
-                    }
-                } else if off == 0x50 {
-                    if val & 1 != 0 {
-                        self.execute_scu_dma(2);
+                self.scu.write_long(off, val);
+                // §2.2 trigger path (a): `DnEN` (0x10/0x30/0x50) with bit 0
+                // set, live only when `DnMD[2:0] == 7` ("immediate").
+                // `docs/implementation-plans/scu.md` Phase 4 moves the
+                // whole DMA engine onto Core 6 -- this write only marks the
+                // level pending (`Scu::request_dma_trigger`) and wakes the
+                // thread, exactly like the DSP's own `EX` control-port bit
+                // does just above. Factor-triggered starts (path (b),
+                // `DnEN` bit 8) are wired in Phase 6.
+                let level = match off {
+                    0x10 => Some(0),
+                    0x30 => Some(1),
+                    0x50 => Some(2),
+                    _ => None,
+                };
+                if let Some(level) = level {
+                    if self.scu.request_dma_trigger(level, val) {
+                        if let Some(ref sync) = self.sync {
+                            sync.set_thread_active(6, true);
+                        }
                     }
                 }
             }
@@ -1862,28 +1827,24 @@ impl Sh2 {
     /// SCU DSP register ports (offsets 0x80/0x84/0x88/0x8C) are real
     /// hardware ports, not plain memory -- 32-bit-only on real hardware
     /// (byte/word access to them is undefined), so they're intercepted
-    /// here at the `read_long`/`write_long` level rather than through the
-    /// generic per-byte `ScuRegs` storage `raw_read_byte`/`raw_write_byte`
-    /// use for every other SCU register. `None`/`false` (falling through
-    /// to plain storage) when no DSP is wired in (e.g. bare unit tests
-    /// built via `make_cpu()`), matching the `Option<Arc<...>>` pattern
-    /// already used for `m68k_control`/`sound_req_irq`.
+    /// here at the `read_long`/`write_long` level rather than going through
+    /// `Scu`'s generic register storage the way every other SCU register
+    /// does. `self.scu` is never absent (see `Sh2::scu`'s doc comment), so
+    /// unlike the SMPC/`m68k_control` `Option` pattern this always reaches
+    /// a real `ScuDsp`.
     fn read_scu_dsp_port(&self, off: usize) -> Option<u32> {
-        let dsp = self.scu_dsp.as_ref()?;
+        let mut dsp = self.scu.dsp.lock().unwrap();
         match off {
-            0x80 => Some(dsp.lock().unwrap().read_control_port()),
-            0x8C => Some(dsp.lock().unwrap().read_data_ram_data_port()),
+            0x80 => Some(dsp.read_control_port()),
+            0x8C => Some(dsp.read_data_ram_data_port()),
             _ => None,
         }
     }
 
     fn write_scu_dsp_port(&self, off: usize, val: u32) -> bool {
-        let Some(dsp) = self.scu_dsp.as_ref() else {
-            return false;
-        };
         match off {
             0x80 => {
-                dsp.lock().unwrap().write_control_port(val);
+                self.scu.dsp.lock().unwrap().write_control_port(val);
                 if let Some(ref sync) = self.sync {
                     if val & 0x0001_0000 != 0 {
                         sync.set_thread_active(6, true);
@@ -1892,15 +1853,15 @@ impl Sh2 {
                 true
             }
             0x84 => {
-                dsp.lock().unwrap().write_program_ram_port(val);
+                self.scu.dsp.lock().unwrap().write_program_ram_port(val);
                 true
             }
             0x88 => {
-                dsp.lock().unwrap().write_data_ram_addr_port(val);
+                self.scu.dsp.lock().unwrap().write_data_ram_addr_port(val);
                 true
             }
             0x8C => {
-                dsp.lock().unwrap().write_data_ram_data_port(val);
+                self.scu.dsp.lock().unwrap().write_data_ram_data_port(val);
                 true
             }
             _ => false,
@@ -2302,6 +2263,18 @@ impl Sh2 {
 
     /// Run single step of CPU
     pub fn step(&mut self) {
+        // Captured before anything else so the SCU-timing accounting below
+        // sees the *whole* real cost of this step -- not just the fetched
+        // instruction's own `base`. `execute()`'s branch handlers
+        // (`delay_slot_and_jump`) add a *second*, separate charge to
+        // `self.cycles` for the delay-slot instruction they execute
+        // internally; a first draft of this accounting used `base` alone
+        // and silently missed that second charge, undercounting real
+        // elapsed cycles by roughly a third in a branch-heavy loop (caught
+        // by `only_master_sh2_drives_video_line_timing_not_slave`, which
+        // failed until this switched to a real before/after delta -- the
+        // same pattern `run_loop()` already uses for the same reason).
+        let cycles_before = self.cycles;
         self.service_pending_interrupt();
         // NOTE: Instruction fetch uses raw_read_word to avoid charging fetch wait states,
         // matching the hardware reference (P8-3).
@@ -2321,19 +2294,69 @@ impl Sh2 {
             self.frt_exec(base);
         }
         self.dma_proc(base);
-    }
-
-    /// Raise VBLANK-IN. Actual entry into the handler (if any) happens on
-    /// the next `step()`, and only if SR's interrupt mask allows it -- same
-    /// as real hardware, a masked interrupt just stays pending.
-    pub fn request_vblank_interrupt(&mut self) {
-        self.queue_send(VBLANK_IN_VECTOR as u8, VBLANK_IN_LEVEL as u8);
-    }
-
-    /// Raise VBLANK-OUT -- see `VBLANK_OUT_LEVEL`'s doc comment for why this
-    /// is a real, separate interrupt and not a duplicate of VBLANK-IN.
-    pub fn request_vblank_out_interrupt(&mut self) {
-        self.queue_send(VBLANK_OUT_VECTOR as u8, VBLANK_OUT_LEVEL as u8);
+        // `docs/implementation-plans/scu.md` Phase 5: Timer 1's down-counter
+        // is genuinely driven by real elapsed SH-2 cycles on real hardware
+        // (`timing = sh2cycles >> 1`, `yabause/src/yabause.c:829`) -- *not*
+        // by any core's synthetic `LockStepSync` heartbeat, which Chapter 32
+        // of `history.md` found has no relationship to real elapsed
+        // hardware time at all. Master SH-2 only (`!is_slave`): real
+        // hardware has exactly one SCU shared between both cores, and
+        // driving this from both would double-count. Batched rather than
+        // calling `Scu::timer1_tick` on every single instruction -- it
+        // takes `Scu::timers`'s lock, and the batch size only needs to stay
+        // far below a plausible Timer 1 period, not match real hardware's
+        // own per-deciline granularity.
+        if !self.is_slave {
+            let delta = self.cycles.wrapping_sub(cycles_before) as u32;
+            self.pending_scu_timer_cycles += delta;
+            if self.pending_scu_timer_cycles >= SCU_TIMER_BATCH_CYCLES {
+                self.scu.timer1_tick(self.pending_scu_timer_cycles);
+                self.pending_scu_timer_cycles = 0;
+                // `docs/implementation-plans/scu.md` Phase 6: `timer1_tick`
+                // may have just armed a DMA level on start factor 4
+                // (`Scu::check_dma_start_factor`, called from inside
+                // `Scu::timer1`). `Scu` holds no `LockStepSync` handle of
+                // its own, so this call site wakes Core 6 -- cheap
+                // (`dma_active` just locks `dma` and checks 3 flags) and
+                // safe to call defensively rather than precisely tracking
+                // "did this exact call arm something": `set_thread_active`
+                // is a no-op if Core 6 is already active.
+                if self.scu.dma_active() {
+                    if let Some(ref sync) = self.sync {
+                        sync.set_thread_active(6, true);
+                    }
+                }
+            }
+            // H-Blank IN / V-Blank IN / V-Blank OUT generation, driven by
+            // real Master SH-2 cycles -- see `SH2_CYCLES_PER_LINE`'s doc
+            // comment for why this replaced a separate wall-clock timer on
+            // Core 3 (`lib.rs`). `Scu` deliberately holds no `LockStepSync`
+            // handle (the same reason `Scu::request_dma_trigger` doesn't
+            // wake Core 6 itself), so `advance_video_line`'s return value
+            // (did V-Blank IN just fire?) tells this call site whether to
+            // wake Core 3 to do the actual frame render.
+            self.pending_line_cycles += delta;
+            if self.pending_line_cycles >= SH2_CYCLES_PER_LINE {
+                // Carry the remainder forward instead of zeroing -- avoids
+                // accumulating systematic drift from the integer rounding
+                // in `SH2_CYCLES_PER_LINE` over millions of lines.
+                self.pending_line_cycles -= SH2_CYCLES_PER_LINE;
+                if self.scu.advance_video_line(&self.work_ram) {
+                    if let Some(ref sync) = self.sync {
+                        sync.set_thread_active(3, true);
+                    }
+                }
+                // Phase 6: V-Blank IN/OUT, H-Blank IN, and Timer 0 (fired
+                // from inside `advance_video_line`) can all arm a DMA level
+                // on their own start factor -- same defensive wake as
+                // above.
+                if self.scu.dma_active() {
+                    if let Some(ref sync) = self.sync {
+                        sync.set_thread_active(6, true);
+                    }
+                }
+            }
+        }
     }
 
     /// Apply the side effects `Smpc::execute_command` reported, exactly
@@ -2355,10 +2378,16 @@ impl Sh2 {
         if effects.sound_on {
             if let Some(ref flag) = self.m68k_control {
                 // Release: publishes every Sound RAM write this thread made
-                // before this point (the uploaded driver) to Core 3's
+                // before this point (the uploaded driver) to Core 4's
                 // subsequent Acquire load -- see `m68k_control`'s field doc
                 // comment.
                 flag.store(true, std::sync::atomic::Ordering::Release);
+            }
+            // Core 4 parks while SNDOFF (see `lib.rs`'s Core 4 spawn) --
+            // wake it now, exactly like SSHON already does for Core 1 just
+            // above.
+            if let Some(ref sync) = self.sync {
+                sync.set_thread_active(4, true);
             }
         }
         if effects.sound_off {
@@ -2367,7 +2396,10 @@ impl Sh2 {
             }
         }
         if effects.system_manager_irq {
-            self.queue_send(SMPC_IRQ_VECTOR as u8, SMPC_IRQ_LEVEL as u8);
+            // Goes through the real SCU controller now
+            // (`docs/implementation-plans/scu.md` Phase 3) -- `IMS` genuinely
+            // gates this, unlike the old direct `queue_send`.
+            self.scu.system_manager();
         }
     }
 
@@ -2415,9 +2447,13 @@ impl Sh2 {
         if command == SMPC_CMD_SNDON {
             if let Some(ref flag) = self.m68k_control {
                 // Release: publishes every Sound RAM write this thread made
-                // before this point (the uploaded driver) to Core 3's
+                // before this point (the uploaded driver) to Core 4's
                 // subsequent Acquire load -- see the field doc comment.
                 flag.store(true, std::sync::atomic::Ordering::Release);
+            }
+            // Core 4 parks while SNDOFF -- wake it now.
+            if let Some(ref sync) = self.sync {
+                sync.set_thread_active(4, true);
             }
             return;
         }
@@ -2465,26 +2501,27 @@ impl Sh2 {
         // Real hardware fires the System Manager interrupt when the command
         // finishes; BIOS INTBACK handshakes wait on this specifically (not
         // just on SF), so without it the boot sequence stalls even though SF
-        // itself always reads idle.
-        self.queue_send(SMPC_IRQ_VECTOR as u8, SMPC_IRQ_LEVEL as u8);
+        // itself always reads idle. Goes through the real SCU controller
+        // (`docs/implementation-plans/scu.md` Phase 3), same as the wired-in
+        // path above.
+        self.scu.system_manager();
     }
 
-    /// Compute TVSTAT live from wall-clock frame timing rather than storing
-    /// it as an ordinary register byte -- see the read-side comment at
-    /// `MemRegion::Vdp2Regs` offset 0x004/0x005. `next_vblank_due` marks the
-    /// upcoming VBLANK-IN edge, so the current frame period started one
-    /// `VBLANK_INTERVAL` before that; VBLANK is active for the first
-    /// `VBLANK_DURATION` of the period, matching real hardware's scanline
-    /// split (see the `VBLANK_DURATION` doc comment).
+    /// Compute TVSTAT live rather than storing it as an ordinary register
+    /// byte -- see the read-side comment at `MemRegion::Vdp2Regs` offset
+    /// 0x004/0x005. Reads a plain flag Core 3 sets/clears on its own
+    /// frame-render clock (`docs/implementation-plans/scu.md` Phase 3:
+    /// "Move VBLANK generation off Core 0") rather than deriving it from a
+    /// wall-clock timer this CPU used to run itself -- the two used to be
+    /// two independent ~60Hz clocks that could drift apart; now there is
+    /// exactly one, and this is a plain, cheap load of it (`Acquire`,
+    /// paired with Core 3's `Release` store -- see `WorkRam::vblank_active`).
     fn tvstat_word(&self) -> u16 {
-        let Some(due) = self.next_vblank_due else {
-            return 0;
-        };
-        let Some(period_start) = due.checked_sub(VBLANK_INTERVAL) else {
-            return 0;
-        };
-        let now = std::time::Instant::now();
-        if now >= period_start && now.duration_since(period_start) < VBLANK_DURATION {
+        if self
+            .work_ram
+            .vblank_active
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             TVSTAT_VBLANK_BIT
         } else {
             0
@@ -2492,15 +2529,6 @@ impl Sh2 {
     }
 
     fn service_pending_interrupt(&mut self) {
-        // Sync sound request IRQ atomic bool with the queue first
-        if let Some(ref f) = self.sound_req_irq {
-            if f.load(std::sync::atomic::Ordering::Relaxed) {
-                self.queue_send(SOUND_REQ_IRQ_VECTOR as u8, SOUND_REQ_IRQ_LEVEL as u8);
-            } else {
-                self.queue_remove(SOUND_REQ_IRQ_VECTOR as u8);
-            }
-        }
-
         // Peek highest level pending interrupt from the queue
         let Some(int) = self.queue_peek() else {
             return;
@@ -2514,13 +2542,6 @@ impl Sh2 {
 
         // Dequeue/remove the serviced interrupt
         self.queue_remove(int.vector);
-
-        // Sound request IRQ atomic bool update
-        if int.vector == SOUND_REQ_IRQ_VECTOR as u8 {
-            if let Some(ref f) = self.sound_req_irq {
-                f.store(false, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
 
         // Wake parked thread
         if let Some(ref sync) = self.sync {
@@ -4071,125 +4092,6 @@ impl Sh2 {
         }
     }
 
-    fn execute_scu_dma(&mut self, channel: usize) {
-        let base = channel * 0x20;
-        let scu = self.work_ram.scu_regs.read().unwrap();
-        let read_addr =
-            u32::from_be_bytes([scu[base], scu[base + 1], scu[base + 2], scu[base + 3]]);
-        let write_addr =
-            u32::from_be_bytes([scu[base + 4], scu[base + 5], scu[base + 6], scu[base + 7]]);
-        let count =
-            u32::from_be_bytes([scu[base + 8], scu[base + 9], scu[base + 10], scu[base + 11]])
-                & 0x00FFFFFF;
-        let add_val = u32::from_be_bytes([
-            scu[base + 12],
-            scu[base + 13],
-            scu[base + 14],
-            scu[base + 15],
-        ]);
-        let mode = u32::from_be_bytes([
-            scu[base + 20],
-            scu[base + 21],
-            scu[base + 22],
-            scu[base + 23],
-        ]);
-        drop(scu);
-
-        let indirect = (mode & 0x01_0000) != 0;
-
-        self.arbiter.lock_for_dma();
-
-        if indirect {
-            let mut desc_addr = read_addr;
-            loop {
-                // Read descriptor fields using raw reads to prevent deadlock
-                let size = {
-                    let b0 = self.raw_read_byte(desc_addr) as u32;
-                    let b1 = self.raw_read_byte(desc_addr + 1) as u32;
-                    let b2 = self.raw_read_byte(desc_addr + 2) as u32;
-                    let b3 = self.raw_read_byte(desc_addr + 3) as u32;
-                    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
-                };
-                if size == 0 {
-                    break;
-                }
-                let end = (size & 0x80000000) != 0;
-                let len = (size & 0x00FFFFFF) as usize;
-
-                let dst = {
-                    let b0 = self.raw_read_byte(desc_addr + 4) as u32;
-                    let b1 = self.raw_read_byte(desc_addr + 5) as u32;
-                    let b2 = self.raw_read_byte(desc_addr + 6) as u32;
-                    let b3 = self.raw_read_byte(desc_addr + 7) as u32;
-                    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
-                };
-
-                let src = {
-                    let b0 = self.raw_read_byte(desc_addr + 8) as u32;
-                    let b1 = self.raw_read_byte(desc_addr + 9) as u32;
-                    let b2 = self.raw_read_byte(desc_addr + 10) as u32;
-                    let b3 = self.raw_read_byte(desc_addr + 11) as u32;
-                    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
-                };
-
-                for i in 0..len {
-                    let val = self.raw_read_byte(src + i as u32);
-                    self.raw_write_byte(dst + i as u32, val);
-                }
-
-                if end {
-                    break;
-                }
-                desc_addr += 12;
-            }
-        } else {
-            let add_step = match add_val & 7 {
-                0 => 0,
-                1 => 2,
-                2 => 4,
-                3 => 8,
-                4 => 16,
-                5 => 32,
-                6 => 64,
-                7 => 128,
-                _ => 2,
-            };
-            let mut src = read_addr;
-            let mut dst = write_addr;
-            let mut bytes_left = count;
-            while bytes_left > 0 {
-                if bytes_left >= 2 {
-                    let b0 = self.raw_read_byte(src);
-                    let b1 = self.raw_read_byte(src + 1);
-                    self.raw_write_byte(dst, b0);
-                    self.raw_write_byte(dst + 1, b1);
-                    src += 2;
-                    if add_step > 0 {
-                        dst += add_step;
-                    } else {
-                        dst += 2;
-                    }
-                    bytes_left = bytes_left.saturating_sub(2);
-                } else {
-                    let val = self.raw_read_byte(src);
-                    self.raw_write_byte(dst, val);
-                    src += 1;
-                    dst += 1;
-                    bytes_left = bytes_left.saturating_sub(1);
-                }
-            }
-        }
-
-        self.arbiter.unlock_from_dma();
-
-        // Clear EN flag
-        let mut scu = self.work_ram.scu_regs.write().unwrap();
-        scu[base + 0x10] = 0;
-        scu[base + 0x11] = 0;
-        scu[base + 0x12] = 0;
-        scu[base + 0x13] = 0;
-    }
-
     fn execute_cdrom_command(&mut self) {
         let (cr1, cr2, cr3, cr4) = {
             let ram = self.work_ram.cs2_regs.read().unwrap();
@@ -4226,8 +4128,14 @@ impl Sh2 {
 
     /// Thread execution entry point
     pub fn run_loop(&mut self, shutdown: Arc<std::sync::atomic::AtomicBool>) {
-        let now = std::time::Instant::now();
-        self.next_vblank_due = Some(now + VBLANK_INTERVAL);
+        // VBLANK-IN/OUT generation used to be a wall-clock timer run right
+        // here -- a *second*, independent ~60Hz clock racing Core 3's own
+        // frame-render tick (`docs/implementation-plans/scu.md` Phase 3:
+        // "Move VBLANK generation off Core 0"). Core 3 now calls
+        // `Scu::vblank_in()`/`vblank_out()` directly on its own clock; this
+        // loop only *services* whatever that (or any other source) already
+        // queued, exactly like every other interrupt source.
+        //
         // Real wall-clock CPU throttle -- `None` (plain unit tests, and
         // anything that never wires `self.speed` in) means run exactly as
         // fast as this interpreter manages, same as before this existed.
@@ -4239,25 +4147,6 @@ impl Sh2 {
             if let Some(ref sync) = self.sync {
                 if sync.is_shutdown() {
                     break;
-                }
-            }
-            if let Some(due) = self.next_vblank_due {
-                let now = std::time::Instant::now();
-                if now >= due {
-                    self.request_vblank_interrupt();
-                    self.next_vblank_due = Some(now + VBLANK_INTERVAL);
-                    // VBLANK-OUT fires `VBLANK_DURATION` after this same
-                    // VBLANK-IN edge -- keeps this in lockstep with
-                    // `tvstat_word()`'s period_start+VBLANK_DURATION edge
-                    // rather than running an independently-drifting timer.
-                    self.next_vblank_out_due = Some(now + VBLANK_DURATION);
-                }
-            }
-            if let Some(out_due) = self.next_vblank_out_due {
-                let now = std::time::Instant::now();
-                if now >= out_due {
-                    self.request_vblank_out_interrupt();
-                    self.next_vblank_out_due = None;
                 }
             }
             let cycles_before = self.cycles;
@@ -4311,6 +4200,23 @@ mod opcode_tests {
         let arbiter = Arc::new(BusArbiter::new());
         let ram = Arc::new(WorkRam::new());
         Sh2::new(false, arbiter, ram)
+    }
+
+    /// A genuine, safe-forever 3-instruction loop (NOP; BRA back to the
+    /// NOP, with its own delay-slot NOP) at `0x0600_0000`, for tests that
+    /// step a CPU many thousands of times and need every step to land on a
+    /// real, well-defined instruction -- a single NOP with nothing past it
+    /// runs into uninitialized ("illegal instruction") memory the moment
+    /// `pc` advances past it, which silently derails cycle-accounting-based
+    /// assertions rather than failing loudly (see
+    /// `only_master_sh2_drives_scu_timer1_not_slave`'s and
+    /// `only_master_sh2_drives_video_line_timing_not_slave`'s own doc
+    /// comments for how this was found).
+    fn write_self_loop(cpu: &mut Sh2) {
+        cpu.write_word(0x0600_0000, 0x0009); // NOP
+        cpu.write_word(0x0600_0002, 0xAFFD); // BRA 0x0600_0000
+        cpu.write_word(0x0600_0004, 0x0009); // delay slot: NOP
+        cpu.pc = 0x0600_0000;
     }
 
     #[test]
@@ -4556,6 +4462,14 @@ mod opcode_tests {
         // inferred.
         let mut cpu = make_cpu();
         let base = 0x0010_0000u32;
+        // The System Manager interrupt now genuinely goes through the SCU
+        // (`docs/implementation-plans/scu.md` Phase 3) -- `IMS` resets to
+        // 0xBFFF (everything masked, `hardware-reference/scu.md` §0.1), so
+        // it must be unmasked first, exactly as real BIOS/game code does
+        // (confirmed live: `real-game-capture-appendix.md`'s SCU capture
+        // shows real, frequent writes to offset 0xA0 dominated by
+        // near-all-ones values).
+        cpu.scu.write_long(0xA0, 0x0000);
         cpu.write_byte(base + SMPC_COMREG_OFFSET as u32, SMPC_CMD_INTBACK);
 
         assert_eq!(
@@ -4579,7 +4493,8 @@ mod opcode_tests {
             "SR: no peripheral data requested (IREG1 bit3 unset)"
         );
         assert!(
-            cpu.smpc_irq_pending,
+            cpu.queue_peek()
+                .is_some_and(|p| p.vector == SMPC_IRQ_VECTOR as u8),
             "INTBACK completion must raise the System Manager interrupt"
         );
 
@@ -4598,8 +4513,8 @@ mod opcode_tests {
             "did not jump through the System Manager vector"
         );
         assert!(
-            !cpu.smpc_irq_pending,
-            "pending flag must clear once serviced"
+            cpu.queue_peek().is_none(),
+            "pending interrupt must clear once serviced"
         );
         assert_eq!(
             (cpu.sr >> SR_IMASK_SHIFT) & 0xF,
@@ -4656,10 +4571,14 @@ mod opcode_tests {
         // MCIEB (see `M68k::write_byte`) -- the real signal this project's
         // traced BIOS wait loop most plausibly depends on. Verifies it
         // enters/returns exactly like the other two interrupt sources
-        // (compare `vblank_interrupt_enters_and_returns`).
+        // (compare `vblank_interrupt_enters_and_returns`). Raised via
+        // `Scu::sound_request()` directly now, matching the real M68K write
+        // path (`docs/implementation-plans/scu.md` Phase 3) rather than the
+        // old `Arc<AtomicBool>` -- `IMS` must be unmasked first (§0.1: it
+        // resets all-masked).
         let mut cpu = make_cpu();
-        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        cpu.sound_req_irq = Some(flag.clone());
+        cpu.scu.write_long(0xA0, 0x0000);
+        cpu.scu.sound_request();
         cpu.sr = 0; // nothing masked
         cpu.vbr = 0x0601_0000;
         cpu.registers[15] = 0x0601_1000;
@@ -4674,8 +4593,8 @@ mod opcode_tests {
             "did not jump through the Sound Request vector"
         );
         assert!(
-            !flag.load(std::sync::atomic::Ordering::Relaxed),
-            "flag must clear once serviced"
+            cpu.queue_peek().is_none(),
+            "pending interrupt must clear once serviced"
         );
         assert_eq!(
             (cpu.sr >> SR_IMASK_SHIFT) & 0xF,
@@ -4700,14 +4619,18 @@ mod opcode_tests {
 
     #[test]
     fn vblank_interrupt_masked_stays_pending() {
+        // `IMS` resets all-masked (§0.1); unmask VBlank-IN specifically so
+        // this test is about the SH-2's own SR mask, not the SCU's.
         let mut cpu = make_cpu();
+        cpu.scu.write_long(0xA0, 0x0000);
         cpu.sr = 0x0000_00F0; // mask level 15: everything blocked
         cpu.pc = 0x0600_0000;
         cpu.write_word(0x0600_0000, 0x0009); // NOP
-        cpu.request_vblank_interrupt();
+        cpu.scu.vblank_in();
         cpu.step();
         assert!(
-            cpu.vblank_pending,
+            cpu.queue_peek()
+                .is_some_and(|p| p.vector == VBLANK_IN_VECTOR as u8),
             "a masked interrupt must stay pending, not fire"
         );
         assert_eq!(
@@ -4719,6 +4642,7 @@ mod opcode_tests {
     #[test]
     fn vblank_interrupt_enters_and_returns() {
         let mut cpu = make_cpu();
+        cpu.scu.write_long(0xA0, 0x0000);
         cpu.sr = 0; // mask level 0: nothing blocked
         cpu.vbr = 0x0601_0000;
         cpu.registers[15] = 0x0601_1000;
@@ -4733,7 +4657,7 @@ mod opcode_tests {
         cpu.write_word(0x0600_2002, 0x002B); // RTE
         cpu.write_word(0x0600_2004, 0x0009); // RTE delay slot: NOP
 
-        cpu.request_vblank_interrupt();
+        cpu.scu.vblank_in();
         // step() both enters the handler (redirecting PC through the vector
         // table) and then fetches+executes whatever is now at that new PC --
         // that's the handler's leading NOP here, landing us at vector+2.
@@ -4742,7 +4666,10 @@ mod opcode_tests {
             cpu.pc, 0x0600_2002,
             "did not jump through the VBR vector table"
         );
-        assert!(!cpu.vblank_pending, "pending flag must clear once serviced");
+        assert!(
+            cpu.queue_peek().is_none(),
+            "pending interrupt must clear once serviced"
+        );
         assert_eq!(
             (cpu.sr >> SR_IMASK_SHIFT) & 0xF,
             VBLANK_IN_LEVEL,
@@ -4764,13 +4691,15 @@ mod opcode_tests {
     #[test]
     fn vblank_out_interrupt_masked_stays_pending() {
         let mut cpu = make_cpu();
+        cpu.scu.write_long(0xA0, 0x0000);
         cpu.sr = 0x0000_00F0; // mask level 15: everything blocked
         cpu.pc = 0x0600_0000;
         cpu.write_word(0x0600_0000, 0x0009); // NOP
-        cpu.request_vblank_out_interrupt();
+        cpu.scu.vblank_out();
         cpu.step();
         assert!(
-            cpu.vblank_out_pending,
+            cpu.queue_peek()
+                .is_some_and(|p| p.vector == VBLANK_OUT_VECTOR as u8),
             "a masked interrupt must stay pending, not fire"
         );
         assert_eq!(
@@ -4789,6 +4718,7 @@ mod opcode_tests {
         // resolving the BIOS's own interrupt dispatch table -- see
         // `VBLANK_OUT_LEVEL`'s doc comment.
         let mut cpu = make_cpu();
+        cpu.scu.write_long(0xA0, 0x0000);
         cpu.sr = 0; // mask level 0: nothing blocked
         cpu.vbr = 0x0601_0000;
         cpu.registers[15] = 0x0601_1000;
@@ -4800,15 +4730,15 @@ mod opcode_tests {
         cpu.write_word(0x0600_2002, 0x002B); // RTE
         cpu.write_word(0x0600_2004, 0x0009); // RTE delay slot: NOP
 
-        cpu.request_vblank_out_interrupt();
+        cpu.scu.vblank_out();
         cpu.step();
         assert_eq!(
             cpu.pc, 0x0600_2002,
             "did not jump through the VBR vector table"
         );
         assert!(
-            !cpu.vblank_out_pending,
-            "pending flag must clear once serviced"
+            cpu.queue_peek().is_none(),
+            "pending interrupt must clear once serviced"
         );
         assert_eq!(
             (cpu.sr >> SR_IMASK_SHIFT) & 0xF,
@@ -4833,18 +4763,16 @@ mod opcode_tests {
         // Real hardware priority: VBLANK-IN (15) > VBLANK-OUT (14) -- confirmed
         // against `ScuSendVBlankIN`/`ScuSendVBlankOUT` in Yabause `scu.c`.
         let mut cpu = make_cpu();
+        cpu.scu.write_long(0xA0, 0x0000);
         cpu.sr = 0;
         cpu.pc = 0x0600_0000;
         cpu.write_word(0x0600_0000, 0x0009); // NOP
-        cpu.request_vblank_out_interrupt();
-        cpu.request_vblank_interrupt();
+        cpu.scu.vblank_out();
+        cpu.scu.vblank_in();
         cpu.step();
+        let remaining = cpu.queue_peek();
         assert!(
-            !cpu.vblank_pending,
-            "the higher-priority interrupt must be serviced first"
-        );
-        assert!(
-            cpu.vblank_out_pending,
+            remaining.is_some_and(|p| p.vector == VBLANK_OUT_VECTOR as u8),
             "the lower-priority interrupt must stay pending behind it"
         );
         assert_eq!((cpu.sr >> SR_IMASK_SHIFT) & 0xF, VBLANK_IN_LEVEL);
@@ -4859,21 +4787,25 @@ mod opcode_tests {
         // (like every other VDP2 register) would read 0 forever, since
         // nothing ever "writes" the real hardware's timing-driven toggle,
         // hanging that wait loop indefinitely -- this is what backs it with
-        // live wall-clock frame timing instead.
+        // a plain flag Core 3 sets/clears on its own frame clock instead
+        // (`docs/implementation-plans/scu.md` Phase 3).
         let mut cpu = make_cpu();
-        cpu.next_vblank_due = Some(std::time::Instant::now() + VBLANK_INTERVAL);
+        cpu.work_ram
+            .vblank_active
+            .store(true, std::sync::atomic::Ordering::Release);
         assert_eq!(
             cpu.tvstat_word() & TVSTAT_VBLANK_BIT,
             TVSTAT_VBLANK_BIT,
-            "must read VBLANK set right after the frame period starts"
+            "must read VBLANK set while Core 3 has the flag raised"
         );
 
-        cpu.next_vblank_due =
-            Some(std::time::Instant::now() + VBLANK_DURATION + std::time::Duration::from_millis(5));
+        cpu.work_ram
+            .vblank_active
+            .store(false, std::sync::atomic::Ordering::Release);
         assert_eq!(
             cpu.tvstat_word() & TVSTAT_VBLANK_BIT,
             0,
-            "must read VBLANK clear well into active display"
+            "must read VBLANK clear once Core 3 lowers the flag"
         );
     }
 
@@ -4884,7 +4816,9 @@ mod opcode_tests {
         // reads both offset 4 and offset 5 during boot; getting the byte
         // split backwards would silently hand it a permanently-zero bit.
         let mut cpu = make_cpu();
-        cpu.next_vblank_due = Some(std::time::Instant::now() + VBLANK_INTERVAL);
+        cpu.work_ram
+            .vblank_active
+            .store(true, std::sync::atomic::Ordering::Release);
         assert_eq!(
             cpu.read_byte(0x25F8_0004),
             0x00,
@@ -5032,28 +4966,53 @@ mod opcode_tests {
     }
 
     #[test]
-    fn test_scu_dma_direct() {
+    fn scu_dma_trigger_write_marks_pending_but_does_not_run_synchronously() {
+        // `docs/implementation-plans/scu.md` Phase 4 moves the whole DMA
+        // engine onto Core 6 -- writing `DnEN` from the CPU's own thread
+        // must never run a transfer inline anymore (that was the
+        // pre-Phase-4 stand-in, `Sh2::execute_scu_dma`, removed in this
+        // phase). It only marks the level pending, exactly like the DSP's
+        // own `EX` control-port bit already works.
         let mut cpu = make_cpu();
-        // Write source data to Low RAM offset 0 (0x00200000)
         cpu.write_long(0x00200000, 0x11223344);
-        cpu.write_long(0x00200004, 0x55667788);
 
-        // Configure Channel 0 SCU DMA registers
-        cpu.write_long(0x05FE0000, 0x00200000); // D0R (Read Addr)
-        cpu.write_long(0x05FE0004, 0x00201000); // D0W (Write Addr)
-        cpu.write_long(0x05FE0008, 8); // D0C (Count = 8 bytes)
-        cpu.write_long(0x05FE000C, 1); // D0AD (Address increment mode)
-        cpu.write_long(0x05FE0014, 0); // D0MD (Direct Mode)
+        cpu.write_long(0x05FE0000, 0x00200000); // D0R
+        cpu.write_long(0x05FE0004, 0x00201000); // D0W
+        cpu.write_long(0x05FE0008, 4); // D0C
+        cpu.write_long(0x05FE000C, 0x102); // D0AD: copy mode, write_add = 4
+        cpu.write_long(0x05FE0014, 0x7); // D0MD: direct, factor = 7 (immediate)
 
-        // Trigger DMA by writing 1 to D0EN
-        cpu.write_long(0x05FE0010, 1);
+        cpu.write_long(0x05FE0010, 1); // trigger
 
-        // Verify data was copied
+        assert!(
+            cpu.scu.dma_active(),
+            "the write must mark the level pending"
+        );
+        assert_eq!(
+            cpu.read_long(0x00201000),
+            0,
+            "the transfer must not run synchronously on the CPU's own thread anymore"
+        );
+
+        // Simulates what Core 6's own thread does (`SaturnSystem`'s
+        // `scu-dma-dsp` loop, `lib.rs`): pump the engine directly.
+        let arbiter = crate::bus_arbiter::BusArbiter::new();
+        cpu.scu.step_dma_pass(&cpu.work_ram, &arbiter, 128);
+        assert!(!cpu.scu.dma_active());
         assert_eq!(cpu.read_long(0x00201000), 0x11223344);
-        assert_eq!(cpu.read_long(0x00201004), 0x55667788);
+    }
 
-        // D0EN register must be cleared automatically
-        assert_eq!(cpu.read_long(0x05FE0010), 0);
+    #[test]
+    fn scu_dma_trigger_requires_mode_immediate_regression_guard_d_dma_7() {
+        // D-DMA-7: the pre-Phase-4 stand-in triggered on any DnEN bit-0
+        // write regardless of DnMD. §2.2 requires DnMD[2:0] == 7.
+        let mut cpu = make_cpu();
+        cpu.write_long(0x05FE0014, 0x0); // D0MD = 0 -- not the immediate factor code
+        cpu.write_long(0x05FE0010, 1);
+        assert!(
+            !cpu.scu.dma_active(),
+            "DnEN bit 0 must not trigger unless DnMD[2:0] == 7"
+        );
     }
 
     #[test]
@@ -5075,6 +5034,7 @@ mod opcode_tests {
     #[test]
     fn test_sleep() {
         let mut cpu = make_cpu();
+        cpu.scu.write_long(0xA0, 0x0000);
         cpu.sr = 0; // mask level 0
         cpu.vbr = 0x0601_0000;
         cpu.registers[15] = 0x0601_1000;
@@ -5095,7 +5055,7 @@ mod opcode_tests {
         );
 
         // Now request interrupt and step
-        cpu.request_vblank_interrupt();
+        cpu.scu.vblank_in();
         cpu.step(); // takes interrupt and executes handler first instruction
         assert_eq!(
             cpu.pc, 0x0600_2002,
@@ -5305,7 +5265,9 @@ mod opcode_tests {
         assert_eq!(cpu.read_byte(0x05F8_0200), 0xBB);
 
         // TVSTAT read at mirrored offset
-        cpu.next_vblank_due = Some(std::time::Instant::now() + VBLANK_INTERVAL);
+        cpu.work_ram
+            .vblank_active
+            .store(true, std::sync::atomic::Ordering::Release);
         assert_eq!(cpu.read_byte(0x05F8_0204), 0x00);
         assert_eq!(cpu.read_byte(0x05F8_0205), 0x08);
 
@@ -5665,11 +5627,7 @@ mod opcode_tests {
         cpu.queue_send(0x40, 2); // Duplicate vector, must be ignored and not change level
 
         // The queue should look like: [0x47 (level 8), 0x41 (level 14), 0x40 (level 15)]
-        let q = if let Some(ref q_ref) = cpu.irq_in {
-            q_ref.lock().unwrap().clone()
-        } else {
-            cpu.local_irq_in.clone()
-        };
+        let q = cpu.irq_in.lock().unwrap().clone();
 
         assert_eq!(q.pending.len(), 3);
         assert_eq!(q.pending[0].vector, 0x47);
@@ -5729,11 +5687,7 @@ mod opcode_tests {
         assert_eq!(cpu.pc, 0x0600_2002);
 
         // Assert the second interrupt (0x47 level 8) is still queued
-        let q = if let Some(ref q_ref) = cpu.irq_in {
-            q_ref.lock().unwrap().clone()
-        } else {
-            cpu.local_irq_in.clone()
-        };
+        let q = cpu.irq_in.lock().unwrap().clone();
         assert!(q.pending.iter().any(|x| x.vector == 0x47));
     }
 
@@ -6445,7 +6399,8 @@ mod opcode_tests {
 
         cpu.dma_proc(200);
 
-        let pending = &cpu.local_irq_in.pending;
+        let queue = cpu.irq_in.lock().unwrap();
+        let pending = &queue.pending;
         assert_eq!(pending.len(), 1, "Interrupt must be queued");
         assert_eq!(pending[0].vector, 0x34, "Vector must be VCRDMA0 & 0xFF");
         assert_eq!(pending[0].level, 5, "Level must match IPRA bits 11-8");
@@ -6507,5 +6462,130 @@ mod opcode_tests {
         assert!(arbiter.is_locked());
         arbiter.unlock_from_dma();
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn only_master_sh2_drives_scu_timer1_not_slave() {
+        // `docs/implementation-plans/scu.md` Phase 5: real hardware has
+        // exactly one SCU shared between both SH-2 cores, so Timer 1's
+        // countdown must be driven by exactly one clock. Each CPU here gets
+        // its own private `Scu` (the normal bare-`Sh2::new()` default), so
+        // this really tests `step()`'s own `!self.is_slave` gate, not a
+        // shared-state race. Uses `write_self_loop` (not a single bare NOP)
+        // and a generous step budget with a stated safety margin, not a
+        // tightly precomputed one -- see that helper's own doc comment and
+        // `only_master_sh2_drives_video_line_timing_not_slave`'s for why a
+        // single NOP and a precisely-computed step count both silently
+        // produce meaningless results here.
+        const SAFETY_CAP_STEPS: usize = SCU_TIMER_BATCH_CYCLES as usize * 20;
+
+        let mut slave = Sh2::new(true, Arc::new(BusArbiter::new()), Arc::new(WorkRam::new()));
+        slave.scu.write_long(0x98, 0x01); // T1MD: global timer enable
+        slave.scu.write_long(0x94, 4); // T1S -- tiny preset
+        slave.scu.hblank_in(); // arm + reload -> timer1_counter = 4
+        write_self_loop(&mut slave);
+        for _ in 0..SAFETY_CAP_STEPS {
+            slave.step();
+        }
+        assert_eq!(
+            slave.scu.timers.lock().unwrap().timer1_counter,
+            4,
+            "the Slave must never advance its own SCU's Timer 1 counter"
+        );
+
+        let mut master = make_cpu();
+        master.scu.write_long(0x98, 0x01);
+        master.scu.write_long(0x94, 4);
+        master.scu.hblank_in();
+        write_self_loop(&mut master);
+        let mut advanced = false;
+        for _ in 0..SAFETY_CAP_STEPS {
+            master.step();
+            if master.scu.timers.lock().unwrap().timer1_counter < 4 {
+                advanced = true;
+                break;
+            }
+        }
+        assert!(
+            advanced,
+            "the Master must have advanced its own SCU's Timer 1 counter within {SAFETY_CAP_STEPS} steps"
+        );
+    }
+
+    #[test]
+    fn only_master_sh2_drives_video_line_timing_not_slave() {
+        // Mirrors `only_master_sh2_drives_scu_timer1_not_slave` for
+        // H-Blank/V-Blank generation: real hardware has exactly one video
+        // timing source, so it must come from exactly one clock. IMS is
+        // deliberately left at its default (`0xBFFF`, everything masked) --
+        // this test only cares about `advance_video_line`'s own bookkeeping
+        // (`timer0`/`vblank_active`), which happens unconditionally
+        // regardless of interrupt masking; unmasking would let the H-Blank
+        // IN/V-Blank IN interrupts actually *deliver*, sending the CPU off
+        // into an exception vector instead of the tight loop this test sets
+        // up. Needs many more steps than a single NOP can safely cover
+        // (hundreds of thousands, to cross real video lines), so it builds a
+        // genuine 3-instruction self-loop (NOP; BRA back to the NOP, with
+        // its own delay-slot NOP) rather than relying on uninitialized
+        // memory past one instruction, unlike the shorter
+        // `SCU_TIMER_BATCH_CYCLES`-scale tests elsewhere in this file.
+        //
+        // Deliberately does *not* try to precompute "N steps == 225 lines"
+        // -- `execute()`'s branch handlers (`delay_slot_and_jump`) charge a
+        // second, separate cycle cost for the delay-slot instruction, so
+        // NOP and BRA+delay-slot cost different amounts per step (verified
+        // directly: 1 and 3 respectively). Pre-computing a fixed step count
+        // from that ratio is exactly the kind of assumption that silently
+        // breaks the moment either cost changes -- and it did, mid-session:
+        // a first draft of this test assumed roughly 1-2 cycles/step,
+        // landing on a step count that actually crossed V-Blank IN several
+        // times over and wrapped back through V-Blank OUT before the loop
+        // even finished, making the final `vblank_active` snapshot
+        // meaningless. Stepping until the flag is actually observed (with a
+        // generous, clearly-labeled safety cap) is robust to that ratio
+        // entirely.
+        // 225 lines at >= 1 cycle/step (the cheapest possible instruction)
+        // is a hard lower bound on how many steps V-Blank IN could need;
+        // this is roughly 20x more than the loop's own real (~2 cycles/step
+        // average) cost requires, comfortably generous without being
+        // unbounded.
+        const SAFETY_CAP_STEPS: usize = SH2_CYCLES_PER_LINE as usize * 225;
+
+        let mut slave = Sh2::new(true, Arc::new(BusArbiter::new()), Arc::new(WorkRam::new()));
+        write_self_loop(&mut slave);
+        for _ in 0..SAFETY_CAP_STEPS {
+            slave.step();
+        }
+        assert_eq!(
+            slave.scu.timers.lock().unwrap().timer0,
+            0,
+            "the Slave must never advance its own SCU's video line counter"
+        );
+        assert!(
+            !slave
+                .work_ram
+                .vblank_active
+                .load(std::sync::atomic::Ordering::Acquire),
+            "the Slave must never fire its own SCU's V-Blank IN"
+        );
+
+        let mut master = make_cpu();
+        write_self_loop(&mut master);
+        let mut crossed = false;
+        for _ in 0..SAFETY_CAP_STEPS {
+            master.step();
+            if master
+                .work_ram
+                .vblank_active
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                crossed = true;
+                break;
+            }
+        }
+        assert!(
+            crossed,
+            "the Master must cross V-Blank IN within {SAFETY_CAP_STEPS} steps"
+        );
     }
 }
