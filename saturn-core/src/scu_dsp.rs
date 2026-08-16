@@ -1015,9 +1015,7 @@ pub(crate) fn read_long(work_ram: &WorkRam, address: u32) -> u32 {
         Some((DspRegion::Vdp2Regs, off)) => {
             read_long_from(&work_ram.vdp2_regs.read().unwrap()[..], off)
         }
-        Some((DspRegion::Cs2Regs, off)) => {
-            read_long_from(&work_ram.cs2_regs.read().unwrap()[..], off)
-        }
+        Some((DspRegion::Cs2Regs, _off)) => 0,
         Some((DspRegion::HighRam, off)) => work_ram.read_high_ram_long(off),
         None => 0,
     }
@@ -1054,9 +1052,7 @@ pub(crate) fn write_long(work_ram: &WorkRam, address: u32, val: u32) {
         Some((DspRegion::Vdp2Regs, off)) => {
             write_long_to(&mut work_ram.vdp2_regs.write().unwrap()[..], off, val)
         }
-        Some((DspRegion::Cs2Regs, off)) => {
-            write_long_to(&mut work_ram.cs2_regs.write().unwrap()[..], off, val)
-        }
+        Some((DspRegion::Cs2Regs, _off)) => {}
         Some((DspRegion::HighRam, off)) => work_ram.write_high_ram_long(off, val),
         None => {}
     }
@@ -1093,9 +1089,7 @@ pub(crate) fn write_word(work_ram: &WorkRam, address: u32, val: u16) {
         Some((DspRegion::Vdp2Regs, off)) => {
             write_word_to(&mut work_ram.vdp2_regs.write().unwrap()[..], off, val)
         }
-        Some((DspRegion::Cs2Regs, off)) => {
-            write_word_to(&mut work_ram.cs2_regs.write().unwrap()[..], off, val)
-        }
+        Some((DspRegion::Cs2Regs, _off)) => {}
         Some((DspRegion::HighRam, off)) => work_ram.write_high_ram_word(off, val),
         None => {}
     }
@@ -1135,9 +1129,7 @@ pub(crate) fn read_word(work_ram: &WorkRam, address: u32) -> u16 {
         Some((DspRegion::Vdp2Regs, off)) => {
             read_word_from(&work_ram.vdp2_regs.read().unwrap()[..], off)
         }
-        Some((DspRegion::Cs2Regs, off)) => {
-            read_word_from(&work_ram.cs2_regs.read().unwrap()[..], off)
-        }
+        Some((DspRegion::Cs2Regs, _off)) => 0,
         Some((DspRegion::HighRam, off)) => work_ram.read_high_ram_word(off),
         None => 0,
     }

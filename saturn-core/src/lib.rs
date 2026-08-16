@@ -1,5 +1,6 @@
 pub mod bus_arbiter;
 pub mod cdrom;
+pub mod cs2;
 pub mod m68k;
 pub mod scsp;
 pub mod scu;
@@ -15,6 +16,7 @@ pub mod vdp;
 
 pub use bus_arbiter::BusArbiter;
 pub use cdrom::Cdrom;
+pub use cs2::Cs2;
 pub use m68k::M68k;
 pub use scsp::{Scsp, SoundRingBuffer};
 pub use scu::Scu;
@@ -85,6 +87,8 @@ pub struct SaturnSystem {
     /// (register storage stays in `WorkRam::smpc_regs`); see `crate::smpc`
     /// and `docs/implementation-plans/smpc-peripheral.md`.
     pub smpc: Arc<Mutex<Smpc>>,
+    /// The real CS2 / CD-block subsystem.
+    pub cs2: Arc<Mutex<Cs2>>,
     /// The master SH-2's own pending-interrupt queue
     /// (`docs/implementation-plans/sh2-cpu.md` Phase 5) -- also `scu`'s
     /// `master_target` (wired in `with_slack`), so any SCU source Core 3/4
@@ -111,6 +115,9 @@ impl SaturnSystem {
         let scu = Arc::new(Scu::new());
         scu.set_master_target(irq_in_c0.clone());
         scu.set_slave_target(irq_in_c1.clone());
+        let cs2 = Arc::new(Mutex::new(Cs2::new()));
+        cs2.lock().unwrap().set_scu(scu.clone());
+        scu.set_cs2(cs2.clone());
 
         Self {
             arbiter,
@@ -129,6 +136,7 @@ impl SaturnSystem {
             scu,
             scsp: Arc::new(Mutex::new(Scsp::new())),
             smpc: Arc::new(Mutex::new(Smpc::new())),
+            cs2,
             irq_in_c0,
             irq_in_c1,
         }
@@ -138,6 +146,13 @@ impl SaturnSystem {
     /// boot code (from the reset vector) instead of a scaffold no-op loop.
     pub fn load_bios(&mut self, data: Vec<u8>) {
         self.bios = Arc::new(data);
+    }
+
+    /// Load a disc image into the CD-ROM drive.
+    pub fn load_disc(&self, path: &str) -> Result<(), String> {
+        self.cs2.lock().unwrap().load_disc(path)?;
+        self.sync.set_thread_active(7, true);
+        Ok(())
     }
 
     /// Change how fast every throttled core paces itself, live -- safe to
@@ -167,6 +182,7 @@ impl SaturnSystem {
         let speed_c0 = self.speed.clone();
         let scu_c0 = self.scu.clone();
         let smpc_c0 = self.smpc.clone();
+        let cs2_c0 = self.cs2.clone();
         let irq_in_c0 = self.irq_in_c0.clone();
         let handle_c0 = thread::Builder::new()
             .name("sh2-master".into())
@@ -182,6 +198,7 @@ impl SaturnSystem {
                 cpu.speed = Some(speed_c0);
                 cpu.scu = scu_c0;
                 cpu.smpc = Some(smpc_c0);
+                cpu.cs2 = Some(cs2_c0);
                 cpu.irq_in = irq_in_c0;
                 cpu.run_loop(shutdown_c0);
             })
@@ -195,6 +212,7 @@ impl SaturnSystem {
         let sync_c1 = sync.clone();
         let bios_c1 = self.bios.clone();
         let speed_c1 = self.speed.clone();
+        let cs2_c1 = self.cs2.clone();
         let irq_in_c1 = self.irq_in_c1.clone();
         let handle_c1 = thread::Builder::new()
             .name("sh2-slave".into())
@@ -210,6 +228,7 @@ impl SaturnSystem {
                 cpu.set_bios_arc(bios_c1);
                 cpu.reset();
                 cpu.speed = Some(speed_c1);
+                cpu.cs2 = Some(cs2_c1);
                 cpu.irq_in = irq_in_c1;
                 cpu.run_loop(shutdown_c1);
             })
@@ -473,23 +492,41 @@ impl SaturnSystem {
 
         // Spawn Core 7: SMPC & CD-ROM Thread.
         //
-        // Genuinely parked, not just idle: no SMPC or CD-block logic runs
-        // here today -- SMPC command execution happens via `Sh2`/`Smpc`
-        // methods on Core 0's own thread, and CD-ROM (`Cdrom`) isn't wired
-        // into the emulated system's address space at all yet (see
-        // CLAUDE.md's architecture-debt notes on both). Same fix and same
-        // reasoning as Core 2 above: deactivate once and park forever
-        // instead of spinning on `thread::yield_now()` for a component that
-        // never does anything; a future phase wiring real work here will
-        // need its own wake call.
+        // Parks while inactive; woken when a CD-ROM command is issued,
+        // disc is loaded, or playback is active.
         let sync_c7 = sync.clone();
         let arbiter_c7 = arbiter.clone();
+        let cs2_c7 = self.cs2.clone();
         let handle_c7 = thread::Builder::new()
             .name("smpc-cd-block".into())
             .spawn(move || {
                 let _guard = PanicGuard::new(sync_c7.clone(), arbiter_c7);
                 sync_c7.set_thread_active(7, false);
-                sync_c7.park_while_inactive(7);
+                let mut cycles = 0u64;
+                loop {
+                    if !sync_c7.park_while_inactive(7) {
+                        return;
+                    }
+                    while cs2_c7.lock().unwrap().has_work() {
+                        if sync_c7.is_shutdown() {
+                            return;
+                        }
+                        let mut cs2 = cs2_c7.lock().unwrap();
+                        if cs2.command_pending {
+                            cs2.execute_command();
+                            cs2.command_pending = false;
+                        }
+                        if cs2.vblank_pending {
+                            cs2.exec_vblank();
+                            cs2.vblank_pending = false;
+                        }
+                        drop(cs2);
+                        cycles = cycles.wrapping_add(100);
+                        sync_c7.sync_core(7, cycles);
+                        thread::yield_now();
+                    }
+                    sync_c7.set_thread_active(7, false);
+                }
             })
             .expect("failed to spawn Core 7 (SMPC & CD-ROM) thread");
         self.handles.push(handle_c7);

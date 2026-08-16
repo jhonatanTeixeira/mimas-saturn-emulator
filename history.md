@@ -2195,3 +2195,47 @@ With Phase 6 landed, `scu.md`'s own six phases (DSP completion, register file, i
 DMA controller, timers, start factors/DSP-End/Draw-End) are all done. The SCU subsystem's remaining
 open work is entirely owned by other plans now: VDP1 Phase 3 (Draw End's trigger), SMPC Phase 6
 (Pad's trigger, and moving SMPC itself onto Core 7).
+
+## Chapter 36 — Milestone 3: Full CS2 / CD-Block Subsystem Implementation (Phases 1–7)
+
+Milestone 3 implements the complete Sega Saturn CD-Block (`Cs2`) architecture, closing the gap between `docs/hardware-reference/cs2-cdblock.md` and Mimas across all 7 implementation phases.
+
+### Architecture & Key Implementations:
+
+1. **Phase 1: Bus Decoding, Memory Map & Access Width Rules**:
+   - `Cs2` implemented in `saturn-core/src/cs2.rs` with decoded register window `0x25890008`..`0x25890028` (`HIRQ`, `HIRQMASK`, `CR1`..`CR4`, `MPEGRGB`), Data FIFO `0x25818000`, and Info Port `0x25898000`.
+   - Real access width rules enforced: byte reads return open-bus `0xFF` and byte writes are dropped; 32-bit reads mirror 16-bit registers; 32-bit writes to FIFO stream data blocks.
+   - Removed toy stubs (`send_command`, `execute_cdrom_command`, `cdrom_command_executed`, and `cs2_regs` in `WorkRam`).
+   - Wired `Arc<Mutex<Cs2>>` across `SaturnSystem`, Core 0 (`sh2-master`), Core 1 (`sh2-slave`), Core 7 (`smpc-cd-block`), and `Scu`.
+
+2. **Phase 2: Handshake & Hardware Status**:
+   - Implemented 8-step handshake on CR1..CR4 and `HIRQ` AND-write bit-clearing semantics.
+   - `do_cd_report` and `do_mpeg_report` layouts matching hardware.
+   - TOC builder (102 entries with Points A0, A1, A2) and Info Transfer Mode 0 via `0x25898000`.
+   - Commands `0x00` (Get Status), `0x01` (Get HW Info), `0x02` (Get TOC), `0x03` (Get Session Info), `0x04` (Init CD System), `0x05` (Open Tray), `0x06` (End Data Transfer), `0xE0` (Auth Device), `0xE1` (Is Auth).
+
+3. **Phase 3: Periodic Sector Engine & State Machine**:
+   - 3 Hz drive status polling and 60 Hz / 75 Hz / 150 Hz periodic sector engines.
+   - Subcode Q generation (`HIRQ_SCDQ`) with BCD encoding for Absolute and Relative MSF.
+   - Core 7 parked when idle via `LockStepSync::park_while_inactive` and woken when `cs2.has_work()`.
+
+4. **Phase 4: Buffer Management, 24 Partitions, 24 Filters & SCU DMA**:
+   - 200 Sector Blocks allocated on the heap, 24 Partitions, 24 Filters with Mode/Subheader conditions.
+   - Streaming Data FIFO (`0x25818000`) supporting direct Put, Get, Delete, Copy, Move sector commands (`0x30`..`0x32`, `0x40`..`0x48`, `0x50`..`0x54`, `0x60`..`0x67`).
+   - Integrated with SCU DMA Level 0 direct transfers (`D0AD = 0x00000002`) transferring CD-ROM sector data directly from CS2 Data FIFO into High Work RAM (`0x06000000`).
+
+5. **Phase 5: Playback Engine, Subcode & Repeat Modes**:
+   - Commands `0x10` (Play Disc), `0x11` (Seek), `0x12` (Scan), `0x20` (Get Subcode Q / RW).
+   - Track range bounds and repeat playback tracking.
+
+6. **Phase 6: ISO-9660 Directory Traversal & IP.BIN Parsing**:
+   - Implemented filesystem directory parser reading Primary Volume Descriptor (FAD 166) and directory records (`0x70`..`0x75`).
+   - IP.BIN header parser extracting System Identifier, Company, Title, Region codes, and Date.
+
+7. **Phase 7: MPEG Stubs & Rejection**:
+   - MPEG status, interrupt masking, and command stubs (`0x90`..`0x9E`).
+   - FAD search stubs (`0x55`, `0x56`) and MPEG ROM rejection (`0xE2` returning `0xFF` rejection and `HIRQ_MPED`).
+
+### Verification:
+- All 295 unit, sync, adversarial, real-fixture, and e2e tests passing across the workspace (`cargo test --workspace`).
+- 0 compiler warnings; `cargo fmt --all` formatted.

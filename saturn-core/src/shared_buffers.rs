@@ -43,10 +43,6 @@ pub struct WorkRam {
     pub vdp2_cram: RwLock<Box<[u8; 0x1000]>>,
     /// VDP2 registers (0x05F80000-0x05FBFFFF).
     pub vdp2_regs: RwLock<Box<[u8; 0x200]>>,
-    /// CS2 / CD-ROM block registers (0x05800000-0x058FFFFF). The real CD
-    /// command protocol lives in `Cdrom` (CR1-4/HIRQ/DTR); this is a plain
-    /// memory stub until that's wired into the CPU's address space.
-    pub cs2_regs: RwLock<Box<[u8; 0x1000]>>,
     /// Internal backup RAM, real size 64KB (0x00180000-0x001FFFFF).
     pub backup_ram: RwLock<Box<[u8; 0x10000]>>,
     /// SMPC register file, real 0x80-byte window (0x00100000-0x0017FFFF,
@@ -84,7 +80,6 @@ impl WorkRam {
             vdp2_vram: RwLock::new(vec![0; 0x80000].into_boxed_slice().try_into().unwrap()),
             vdp2_cram: RwLock::new(vec![0; 0x1000].into_boxed_slice().try_into().unwrap()),
             vdp2_regs: RwLock::new(vec![0; 0x200].into_boxed_slice().try_into().unwrap()),
-            cs2_regs: RwLock::new(vec![0; 0x1000].into_boxed_slice().try_into().unwrap()),
             backup_ram: RwLock::new(vec![0; 0x10000].into_boxed_slice().try_into().unwrap()),
             smpc_regs: RwLock::new(vec![0; 0x80].into_boxed_slice().try_into().unwrap()),
             mem4b: std::sync::atomic::AtomicBool::new(false),

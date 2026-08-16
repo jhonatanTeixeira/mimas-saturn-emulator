@@ -204,6 +204,8 @@ pub struct Sh2 {
     /// working unchanged. See `crate::smpc` and
     /// `docs/implementation-plans/smpc-peripheral.md` Phase 0.
     pub smpc: Option<Arc<std::sync::Mutex<crate::smpc::Smpc>>>,
+    /// The real CS2 / CD-block subsystem.
+    pub cs2: Option<Arc<std::sync::Mutex<crate::cs2::Cs2>>>,
     /// This CPU's own pending-interrupt queue (`docs/implementation-plans/sh2-cpu.md`
     /// Phase 5) -- real hardware's per-SH-2 `interrupts[]`, polled once per
     /// `step()` by `service_pending_interrupt`. **Not** `Option` -- every
@@ -485,6 +487,7 @@ impl Sh2 {
             speed: None,
             scu,
             smpc: None,
+            cs2: None,
             irq_in,
             onchip: crate::sh2_onchip::Sh2OnChip::new(is_slave),
             address_array: [0; 0x100],
@@ -922,15 +925,7 @@ impl Sh2 {
                 }
             }
             MemRegion::ScuRegs(off) => self.scu.read_byte(off),
-            MemRegion::Cs2Regs(off) => {
-                let masked_off = off & 0xFFFFF;
-                if masked_off < 0x1000 {
-                    let ram = self.work_ram.cs2_regs.read().unwrap();
-                    ram[masked_off]
-                } else {
-                    0
-                }
-            }
+            MemRegion::Cs2Regs(_) => 0xFF,
             MemRegion::BackupRam(off) => {
                 let ram = self.work_ram.backup_ram.read().unwrap();
                 ram[off & (ram.len() - 1)]
@@ -1048,18 +1043,7 @@ impl Sh2 {
             MemRegion::ScuRegs(off) => {
                 self.scu.write_byte(off, val);
             }
-            MemRegion::Cs2Regs(off) => {
-                let masked_off = off & 0xFFFFF;
-                if masked_off < 0x1000 {
-                    {
-                        let mut ram = self.work_ram.cs2_regs.write().unwrap();
-                        ram[masked_off] = val;
-                    }
-                    if masked_off == 6 || masked_off == 7 {
-                        self.execute_cdrom_command();
-                    }
-                }
-            }
+            MemRegion::Cs2Regs(_) => {}
             MemRegion::BackupRam(off) => {
                 let mut ram = self.work_ram.backup_ram.write().unwrap();
                 let mask = ram.len() - 1;
@@ -1091,6 +1075,7 @@ impl Sh2 {
                     }
                 }
             }
+            // Real hardware: Purge Area (0x40000000-0x4FFFFFFF), writes purge the cache line
             MemRegion::PurgeArea => {
                 let uncached_addr = address & 0x0FFF_FFFF;
                 self.raw_write_byte(uncached_addr, val);
@@ -1099,6 +1084,7 @@ impl Sh2 {
             MemRegion::DataArray(off) => {
                 self.data_array[off & 0xFFF] = val;
             }
+            // On-chip registers: FRT, WDT, BSC, UBC, INTC, etc.
             MemRegion::OnChip(off) => {
                 self.write_onchip_byte(off, val);
             }
@@ -1118,9 +1104,6 @@ impl Sh2 {
         self.check_bus_miss(address, true, 1);
         self.bus_wait();
         self.add_wait_states_w(address);
-        if address == 0x0600_1000 {
-            self.cdrom_command_executed = true;
-        }
         self.raw_write_byte(address, val);
     }
 
@@ -1145,9 +1128,6 @@ impl Sh2 {
         }
         self.bus_wait();
         self.add_wait_states_w(address);
-        if address == 0x0600_1000 {
-            self.cdrom_command_executed = true;
-        }
         self.raw_write_word(address, val);
     }
 
@@ -1170,9 +1150,6 @@ impl Sh2 {
         }
         self.bus_wait();
         self.add_wait_states_w(address);
-        if address <= 0x0600_1000 && address + 4 > 0x0600_1000 {
-            self.cdrom_command_executed = true;
-        }
         self.raw_write_long(address, val);
     }
 
@@ -1317,17 +1294,7 @@ impl Sh2 {
                 let b1 = self.raw_read_byte_region(MemRegion::ScuRegs(off + 1));
                 ((b0 as u16) << 8) | (b1 as u16)
             }
-            MemRegion::Cs2Regs(off) => {
-                let masked_off = off & 0xFFFFF;
-                if masked_off < 0x1000 {
-                    let ram = self.work_ram.cs2_regs.read().unwrap();
-                    let b0 = ram[masked_off] as u16;
-                    let b1 = ram[(masked_off + 1) & 0xFFF] as u16;
-                    (b0 << 8) | b1
-                } else {
-                    0
-                }
-            }
+            MemRegion::Cs2Regs(off) => self.read_cs2_word(off),
             MemRegion::BackupRam(off) => {
                 let ram = self.work_ram.backup_ram.read().unwrap();
                 let mask = ram.len() - 1;
@@ -1351,7 +1318,7 @@ impl Sh2 {
         }
     }
 
-    fn raw_read_long_region(&self, region: MemRegion, address: u32) -> u32 {
+    fn raw_read_long_region(&self, region: MemRegion, _address: u32) -> u32 {
         match region {
             MemRegion::Bios(off) => {
                 let index = off & 0x7FFFF;
@@ -1480,19 +1447,7 @@ impl Sh2 {
                     self.scu.read_long(off)
                 }
             }
-            MemRegion::Cs2Regs(off) => {
-                let masked_off = off & 0xFFFFF;
-                if masked_off < 0x1000 {
-                    let ram = self.work_ram.cs2_regs.read().unwrap();
-                    let b0 = ram[masked_off] as u32;
-                    let b1 = ram[(masked_off + 1) & 0xFFF] as u32;
-                    let b2 = ram[(masked_off + 2) & 0xFFF] as u32;
-                    let b3 = ram[(masked_off + 3) & 0xFFF] as u32;
-                    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
-                } else {
-                    0
-                }
-            }
+            MemRegion::Cs2Regs(off) => self.read_cs2_long(off),
             MemRegion::BackupRam(off) => {
                 let ram = self.work_ram.backup_ram.read().unwrap();
                 let mask = ram.len() - 1;
@@ -1608,34 +1563,18 @@ impl Sh2 {
                 ram[off & mask] = (val >> 8) as u8;
                 ram[(off + 1) & mask] = val as u8;
             }
-            MemRegion::ScuRegs(off) => {
+            MemRegion::ScuRegs(_off) => {
                 self.raw_write_byte(address, (val >> 8) as u8);
                 self.raw_write_byte(address.wrapping_add(1), val as u8);
             }
-            MemRegion::Cs2Regs(off) => {
-                let masked_off = off & 0xFFFFF;
-                if masked_off < 0x1000 {
-                    {
-                        let mut ram = self.work_ram.cs2_regs.write().unwrap();
-                        ram[masked_off] = (val >> 8) as u8;
-                        ram[(masked_off + 1) & 0xFFF] = val as u8;
-                    }
-                    if masked_off == 6
-                        || masked_off == 7
-                        || masked_off + 1 == 6
-                        || masked_off + 1 == 7
-                    {
-                        self.execute_cdrom_command();
-                    }
-                }
-            }
+            MemRegion::Cs2Regs(off) => self.write_cs2_word(off, val),
             MemRegion::BackupRam(off) => {
                 let mut ram = self.work_ram.backup_ram.write().unwrap();
                 let mask = ram.len() - 1;
                 ram[(off | 1) & mask] = (val >> 8) as u8;
                 ram[((off + 1) | 1) & mask] = val as u8;
             }
-            MemRegion::Smpc(off) => {
+            MemRegion::Smpc(_off) => {
                 self.raw_write_byte(address, (val >> 8) as u8);
                 self.raw_write_byte(address.wrapping_add(1), val as u8);
             }
@@ -1778,21 +1717,7 @@ impl Sh2 {
                     }
                 }
             }
-            MemRegion::Cs2Regs(off) => {
-                let masked_off = off & 0xFFFFF;
-                if masked_off < 0x1000 {
-                    {
-                        let mut ram = self.work_ram.cs2_regs.write().unwrap();
-                        ram[masked_off] = (val >> 24) as u8;
-                        ram[(masked_off + 1) & 0xFFF] = (val >> 16) as u8;
-                        ram[(masked_off + 2) & 0xFFF] = (val >> 8) as u8;
-                        ram[(masked_off + 3) & 0xFFF] = val as u8;
-                    }
-                    if (masked_off..masked_off + 4).any(|o| o == 6 || o == 7) {
-                        self.execute_cdrom_command();
-                    }
-                }
-            }
+            MemRegion::Cs2Regs(off) => self.write_cs2_long(off, val),
             MemRegion::BackupRam(off) => {
                 let mut ram = self.work_ram.backup_ram.write().unwrap();
                 let mask = ram.len() - 1;
@@ -1801,14 +1726,14 @@ impl Sh2 {
                 ram[((off + 2) | 1) & mask] = (val >> 8) as u8;
                 ram[((off + 3) | 1) & mask] = val as u8;
             }
-            MemRegion::Smpc(off) => {
+            MemRegion::Smpc(_off) => {
                 self.raw_write_byte(address, (val >> 24) as u8);
                 self.raw_write_byte(address.wrapping_add(1), (val >> 16) as u8);
                 self.raw_write_byte(address.wrapping_add(2), (val >> 8) as u8);
                 self.raw_write_byte(address.wrapping_add(3), val as u8);
             }
             MemRegion::OnChip(off) => {
-                self.write_onchip(off & !3, val);
+                self.write_onchip(off, val);
             }
             MemRegion::PurgeArea => {}
             MemRegion::AddressArray(off) => {
@@ -1872,6 +1797,7 @@ impl Sh2 {
         self.sr & SR_S != 0
     }
 
+    #[allow(dead_code)]
     fn set_s(&mut self, val: bool) {
         if val {
             self.sr |= SR_S;
@@ -1990,7 +1916,7 @@ impl Sh2 {
         self.dma_proc(200);
     }
 
-    pub fn dma_proc(&mut self, mut cycles: u32) {
+    pub fn dma_proc(&mut self, cycles: u32) {
         // 1. AE / NMIF abort check
         if (self.onchip.dmaor & 0x6) != 0 {
             self.onchip.dmaor &= !1; // Clear DME
@@ -2344,6 +2270,10 @@ impl Sh2 {
                 if self.scu.advance_video_line(&self.work_ram) {
                     if let Some(ref sync) = self.sync {
                         sync.set_thread_active(3, true);
+                        if let Some(ref cs2) = self.cs2 {
+                            cs2.lock().unwrap().vblank_pending = true;
+                            sync.set_thread_active(7, true);
+                        }
                     }
                 }
                 // Phase 6: V-Blank IN/OUT, H-Blank IN, and Timer 0 (fired
@@ -4017,10 +3947,10 @@ impl Sh2 {
                 self.onchip.mcr = (val & 0xFEFC) as u16;
             }
             0x1F0 => {
-                self.onchip.rtcsr = (((val >> 16) & 0xF8) as u16);
+                self.onchip.rtcsr = ((val >> 16) & 0xF8) as u16;
             }
             0x1F8 => {
-                self.onchip.rtcor = (((val >> 16) & 0xFF) as u16);
+                self.onchip.rtcor = ((val >> 16) & 0xFF) as u16;
             }
 
             // UBC
@@ -4092,37 +4022,43 @@ impl Sh2 {
         }
     }
 
-    fn execute_cdrom_command(&mut self) {
-        let (cr1, cr2, cr3, cr4) = {
-            let ram = self.work_ram.cs2_regs.read().unwrap();
-            let c1 = u16::from_be_bytes([ram[0], ram[1]]);
-            let c2 = u16::from_be_bytes([ram[2], ram[3]]);
-            let c3 = u16::from_be_bytes([ram[4], ram[5]]);
-            let c4 = u16::from_be_bytes([ram[6], ram[7]]);
-            (c1, c2, c3, c4)
-        };
+    pub fn read_cs2_word(&self, off: usize) -> u16 {
+        if let Some(ref cs2) = self.cs2 {
+            cs2.lock().unwrap().read_word(off)
+        } else {
+            0
+        }
+    }
 
-        let cmd = (cr1 >> 8) as u8;
-        match cmd {
-            0x00 => {
-                // Get Status
-                let mut ram = self.work_ram.cs2_regs.write().unwrap();
-                // CR1 = 0x0400 (Status: open/closed, busy, etc.)
-                ram[0] = 0x04;
-                ram[1] = 0x00;
-                // HIRQ = 0x0001 (Command completed)
-                ram[8] = 0x00;
-                ram[9] = 0x01;
+    pub fn write_cs2_word(&mut self, off: usize, val: u16) {
+        if let Some(ref cs2) = self.cs2 {
+            cs2.lock().unwrap().write_word(off, val);
+            let masked = off & 0xFFFFF;
+            if masked == 0x90024 || masked == 0x90026 {
+                if let Some(ref sync) = self.sync {
+                    sync.set_thread_active(7, true);
+                }
             }
-            0x02 => {
-                // Get Play Status
-                let mut ram = self.work_ram.cs2_regs.write().unwrap();
-                ram[0] = 0x04;
-                ram[1] = 0x00;
-                ram[8] = 0x00;
-                ram[9] = 0x01;
+        }
+    }
+
+    pub fn read_cs2_long(&self, off: usize) -> u32 {
+        if let Some(ref cs2) = self.cs2 {
+            cs2.lock().unwrap().read_long(off)
+        } else {
+            0
+        }
+    }
+
+    pub fn write_cs2_long(&mut self, off: usize, val: u32) {
+        if let Some(ref cs2) = self.cs2 {
+            cs2.lock().unwrap().write_long(off, val);
+            let masked = off & 0xFFFFF;
+            if masked == 0x90024 || masked == 0x90026 {
+                if let Some(ref sync) = self.sync {
+                    sync.set_thread_active(7, true);
+                }
             }
-            _ => {}
         }
     }
 
@@ -4789,7 +4725,7 @@ mod opcode_tests {
         // hanging that wait loop indefinitely -- this is what backs it with
         // a plain flag Core 3 sets/clears on its own frame clock instead
         // (`docs/implementation-plans/scu.md` Phase 3).
-        let mut cpu = make_cpu();
+        let cpu = make_cpu();
         cpu.work_ram
             .vblank_active
             .store(true, std::sync::atomic::Ordering::Release);
@@ -4912,7 +4848,6 @@ mod opcode_tests {
         // previously Unmapped (writes silently discarded).
         let mut cpu = make_cpu();
         let probes: &[(u32, &str)] = &[
-            (0x0580_0000, "CS2/CD-ROM regs"),
             (0x05A0_0000, "sound ram"),
             (0x05B0_0000, "SCSP regs"),
             (0x05C0_0000, "VDP1 VRAM"),
@@ -5018,17 +4953,21 @@ mod opcode_tests {
     #[test]
     fn test_cdrom_handshake() {
         let mut cpu = make_cpu();
+        let cs2 = Arc::new(Mutex::new(crate::cs2::Cs2::new()));
+        cpu.cs2 = Some(cs2.clone());
 
-        // Write CR1 = 0x0000, CR2 = 0x0000, CR3 = 0x0000, CR4 = 0x0000 (Get Status command)
-        cpu.write_word(0x05800000, 0x0000); // CR1
-        cpu.write_word(0x05800002, 0x0000); // CR2
-        cpu.write_word(0x05800004, 0x0000); // CR3
-        cpu.write_word(0x05800006, 0x0000); // CR4 (triggers command)
+        // Write CR1 = 0x0000 (Get Status command), CR2..CR4 = 0
+        cpu.write_word(0x05890018, 0x0000); // CR1
+        cpu.write_word(0x0589001C, 0x0000); // CR2
+        cpu.write_word(0x05890020, 0x0000); // CR3
+        cpu.write_word(0x05890024, 0x0000); // CR4 (triggers command)
 
-        // Verify response CR1 = 0x0400
-        assert_eq!(cpu.read_word(0x05800000), 0x0400);
-        // Verify HIRQ = 0x0001
-        assert_eq!(cpu.read_word(0x05800008), 0x0001);
+        cs2.lock().unwrap().exec(60);
+
+        // Verify response CR1 status (NODISC = 0x0700)
+        assert_eq!(cpu.read_word(0x05890018), 0x0700);
+        // Verify HIRQ has CMOK bit set
+        assert_eq!(cpu.read_word(0x05890008) & 0x0001, 0x0001);
     }
 
     #[test]
@@ -5292,9 +5231,9 @@ mod opcode_tests {
         assert_eq!(cpu.read_byte(0x05A4_0000), 0x00); // 256KB mirror mode is off, offset 256KB should be 0
         assert_eq!(cpu.read_byte(0x05A8_0000), 0xFF); // offset > 512KB (0x80000) returns all-ones (0xFF)
 
-        // 7. CS2 20-bit offset (no aliasing)
+        // 7. CS2 20-bit offset (no aliasing) & open-bus byte read
         cpu.write_byte(0x0580_0000, 0x12);
-        assert_eq!(cpu.read_byte(0x0581_8000), 0); // FIFO offset doesn't alias onto CR1
+        assert_eq!(cpu.read_byte(0x0581_8000), 0xFF); // CS2 byte reads return open bus (0xFF)
     }
 
     #[test]
@@ -5304,7 +5243,7 @@ mod opcode_tests {
         use std::thread;
         use std::time::{Duration, Instant};
 
-        let arbiter = Arc::new(BusArbiter::new());
+        let _arbiter = Arc::new(BusArbiter::new());
         let work_ram = Arc::new(WorkRam::new());
         let running = Arc::new(AtomicBool::new(true));
 

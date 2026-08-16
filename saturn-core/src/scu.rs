@@ -361,6 +361,7 @@ pub struct Scu {
     pub dma: Mutex<[DmaLevel; 3]>,
     pub timers: Mutex<ScuTimers>,
     pub dsp: Mutex<ScuDsp>,
+    pub cs2: Mutex<Option<Arc<Mutex<crate::cs2::Cs2>>>>,
 }
 
 impl Scu {
@@ -371,6 +372,39 @@ impl Scu {
             dma: Mutex::new([DmaLevel::default(); 3]),
             timers: Mutex::new(ScuTimers::default()),
             dsp: Mutex::new(ScuDsp::new()),
+            cs2: Mutex::new(None),
+        }
+    }
+
+    pub fn set_cs2(&self, cs2: Arc<Mutex<crate::cs2::Cs2>>) {
+        *self.cs2.lock().unwrap() = Some(cs2);
+    }
+
+    pub fn dma_read_long(&self, work_ram: &WorkRam, addr: u32) -> u32 {
+        let a = addr & 0x0FFF_FFFF;
+        if (0x0580_0000..0x0590_0000).contains(&a) {
+            let guard = self.cs2.lock().unwrap();
+            if let Some(ref cs2) = *guard {
+                let off = (a - 0x0580_0000) as usize;
+                return cs2.lock().unwrap().read_long(off);
+            }
+            0
+        } else {
+            crate::scu_dsp::read_long(work_ram, a)
+        }
+    }
+
+    pub fn dma_read_word(&self, work_ram: &WorkRam, addr: u32) -> u16 {
+        let a = addr & 0x0FFF_FFFF;
+        if (0x0580_0000..0x0590_0000).contains(&a) {
+            let guard = self.cs2.lock().unwrap();
+            if let Some(ref cs2) = *guard {
+                let off = (a - 0x0580_0000) as usize;
+                return cs2.lock().unwrap().read_word(off);
+            }
+            0
+        } else {
+            crate::scu_dsp::read_word(work_ram, a)
         }
     }
 
@@ -820,12 +854,12 @@ impl Scu {
     /// re-reading a possibly-since-modified address on a later pass. A
     /// non-constant source (some live register) is deliberately left
     /// uncached and re-read every iteration in `fill_iteration`.
-    fn prime_fill_cache(lvl: &mut DmaLevel, work_ram: &WorkRam) {
+    fn prime_fill_cache(&self, lvl: &mut DmaLevel, work_ram: &WorkRam) {
         if lvl.read_add != 0 {
             return; // copy mode: no cache, `read_address` genuinely advances.
         }
         if Self::is_constant_fill_source(lvl.read_address) {
-            lvl.fill_value = crate::scu_dsp::read_long(work_ram, lvl.read_address & 0x0FFF_FFFF);
+            lvl.fill_value = self.dma_read_long(work_ram, lvl.read_address);
             lvl.fill_cached = true;
         } else {
             lvl.fill_cached = false;
@@ -837,21 +871,21 @@ impl Scu {
     /// and every subsequent chain step (`load_next_descriptor`) -- both are
     /// "load whatever `table_addr` currently points at", just with a
     /// different address source.
-    fn load_descriptor_at(lvl: &mut DmaLevel, work_ram: &WorkRam, table_addr: u32) {
-        let count = crate::scu_dsp::read_long(work_ram, table_addr);
-        let dst = crate::scu_dsp::read_long(work_ram, table_addr.wrapping_add(4));
-        let src = crate::scu_dsp::read_long(work_ram, table_addr.wrapping_add(8));
+    fn load_descriptor_at(&self, lvl: &mut DmaLevel, work_ram: &WorkRam, table_addr: u32) {
+        let count = self.dma_read_long(work_ram, table_addr);
+        let dst = self.dma_read_long(work_ram, table_addr.wrapping_add(4));
+        let src = self.dma_read_long(work_ram, table_addr.wrapping_add(8));
         lvl.transfer_number = count;
         lvl.write_address = dst;
         lvl.read_address = src;
-        Self::prime_fill_cache(lvl, work_ram);
+        self.prime_fill_cache(lvl, work_ram);
     }
 
     /// §2.5's chain-advance step: `InDirectAdress` always points at the
     /// *next* descriptor to load, advanced by `0xC` bytes after each load.
-    fn load_next_descriptor(lvl: &mut DmaLevel, work_ram: &WorkRam) {
+    fn load_next_descriptor(&self, lvl: &mut DmaLevel, work_ram: &WorkRam) {
         let table_ptr = lvl.indirect_address;
-        Self::load_descriptor_at(lvl, work_ram, table_ptr);
+        self.load_descriptor_at(lvl, work_ram, table_ptr);
         lvl.indirect_address = table_ptr.wrapping_add(0xC);
     }
 
@@ -949,10 +983,10 @@ impl Scu {
 
         if indirect {
             lvl.indirect_address = write_address_reg.wrapping_add(0xC);
-            Self::load_descriptor_at(&mut lvl, work_ram, write_address_reg);
+            self.load_descriptor_at(&mut lvl, work_ram, write_address_reg);
         } else {
             lvl.transfer_number = Self::clamp_direct_count(level, raw_count);
-            Self::prime_fill_cache(&mut lvl, work_ram);
+            self.prime_fill_cache(&mut lvl, work_ram);
         }
 
         self.dma.lock().unwrap()[level] = lvl;
@@ -963,11 +997,11 @@ impl Scu {
     /// `write_add` *twice*; everything else writes one 32-bit long. The
     /// source pointer is masked to `0x0FFF_FFFF` at the access (§1.2) but
     /// otherwise never advances in fill mode (`read_add == 0`).
-    fn fill_iteration(lvl: &mut DmaLevel, work_ram: &WorkRam) {
+    fn fill_iteration(&self, lvl: &mut DmaLevel, work_ram: &WorkRam) {
         let value = if lvl.fill_cached {
             lvl.fill_value
         } else {
-            crate::scu_dsp::read_long(work_ram, lvl.read_address & 0x0FFF_FFFF)
+            self.dma_read_long(work_ram, lvl.read_address)
         };
         lvl.read_address = lvl.read_address.wrapping_add(lvl.read_add);
 
@@ -993,28 +1027,25 @@ impl Scu {
     /// `read_add`'s decoded value (always 4) is never actually used as the
     /// source stride here -- the source always advances by the natural
     /// access width (2 or 4) instead, exactly as §2.4 documents.
-    fn copy_iteration(lvl: &mut DmaLevel, work_ram: &WorkRam) {
+    fn copy_iteration(&self, lvl: &mut DmaLevel, work_ram: &WorkRam) {
         let dst_is_bbus = Self::is_b_bus_dma(lvl.write_address);
         let src_is_bbus = Self::is_b_bus_dma(lvl.read_address);
         if dst_is_bbus {
-            let src = lvl.read_address & 0x0FFF_FFFF;
-            let val = crate::scu_dsp::read_word(work_ram, src);
+            let val = self.dma_read_word(work_ram, lvl.read_address);
             let dst = lvl.write_address & 0x0FFF_FFFF;
             crate::scu_dsp::write_word(work_ram, dst, val);
             lvl.read_address = lvl.read_address.wrapping_add(2);
             lvl.write_address = lvl.write_address.wrapping_add(lvl.write_add);
             lvl.transfer_number = lvl.transfer_number.saturating_sub(2);
         } else if src_is_bbus {
-            let src = lvl.read_address & 0x0FFF_FFFF;
-            let val = crate::scu_dsp::read_word(work_ram, src);
+            let val = self.dma_read_word(work_ram, lvl.read_address);
             let dst = lvl.write_address & 0x0FFF_FFFF;
             crate::scu_dsp::write_word(work_ram, dst, val);
             lvl.read_address = lvl.read_address.wrapping_add(2);
             lvl.write_address = lvl.write_address.wrapping_add(lvl.write_add >> 1);
             lvl.transfer_number = lvl.transfer_number.saturating_sub(2);
         } else {
-            let src = lvl.read_address & 0x0FFF_FFFF;
-            let val = crate::scu_dsp::read_long(work_ram, src);
+            let val = self.dma_read_long(work_ram, lvl.read_address);
             let dst = lvl.write_address & 0x0FFF_FFFF;
             crate::scu_dsp::write_long(work_ram, dst, val);
             lvl.read_address = lvl.read_address.wrapping_add(4);
@@ -1049,9 +1080,9 @@ impl Scu {
             }
             let indirect = lvl.mode_address_update & 0x0100_0000 != 0;
             if lvl.read_add == 0 {
-                Self::fill_iteration(&mut lvl, work_ram);
+                self.fill_iteration(&mut lvl, work_ram);
             } else {
-                Self::copy_iteration(&mut lvl, work_ram);
+                self.copy_iteration(&mut lvl, work_ram);
             }
             budget -= 1;
 
@@ -1078,7 +1109,7 @@ impl Scu {
                     self.raise_dma_end(level);
                     break;
                 }
-                Self::load_next_descriptor(&mut lvl, work_ram);
+                self.load_next_descriptor(&mut lvl, work_ram);
             }
             self.dma.lock().unwrap()[level] = lvl;
         }
