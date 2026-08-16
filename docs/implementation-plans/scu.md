@@ -522,77 +522,115 @@ deferred item above) rather than strengthened to assert final state.
 
 ---
 
-## Phase 2 — Real SCU register file (repurpose `scu.rs`)
+## Phase 2 — Real SCU register file (repurpose `scu.rs`) — done
 
 Pure scaffolding: no new behavior beyond exact register semantics. Everything
-after this phase plugs into it.
+after this phase plugs into it. **Status: done, see `history.md` Chapter 29.**
 
-- [ ] Replace `saturn-core/src/scu.rs` wholesale per §2 of this document. New
+- [x] Replace `saturn-core/src/scu.rs` wholesale per §2 of this document. New
       `Scu` with `regs`/`irq`/`dma`/`timers`/`dsp` sub-locks; delete
       `start_dma` and `run_dsp_instruction`.
-- [ ] `ScuRegisters`: typed fields for every offset in §1.1's table —
+- [x] `ScuRegisters`: typed fields for every offset in §1.1's table —
       `d0r d0w d0c d0ad d0en d0md`, `d1*`, `d2*`, `dstp`, `dsta`, `t0c`, `t1s`,
       `t1md`, `ims`, `ist`, `aiack`, `asr0`, `asr1`, `aref`, `rsel`, `ver`.
-- [ ] Apply §0.1's reset table in `Scu::new()`/`reset()`: `DnAD = 0x101`,
-      `DnEN = 0`, `DnMD = 0x7`, `DSTP = 0`, `DSTA = 0`, DSP
-      `ProgControlPort = 0`, `PDA = 0`, `T1MD = 0`, `IMS = 0xBFFF`, `IST = 0`,
-      `AIACK = 0`, `ASR0/1 = 0`, `AREF = 0`, `RSEL = 0`, `VER = 0x04`, timers
-      and DMA working copies zeroed. Note §0.1's explicit exception: reset does
-      **not** clear DSP `ProgramRam`, `MD[][]`, `PC`, `CT[]`, `RA0`/`WA0` or
-      `jmpaddr`.
-- [ ] Address decode: mask the offset with `0xFF` (§1.1) so the 256-byte file
-      mirrors across the whole 64 KiB page. This replaces `sh2.rs:466`'s
-      `off & 0xFFF` and removes the silent-drop at `sh2.rs:677`.
-- [ ] Long read: implement exactly the R column of §1.1 — `D0R`/`D0W`/`D0C`
-      (`0x00`/`0x04`/`0x08`) and their level-1/2 equivalents, `DSTA` (`0x7C`,
-      with the live busy-bit recompute of §1.3), `0x80` and `0x8C` (already in
-      `ScuDsp`), `IST` (`0xA4`), `AIACK` (`0xA8`), `RSEL` (`0xC4`),
-      `VER` (`0xC8` → `0x04`).
-- [ ] Long write: implement the W column — all `DnR/W/C/AD/EN/MD`, `DSTP`,
-      `DSTA`, the four DSP ports, `T0C`/`T1S`/`T1MD`, `IMS`, `IST`, `AIACK`,
-      `ASR0`/`ASR1`/`AREF`, `RSEL`.
-- [ ] Byte access: `0xA7` read/write per §1.4. Every other byte offset →
-      log once via the existing `log_reg_access_once` machinery
-      (`sh2.rs:242-257`) and fall through to a raw byte fallback rather than
-      the reference's hard "unhandled, return 0" — see §9, deviation note 2.
-- [ ] Word access: §1.1 quirk / deviation #20 says all 16-bit SCU accesses are
-      no-ops in the reference. That is tagged **[QUIRK]** (an emulator
-      shortcut), not hardware behavior, so **do not copy it** — keep 16-bit
-      access as two byte accesses over the modelled register file and log it
-      once. Revisit only if a real BIOS trace shows a 16-bit SCU access whose
-      behavior matters.
-- [ ] Route `MemRegion::ScuRegs` in `sh2.rs` (read `:465-468`, write
-      `:557-561`, long read `:645-649`, long write `:669-698`) through
-      `Scu` instead of `work_ram.scu_regs`. Keep the existing DSP-port
-      early-return shape; it already works.
-- [ ] Retire `WorkRam::scu_regs` (`shared_buffers.rs:47`, `:80`) once nothing
-      reads it. Check `vdp.rs` and the frontends first.
-- [ ] `Sh2::scu: Option<Arc<Scu>>` replaces `Sh2::scu_dsp` (`sh2.rs:163`);
-      `SaturnSystem::scu: Arc<Scu>` replaces `scu_dsp` (`lib.rs:73`, `:102`,
-      `:139`, `:151`, `:319`). **Do not change `Sh2::new()`'s signature.**
-- [ ] Rewrite the two dead-`Scu` tests instead of deleting them silently:
-      `e2e-tests/src/lib.rs:228` becomes a real assertion of §0.1's reset
-      values; `e2e-tests/src/lib.rs:578` (`start_dma(3)` → `Err`) is deleted —
-      "invalid channel" is not a hardware concept, the register map decodes
-      exactly three levels and everything else falls into the unhandled
-      default.
+- [x] Apply §0.1's reset table in `Scu::new()`/`reset()`: `DnAD = 0x101`,
+      `DnEN = 0`, `DnMD = 0x7`, `DSTP = 0`, `DSTA = 0`, `T1MD = 0`,
+      `IMS = 0xBFFF`, `IST = 0`, `AIACK = 0`, `ASR0/1 = 0`, `AREF = 0`,
+      `RSEL = 0`, `VER = 0x04`, timers and DMA working copies zeroed. Note
+      §0.1's explicit exception: reset does **not** clear DSP `ProgramRam`,
+      `MD[][]`, `PC`, `CT[]`, `RA0`/`WA0` or `jmpaddr` — `ScuDsp::new()` is
+      unaffected by `Scu::new()`, exactly as intended.
+- [x] Address decode: mask the offset with `0xFF` (§1.1) so the 256-byte file
+      mirrors across the whole 64 KiB page. **Already correct before this
+      phase** — `memory-bus.md` Phase 2 (Milestone 1) had already shrunk
+      `WorkRam::scu_regs` to `[u8; 0x100]` and every access site already
+      masked with `ram.len() - 1` (= `0xFF`); this phase's real work was
+      moving that storage into `Scu` with typed fields and real read
+      visibility, not fixing the mask itself (the plan's original citations
+      to a 4 KiB array / `& 0xFFF` bug were stale by the time this phase
+      landed).
+- [x] Long read: implements exactly the R column of §1.1 — `D0R`/`D0W`/`D0C`
+      and their level-1/2 equivalents, `DSTA` (`0x7C`, with the live
+      busy-bit recompute of §1.3), `IST` (`0xA4`), `AIACK` (`0xA8`), `RSEL`
+      (`0xC4`), `VER` (`0xC8` → `0x04`). `0x80`/`0x8C` (the DSP ports)
+      continue to be intercepted one level up, in `Sh2::read_scu_dsp_port`,
+      exactly as before this phase — they never reach `Scu::read_long` at
+      all.
+- [x] Long write: implements the W column — all `DnR/W/C/AD/EN/MD`, `DSTP`,
+      `DSTA`, `T0C`/`T1S`/`T1MD`, `IMS`, `IST`, `AIACK`, `ASR0`/`ASR1`/`AREF`,
+      `RSEL` as plain storage (no side effects yet — Phases 3/4/5's job).
+- [x] Byte access: `0xA7` read/write per §1.4 (AND-only clear on write). Every
+      other byte offset falls through to a real per-byte view of the
+      register's true stored value (`Scu::raw_get`/`raw_set`) rather than the
+      reference's hard "unhandled, return 0" — see §9, deviation note 2. The
+      existing `log_reg_access_once` machinery in `sh2.rs` is untouched and
+      still tags every SCU byte access.
+- [x] Word access: kept as two byte accesses over the modelled register file
+      (`raw_read_byte_region(MemRegion::ScuRegs(off))` composition, matching
+      the SMPC/VDP2-regs pattern already in `sh2.rs`) rather than copying the
+      reference's [QUIRK] no-op behavior (deviation #20).
+- [x] Routed `MemRegion::ScuRegs` in `sh2.rs` (byte/word/long read and write)
+      through `Scu` instead of `work_ram.scu_regs`. The DSP-port early-return
+      shape (`read_scu_dsp_port`/`write_scu_dsp_port`) is preserved, now
+      reading `self.scu.dsp` instead of the old separate `self.scu_dsp`.
+- [x] Retired `WorkRam::scu_regs` entirely (`shared_buffers.rs`). Confirmed via
+      a full-workspace grep that nothing outside `sh2.rs`/`shared_buffers.rs`
+      ever touched it (not `vdp.rs`, not either frontend, not `e2e-tests`).
+- [x] **Deliberate deviation from this plan's own wording**: `Sh2::scu` is
+      `Arc<Scu>` (**not** `Option<Arc<Scu>>`). `Sh2::new()`'s struct literal
+      gives every bare `Sh2` — including ones built by plain unit tests with
+      no `SaturnSystem` — its own private, fully-functional `Scu` by default;
+      `SaturnSystem::start` overwrites the field with a shared clone for
+      Core 0 and Core 6 (mirroring the existing `bios: Arc<Vec<u8>>` /
+      `set_bios_arc` shape, not the `Option<Arc<Mutex<T>>>` shape used for
+      `smpc`/the old `scu_dsp`). This was necessary, not stylistic: this
+      phase retires `WorkRam::scu_regs`, the byte array every bare-`Sh2` SCU
+      test previously fell back to when no DSP/SMPC was wired in. Making
+      `scu` genuinely optional would have meant either resurrecting that byte
+      array as a second fallback storage (defeating the point of retiring it)
+      or breaking every existing bare-`Sh2` SCU-register test. `SaturnSystem`
+      itself keeps `pub scu: Arc<Scu>` (not `Option`), matching the plan's own
+      wording for that field. `Sh2::new()`'s 3-argument signature is
+      unchanged either way. See `history.md` Chapter 29.
+- [x] Rewrote the two dead-`Scu` tests instead of deleting them silently:
+      `test_tier1_f4_scu_initialization` now asserts §0.1's real reset values;
+      `test_tier2_f4_scu_dma_channel_bounds` (`start_dma(3)` → `Err`) is
+      deleted outright, per this plan's own instruction — "invalid channel"
+      was never a hardware concept, and the note explaining the deletion is
+      left in place in `e2e-tests/src/lib.rs` rather than vanishing silently.
 
-### Testing (Phase 2)
+### Testing (Phase 2) — done
 
-- [ ] Reset-value test asserting every field in §0.1's table, with the
-      hardware-reference line cited per value.
-- [ ] Mirroring test: write at `0x05FE0000 + 0x00`, read back at
-      `0x05FE0100`, `0x05FE0200`, `0x05FE1000` — all must alias (§1.1).
-- [ ] `VER` reads `0x04` at `0xC8`; `IMS` long-read is unhandled (§1.1's
-      write-only quirk) — pick one behavior, assert it, and record it in §9.
-- [ ] Round-trip test for the `0xA7` byte window: `IST = 0xFFFF_FFFF`, byte
-      write `0x0F` at `0xA7` → `IST == 0xFFFF_FF0F` (§1.4's AND semantics).
-- [ ] `cargo test --workspace` green — this phase touches `sh2.rs`'s memory
-      path, which many existing tests exercise.
+- [x] Reset-value test asserting every field in §0.1's table
+      (`scu.rs::tests::reset_values_match_hardware_reference_table`), plus a
+      matching e2e-level assertion in `test_tier1_f4_scu_initialization`.
+- [x] Mirroring test (`register_file_mirrors_every_256_bytes`): write at
+      offset `0x00`, read back at `0x100` and `0xFF00` — both alias (§1.1).
+- [x] `VER` reads `0x04` and rejects writes
+      (`version_register_reads_4_and_rejects_writes`); `D0AD`/`D0EN`/`D0MD`
+      have no long-read handler but do store, confirmed via the internal
+      `raw_read_long` accessor
+      (`dnad_dnen_dnmd_have_no_long_read_handler_but_do_store`) — this is the
+      "pick one behavior, assert it" the original checklist item called for,
+      recorded as deviation #19 (match the reference: no read handler).
+- [x] Round-trip test for the `0xA7` byte window
+      (`ist_byte_write_is_and_only_clear`): `IST = 0xFFFF_FFFF`, byte write
+      `0xFE` at `0xA7` → `IST == 0xFFFF_FFFE`, and a second byte write of
+      `0xFF` confirms the AND semantics don't let a 1-write set anything back.
+- [x] `dsta_busy_bits_recompute_live_from_dma_state` and
+      `byte_fallback_reads_and_writes_individual_bytes_big_endian` cover the
+      two behaviors this phase added beyond the checklist's letter (DSTA's
+      live recompute, and the deliberate byte-fallback divergence).
+- [x] `cargo test --workspace` green (139 passed in `saturn-core`'s own test
+      binary including 7 new `scu::tests`, 70 in `e2e-tests`, plus the
+      existing adversarial/sync/fixture suites) — this phase touched
+      `sh2.rs`'s memory path, exercised by many pre-existing tests.
 
-**Done signal**: `work_ram.scu_regs` is gone, `Scu` is constructed by
-`SaturnSystem`, and behavior is otherwise unchanged (same real-BIOS boot PC
-trajectory as before the phase).
+**Done signal, met**: `work_ram.scu_regs` is gone, `Scu` is constructed by
+`SaturnSystem`, and behavior is otherwise unchanged (verified via
+`test_scu_dma_direct` and `peripheral_regions_are_real_readwrite_memory`,
+both pre-existing tests that exercise SCU registers end-to-end through
+`Sh2`, staying green unmodified).
 
 ---
 
@@ -607,40 +645,59 @@ replaces them; it does not run in parallel with them.
 
 ### 3a. Controller core (§4)
 
-- [ ] `ScuIrq { ims: u32, ist: u32, aiack: u32, queue: Vec<QueuedIrq>, }` with
+- [x] `ScuIrq { ims: u32, ist: u32, aiack: u32, queue: Vec<QueuedIrq>, }` with
       `QueuedIrq { vector: u8, level: u8, mask: u16, statusbit: u32 }`.
-- [ ] `send(vector, level, mask, statusbit)` implementing §4.2 exactly:
+      **Note**: `ims`/`ist`/`aiack` themselves ended up living on
+      `ScuRegisters` (Phase 2's register file), not duplicated onto `ScuIrq` —
+      `ScuIrq` only holds the staging `queue` plus `master_target`/
+      `slave_target` handles; `Scu::send`/`test_interrupt_mask` lock both
+      `regs` and `irq` together. Same net state, one less place it could get
+      out of sync.
+- [x] `send(vector, level, mask, statusbit)` implementing §4.2 exactly:
       - `mask & 0x8000` (external/A-Bus): deliver only if `AIACK != 0`, clear
         `AIACK`, and only if `IMS` bit 15 is clear. Otherwise **drop** — not
         queued, `IST` untouched (deviation #16).
       - else if `!(IMS & mask)`: deliver immediately, **`IST` untouched**.
       - else: queue + `IST |= statusbit`.
-      - Slave mirrors, regardless of mask state, when the slave is running:
+      - Slave mirrors, regardless of mask state, when a slave queue is wired:
         vector `0x42` → slave vector `0x41` level 1; vector `0x40` → slave
-        vector `0x43` level 2.
-- [ ] `queue_interrupt` per §4.3: dedupe by vector (return early, but the
+        vector `0x43` level 2. **Simplification** (see `ScuIrq::slave_target`'s
+        doc comment in `scu.rs`): real hardware only mirrors "when the slave
+        is running" (`yabsys.IsSSH2Running`); Mimas mirrors whenever a slave
+        queue is wired at all, since checking "is Core 1 genuinely active"
+        would need `Scu` to also hold a `LockStepSync` handle for this one
+        narrow case. Harmless in practice — Core 1 stays parked and never
+        calls `step()` until SSHON runs, so a stray mirrored entry just sits
+        unread in its queue.
+- [x] `queue_interrupt` per §4.3: dedupe by vector (return early, but the
       caller's `IST |= statusbit` still happens), then sort ascending by level.
-      Cap at 30 entries — the reference has no bounds check; Mimas should
-      saturate and log rather than grow unboundedly.
-- [ ] `test_interrupt_mask` (the drain) per §4.3: walk from the end
+      Cap at 30 entries — the reference has no bounds check; Mimas saturates
+      and logs once (`log_scu_irq_overrun_once`) rather than growing
+      unboundedly.
+- [x] `test_interrupt_mask` (the drain) per §4.3: walk from the end
       (highest level first); A-Bus entries consume `AIACK`; non-external
       entries whose `IST` bit was already cleared by the CPU are skipped;
       otherwise deliver, clear the `IST` bit, compact, and **break** — at most
       one non-external delivery per call. Called on writes to `IMS` (`0xA0`),
       `IST` (`0xA4` and the `0xA7` byte window) and `AIACK` (`0xA8`).
-- [ ] `IST` write semantics: `IST &= val` (long, `0xA4`) and
+- [x] `IST` write semantics: `IST &= val` (long, `0xA4`) and
       `IST &= (0xFFFFFF00 | val)` (byte, `0xA7`) — §4.4.
-- [ ] **Deviation to fix, not copy**: §4.4's `ScuRemoveInterruptByCPU` is dead
-      code from a C precedence bug (`0x01 == 0` binds first), which leaks stale
-      queue entries forever. Implement the *intended* behavior — when the CPU
-      clears an `IST` bit, drop the matching queue entry — and record it in §9.
-      Do **not** transliterate the bug.
-- [ ] Interrupt *withdrawal* (§4.6) is unimplemented in the reference (all the
-      `ScuRemove*` bodies are commented out). Match that; note it in §9.
+- [x] **Deviation to fix, not copy** (recorded as deviation #17): §4.4's
+      `ScuRemoveInterruptByCPU` is dead code from a C precedence bug
+      (`0x01 == 0` binds first), which leaks stale queue entries forever.
+      Mimas implements the *intended* behavior — `test_interrupt_mask` opens
+      with `irq.queue.retain(|q| regs.ist & q.statusbit != 0)`, dropping any
+      queued entry whose status bit the CPU already cleared by hand — instead
+      of transliterating the bug.
+- [x] Interrupt *withdrawal* (§4.6) is unimplemented in the reference (all the
+      `ScuRemove*` bodies are commented out). Matched — Mimas has no
+      `ScuIrq::remove`/withdraw method either; the only removal path is the
+      deviation #17 fix above (an *effect* of an `IST` write) and the natural
+      `break`/`remove(i)` inside `test_interrupt_mask` itself.
 
 ### 3b. Source entry points (all 30, §4.1)
 
-- [ ] One method per source, each a thin call into `send` with the exact
+- [x] One method per source, each a thin call into `send` with the exact
       (vector, level, mask, statusbit) tuple from §4.1's table:
       `vblank_in` `0x40`/15/`0x0001`/b0 · `vblank_out` `0x41`/14/`0x0002`/b1 ·
       `hblank_in` `0x42`/13/`0x0004`/b2 · `timer0` `0x43`/12/`0x0008`/b3 ·
@@ -653,69 +710,101 @@ replaces them; it does not run in parallel with them.
       entry point so it is reachable when illegal-DMA detection is added) ·
       `draw_end` `0x4D`/2/`0x2000`/b13 · `external(n)` for n=0..15, vectors
       `0x50`-`0x5F`, levels 7/7/7/7/4/4/4/4/1×8, all mask `0x8000`, status bits
-      16-31.
+      16-31. All 14 named methods plus `external(n: u8)` implemented verbatim
+      against §4.1; covered by `source_table_matches_hardware_reference_section_4_1`
+      and `external_source_table_matches_section_4_1`.
 - [ ] Every `send` call site for a source with a DMA start factor must also run
-      the factor check — deferred to Phase 6, but leave the hook where §2.3
-      puts it (after dispatch, unconditional on mask).
+      the factor check — **still deferred to Phase 6**, as planned; the hook
+      point exists (`send` is called unconditionally on mask from every source
+      method) but no factor check has been wired in yet.
 
 ### 3c. Migration of the four existing ad hoc paths
 
-- [ ] `Sh2::service_pending_interrupt` (`sh2.rs:908-952`) stops consulting
-      bools and instead asks the SCU for the highest-priority *deliverable*
-      request. Keep the SR-mask check and the exception-entry sequence (push SR
-      then PC, VBR-relative vector, raise mask to the interrupt's level) on the
-      SH-2 side — that is genuinely CPU behavior, and it is already correct.
-- [ ] Delete `Sh2::vblank_pending` (`:117`), `vblank_out_pending` (`:125`),
-      `smpc_irq_pending` (`:138`), `sound_req_irq` (`:148`) and the
-      `VBLANK_IN_*`/`VBLANK_OUT_*`/`SMPC_IRQ_*`/`SOUND_REQ_IRQ_*` constant pairs
-      (`sh2.rs:193-222`) — the tuples now live in the SCU's source table.
-- [ ] `Sh2::request_vblank_interrupt` / `request_vblank_out_interrupt`
-      (`sh2.rs:794-801`) become thin shims onto `Scu::vblank_in()` /
-      `vblank_out()` so the ~8 existing SH-2 interrupt tests
-      (`sh2.rs:2002`, `:2058`, `:2076`, `:2111`, `:2120`, `:2156`, `:2177`)
-      keep compiling; migrate them to drive the SCU directly in the same
-      commit, then drop the shims.
-- [ ] **Move VBLANK generation off Core 0.** `Sh2::run_loop`'s wall-clock
-      VBLANK timer (`sh2.rs:1688-1706`) is a second, independent frame clock
-      racing Core 3's own 16.6 ms tick (`lib.rs:207-233`). Core 3 should call
-      `Scu::vblank_in()` / `vblank_out()` on its existing frame edge; Core 0
-      then only *services* interrupts. This also fixes `tvstat_word`
-      (`sh2.rs:897-906`), which derives TVSTAT's VBLANK bit from Core 0's timer
-      rather than from the renderer's.
-- [ ] `M68k`'s sound-request path (`SaturnSystem::sound_req_irq`, `lib.rs:60`,
-      `m68k.rs`'s MCIPD write) targets `Scu::sound_request()` instead of the
-      shared `AtomicBool`.
+- [x] `Sh2::service_pending_interrupt` stops consulting bools and instead
+      calls `self.queue_peek()`/`queue_send`, which read the shared
+      `InterruptQueue` the SCU now pushes into via `deliver_to_master`. The
+      SR-mask check and exception-entry sequence (push SR then PC,
+      VBR-relative vector, raise mask to the interrupt's level) stayed
+      untouched on the SH-2 side, as planned.
+- [x] Deleted `Sh2::vblank_pending`, `vblank_out_pending`, `smpc_irq_pending`,
+      `sound_req_irq` and the `VBLANK_IN_*`/`VBLANK_OUT_*`/`SMPC_IRQ_*`/
+      `SOUND_REQ_IRQ_*` constant *values* — the (vector, level, mask,
+      statusbit) tuples now live solely in `Scu`'s source-method bodies.
+      **Note**: the four constant *names* are kept as `#[allow(dead_code)]`
+      test-documentation constants (existing tests reference them for
+      readability) rather than deleted outright — production dispatch never
+      reads them.
+- [x] `Sh2::request_vblank_interrupt` / `request_vblank_out_interrupt` were
+      **not** kept as shims — the plan's fallback path (shim first, migrate
+      tests, then drop the shim) was collapsed into one step: all call sites,
+      including every existing SH-2 interrupt test, were migrated directly to
+      drive `cpu.scu.vblank_in()` / `vblank_out()`, and both methods were
+      deleted outright in the same commit.
+- [x] **Moved VBLANK generation off Core 0.** `Sh2::run_loop`'s wall-clock
+      VBLANK timer is gone entirely (along with the `VBLANK_INTERVAL`/
+      `VBLANK_DURATION` consts it used). Core 3 (`vdp2-composite`,
+      `lib.rs`'s frame-tick closure) now calls `Scu::vblank_in()` at the top of
+      each ~16.6 ms tick and `Scu::vblank_out()` `vblank_duration` (2417 µs)
+      later, and stores the current state into the new
+      `WorkRam::vblank_active: AtomicBool` (Release). `Sh2::tvstat_word` now
+      reads that flag (Acquire) instead of deriving VBLANK from its own timer
+      — fixing the pre-existing bug where Master and Slave `Sh2::run_loop`
+      each ran an *independent* VBLANK clock (see `history.md` Chapter 30).
+- [x] `M68k`'s sound-request path (`M68k::scu: Option<Arc<Scu>>`, wired in
+      `lib.rs`'s Core 4 closure; MCIPD write handler in `m68k.rs`) calls
+      `Scu::sound_request()` directly instead of setting a shared
+      `AtomicBool` — and the corresponding per-instruction poll in
+      `Sh2::service_pending_interrupt` that used to check that `AtomicBool`
+      was deleted outright, per the user's explicit "no polling loops on the
+      sound path" instruction.
 
 ### Testing (Phase 3)
 
-- [ ] Source table test: for each of the 30 sources, assert the
-      (vector, level, mask, statusbit) tuple against §4.1. This is legitimate
-      independently-derived data — §4.1 was extracted from a different codebase
-      (`yabause/src/scu.c:3236-3481`), not from Mimas.
-- [ ] **Masked-latch test** (§4.2 consequence 1): `IMS = 0xFFFF`, send V-Blank
-      IN → no delivery to the SH-2, `IST` bit 0 **set**. Then send it again →
-      still one queue entry (dedupe, §4.3). Then `IMS = 0` → exactly **one**
+- [x] Source table test: `source_table_matches_hardware_reference_section_4_1`
+      and `external_source_table_matches_section_4_1` assert all 30
+      (vector, level, mask, statusbit) tuples against §4.1.
+- [x] **Masked-latch test**: `masked_interrupt_latches_ist_and_dedupes_then_delivers_once_unmasked` —
+      `IMS = 0xFFFF`, send V-Blank IN → no delivery, `IST` bit 0 set; sent
+      again → still one queue entry (dedupe); `IMS = 0` → exactly one
       delivery, `IST` bit 0 cleared.
-- [ ] **Unmasked-no-latch test** (§4.2 consequence 1): `IMS = 0`, send V-Blank
-      IN → delivered, `IST` bit 0 stays **0**. This asymmetry is the single
-      most surprising thing about the reference and the easiest to get wrong.
-- [ ] **AIACK-drop test** (§4.2 consequence 2): `AIACK = 0`, send External 00 →
-      dropped entirely; `IST` bit 16 stays 0 and nothing is queued.
-- [ ] **Level-ordering test**: queue Timer 1 (11), V-Blank IN (15) and Draw End
-      (2) while masked, then unmask — assert V-Blank IN is delivered first
-      (drain walks from the end of a level-ascending sort, §4.3).
-- [ ] **Stale-entry test** (the deviation in 3a): queue a masked interrupt, have
-      the CPU clear its `IST` bit, then unmask — assert the queue is empty and
-      nothing is delivered. Under the reference's buggy behavior the entry
-      would linger forever; the test documents the deliberate divergence.
-- [ ] End-to-end: a `SaturnSystem` boot run where Core 3's frame edge drives
-      VBLANK through the SCU and Core 0's PC still enters the BIOS's VBLANK
-      handler — the same observable that proved the original VBLANK-IN and
-      VBLANK-OUT work (`.development/ROADMAP.md` M2).
+- [x] **Unmasked-no-latch test**: `unmasked_interrupt_delivers_without_latching_ist` —
+      `IMS = 0`, send V-Blank IN → delivered, `IST` bit 0 stays 0.
+- [x] Additional tests beyond the plan's minimum, added while chasing edge
+      cases the plan's prose calls out but doesn't spell out as named tests:
+      `masked_external_interrupt_is_lost_not_queued` (deviation #16 — a masked
+      external interrupt is dropped, not queued/latched, unlike a masked
+      internal source), `external_interrupt_dropped_when_aiack_is_zero`,
+      `level_ordering_drains_highest_first`,
+      `stale_entry_is_removed_when_the_cpu_clears_its_ist_bit_by_hand`
+      (deviation #17), `slave_mirror_fires_regardless_of_master_mask_state`,
+      `hblank_in_mirrors_to_slave_vector_0x41_level_1`,
+      `no_slave_target_wired_is_a_silent_no_op`.
+
+- [x] **AIACK-drop test**: `external_interrupt_dropped_when_aiack_is_zero` —
+      `AIACK = 0`, send External 00 → dropped entirely; `IST` bit 16 stays 0
+      and nothing is queued.
+- [x] **Level-ordering test**: `level_ordering_drains_highest_first` — queue
+      Timer 1 (11), V-Blank IN (15) and Draw End (2) while masked, then
+      unmask — V-Blank IN is delivered first (drain walks from the end of a
+      level-ascending sort, §4.3).
+- [x] **Stale-entry test**: `stale_entry_is_removed_when_the_cpu_clears_its_ist_bit_by_hand` —
+      queue a masked interrupt, have the CPU clear its `IST` bit, then unmask —
+      the queue is empty and nothing is delivered. Under the reference's
+      buggy behavior the entry would linger forever; the test documents the
+      deliberate divergence (deviation #17).
+- [x] End-to-end: `cargo test --workspace` green (150 saturn-core + 70
+      e2e-tests + adversarial/real_fixtures/sync_tests suites, 0 failed) plus
+      a manual `MIMAS_BOOT_WATCH_SECS=90` run against
+      `Sega Saturn BIOS (USA).bin` post-migration — Core 0 still executes real
+      BIOS instructions and settles into the same CD-header polling loop
+      (PC cycling through `0x22xx`-`0x4Axx`) observed before this phase, with
+      no crash/panic and no stall short of that point — confirming `IMS`
+      genuinely gating delivery (default `0xBFFF`, everything masked) doesn't
+      regress real BIOS boot progress.
 
 **Done signal**: exactly one interrupt mechanism exists in the codebase; `grep
 -n "pending" saturn-core/src/sh2.rs` no longer finds per-source bools; the real
-BIOS reaches at least the same PC as before.
+BIOS reaches at least the same PC as before. **Confirmed.**
 
 ---
 
@@ -726,163 +815,224 @@ engine onto the thread that is already named for it.
 
 ### 4a. Engine state and trigger
 
-- [ ] `DmaLevel` mirroring §2.1's `scudmainfo_struct`: `mode` (the level
-      number 0/1/2, used only to pick the completion interrupt), `read_address`,
+- [x] `DmaLevel` mirroring §2.1's `scudmainfo_struct`: `read_address`,
       `write_address`, `transfer_number` (**`> 0` is the busy predicate**),
       `add_value`, `mode_address_update`, `read_add`, `write_add`,
       `indirect_address`. It is a *working copy* — the memory-mapped registers
-      are snapshotted at trigger and never written back (§2.1).
-- [ ] `set_add_value` per §1.2: `read_add = if DnAD & 0x100 { 4 } else { 0 }`;
+      are snapshotted at trigger and never written back (§2.1). **Not
+      reproduced**: the reference's `mode` field (the literal level number)
+      — Mimas already knows the level from the array index `dma[level]` is
+      stored at, so a redundant copy was skipped. **Added, not in §2.1**:
+      `fill_cached`/`fill_value` (fill mode's single-read-at-trigger cache,
+      needed to keep a transfer spanning multiple Core-6 passes from
+      re-reading a constant source more than once — see 4b) and
+      `trigger_pending` (the CPU-to-Core-6 handoff flag, see below).
+- [x] `decode_add_value` per §1.2: `read_add = if DnAD & 0x100 { 4 } else { 0 }`;
       `write_add` from `DnAD[2:0]` → 0/2/4/8/16/32/64/128 bytes.
-- [ ] Count clamps per §1.2 (fixes **D-DMA-4**): level 0 keeps all 32 bits and
-      `0` means `0x100000`; levels 1 and 2 clamp `&= 0xFFF` and `0` means
-      `0x1000`; **indirect mode skips the clamp entirely**.
-- [ ] Trigger path (a), immediate (§2.2, fixes **D-DMA-7**): CPU writes `DnEN`
-      with bit 0 set **and** `DnMD[2:0] == 7`. If the level is already busy,
-      first flush *all three levels* to completion (§2.2's
-      `ScuDmaProc(scu, 0x7FFFFFFF)` — note it flushes every level, not just the
-      re-triggered one), then snapshot and start with a 128-unit budget.
+- [x] Count clamps (`clamp_direct_count`) per §1.2 (fixes **D-DMA-4**): level 0
+      keeps all 32 bits and `0` means `0x100000`; levels 1 and 2 clamp
+      `&= 0xFFF` and `0` means `0x1000`; indirect mode skips the clamp
+      entirely (the count comes from each descriptor instead).
+- [x] Trigger path (a), immediate (§2.2, fixes **D-DMA-7**): CPU writes `DnEN`
+      with bit 0 set **and** `DnMD[2:0] == 7`. **Deliberately split across two
+      threads, not one function**: `Scu::request_dma_trigger` (called from
+      `Sh2::write_long`, the CPU's own thread) only ever marks the level
+      `trigger_pending` and returns whether Core 6 needs waking — it does
+      *no* transfer work itself, mirroring exactly how the DSP's `EX`
+      control-port bit already hands off to Core 6. `Scu::service_trigger`
+      (called only from Core 6's own `step_dma_pass`) does the real work:
+      if the level is already busy, first flushes *all three levels* to
+      completion (§2.2's "flush every level, not just the re-triggered
+      one" hack, kept bug-for-bug), then snapshots and runs an immediate
+      128-unit burst. **Simplification**: the busy-flush runs synchronously
+      within that one Core-6 pass rather than across several bursts like
+      steady-state stepping — re-triggering a still-busy level essentially
+      never happens in real BIOS/game code (not observed in this phase's
+      own boot-watch run); recorded in `scu.rs`'s own doc comment on
+      `service_trigger`.
 - [ ] Trigger path (b), factor (§2.2/§2.3): `DnEN & 0x100` (armed) and
-      `DnMD[2:0] == factor_id`; after starting, `DnEN = 0` (one-shot). Wired in
-      Phase 6.
-- [ ] Indirect select is `DnMD & 0x1000000` — **bit 24** (§1.2, fixes
+      `DnMD[2:0] == factor_id`; after starting, `DnEN = 0` (one-shot).
+      **Still deferred to Phase 6** as the plan originally intended — the
+      hook point exists (every source method calls `send` unconditionally)
+      but no factor check is wired in yet.
+- [x] Indirect select is `DnMD & 0x1000000` — **bit 24** (§1.2, fixes
       **D-DMA-1**).
+- [x] **Found and fixed while implementing, not in the original checklist**:
+      §1.2 states "the whole written value is stored to `DnEN` after the
+      go-check" — i.e. real hardware does **not** clear `DnEN` after an
+      immediate trigger (only the still-unimplemented factor path does).
+      The pre-Phase-4 stand-in (`execute_scu_dma`) unconditionally cleared
+      it; the new engine deliberately does not, with a regression test
+      (`immediate_trigger_leaves_den_bit_set_real_hardware_never_auto_clears_it`).
 
 ### 4b. Transfer semantics (§2.4, §2.5)
 
-- [ ] **Fill mode** (`read_add == 0`, §2.4, fixes **D-DMA-5**): the
-      constant-source test — source in Low WRAM
-      (`(src & 0x1FF00000) == 0x00200000`), High WRAM
-      (`(src & 0x1E000000) == 0x06000000`), Sound RAM
-      (`(src & 0x1FF00000) == 0x05A00000`) or VDP1/VDP2 RAM
-      (`(src & 0x1DF00000) == 0x05C00000`) → read the source long once;
-      anything else → re-read every iteration (it is treated as a register).
-      Destination on the B-Bus → two 16-bit writes with `dst += write_add`
-      **twice** and `count -= 4`; otherwise one 32-bit write with
-      `dst += write_add`, `count -= 4`.
-- [ ] **Copy mode** (`read_add != 0`, §2.4, fixes **D-DMA-6**): destination on
-      B-Bus → 16-bit unit, `src += 2`, `dst += write_add`, `count -= 2`; source
-      on B-Bus → 16-bit unit, `src += 2`, `dst += (write_add >> 1)`,
-      `count -= 2`; neither → 32-bit unit, `src += 4`, `dst += write_add`,
-      `count -= 4`. Note deviation #11: `read_add` never functions as a source
-      stride, only as the fill/copy selector.
-- [ ] B-Bus range constant: `0x05A00000 ≤ (addr & 0x1FFFFFFF) < 0x05FF0000`
-      (§2.4). Note this is a *different* boundary from the DSP DMA's B-Bus test
-      (`< 0x06000000`, §3.8.6) — do not unify them.
-- [ ] Source/destination accesses mask with `0x0FFFFFFF` (§1.2).
-- [ ] **Indirect mode** (§2.5, fixes **D-DMA-2** and **D-DMA-3**): the
+- [x] **Fill mode** (`read_add == 0`, §2.4, fixes **D-DMA-5**): the
+      constant-source test — source in Low WRAM, High WRAM, Sound RAM or
+      VDP1/VDP2 RAM → the source long is read **once**, at trigger time (or
+      at each descriptor load, for indirect fill transfers) and cached in
+      `DmaLevel::fill_value`; anything else → re-read live from
+      `read_address` every iteration (treated as a register). This caching
+      is a real correctness requirement, not just a micro-optimization:
+      since a Mimas transfer can span multiple Core-6 budget passes (unlike
+      the reference's one synchronous call), re-reading a constant address
+      on a later pass could observe a value the CPU changed in between
+      passes — a real, if narrow, behavioral divergence the cache avoids.
+      Destination on the B-Bus → two 16-bit writes with `write_address +=
+      write_add` **twice** and `transfer_number -= 4`; otherwise one 32-bit
+      write with the same `+= write_add` once.
+- [x] **Copy mode** (`read_add != 0`, §2.4, fixes **D-DMA-6**): destination on
+      B-Bus → 16-bit unit, `read_address += 2`, `write_address += write_add`,
+      `transfer_number -= 2`; source on B-Bus (and destination not) →
+      16-bit unit, `read_address += 2`, `write_address += (write_add >> 1)`,
+      `transfer_number -= 2`; neither → 32-bit unit, `+= 4`/`+= write_add`/
+      `-= 4`. Deviation #11 preserved: `read_add`'s decoded value (always 4)
+      never functions as the source stride, only as the fill/copy selector.
+- [x] B-Bus range constant (`is_b_bus_dma`): `0x05A00000 ≤ (addr & 0x1FFFFFFF)
+      < 0x05FF0000` (§2.4) — kept as a *separate* function from the DSP
+      DMA's own B-Bus test (`< 0x06000000`, §3.8.6), per the reference's
+      explicit warning not to unify them.
+- [x] Source/destination accesses mask with `0x0FFFFFFF` (§1.2) at every
+      actual `WorkRam` access (reusing `scu_dsp.rs`'s address-decode table,
+      promoted to `pub(crate)` for this purpose rather than hand-copying a
+      third boundary table alongside `Sh2::translate`'s and DSP DMA's own).
+- [x] **Indirect mode** (§2.5, fixes **D-DMA-2** and **D-DMA-3**): the
       descriptor table lives at **`DnW`**, descriptors are 12 bytes,
       `[+0x0] = count`, `[+0x4] = destination`, `[+0x8] = source` with **bit 31
       of the source** marking the last descriptor. `indirect_address` starts at
-      `DnW + 0xC`; after each descriptor completes, test the end bit, then load
-      the next three long-words and advance by `0xC`. The end bit is not
-      stripped — every access masks `0x0FFFFFFF` instead.
-- [ ] `DSTA` (§1.3): busy bits 4/8/12 recomputed live from
+      `DnW + 0xC`; after each descriptor completes, the end bit is tested,
+      then the next three long-words are loaded and `indirect_address`
+      advances by `0xC`. The end bit is not stripped — every access masks
+      `0x0FFFFFFF` instead. **Added, not in the reference**: a 4096-descriptor
+      chase cap (`log_scu_dma_malformed_chain_once`) guarding against a
+      malformed/non-terminating chain hanging Core 6 (and, through
+      `LockStepSync`'s bounded slack, the whole system) forever — the
+      reference has the identical risk but only ever hangs its own single
+      thread, so this is a Mimas-specific safety valve, not a behavior
+      change for any well-formed chain.
+- [x] `DSTA` (§1.3): busy bits 4/8/12 recomputed live from
       `dmaN.transfer_number > 0` on every read; all other bits are
-      last-written storage.
-- [ ] `DSTP` (§2.6, deviation #13): inert in the reference. Keep it inert but
-      log a `[SCU] DSTP written` line once, so a real BIOS attempt to abort a
-      DMA is visible rather than silent.
-- [ ] Completion interrupts (§2.8) via Phase 3's controller:
+      last-written storage. (Already real since Phase 2's register file —
+      Phase 4 just gives `transfer_number` its first genuinely observable
+      nonzero window.)
+- [x] `DSTP` (§2.6, deviation #13): inert in the reference. Kept inert;
+      `Scu::write_long`'s `0x60` arm now logs `[SCU] DSTP written` once
+      (`log_scu_dstp_write_once`), so a real BIOS attempt to abort a DMA is
+      visible rather than silent.
+- [x] Completion interrupts (§2.8) via Phase 3's controller:
       level 0 → vector `0x4B` level 5 mask `0x0800`;
       level 1 → vector `0x4A` level 6 mask `0x0400`;
       level 2 → vector `0x49` level 6 mask `0x0200`.
-      Raised from both the indirect end-of-list path and the direct completion
-      path.
-- [ ] Delete `Sh2::execute_scu_dma` and its three call sites
-      (`sh2.rs:684-696`, `:1536-1639`).
+      Raised from both the indirect end-of-list path and the direct
+      completion path (`Scu::raise_dma_end`, called from `run_level`).
+- [x] Deleted `Sh2::execute_scu_dma` and its three call sites entirely — the
+      `MemRegion::ScuRegs` write arm now calls `Scu::request_dma_trigger`
+      instead.
 
 ### 4c. Threading — the part that needs the most care
 
-- [ ] **Scheduling** (§2.6): all three levels are serviced per pass with their
-      own private copy of the same time budget, in textual order 0 → 1 → 2.
-      There is **no priority arbitration between levels** in the reference —
-      implement it that way and record it in §9 rather than inventing a
-      priority scheme Mimas can't validate.
-- [ ] **Cost model** (§2.6): one loop iteration (2 or 4 bytes) costs one unit.
-      Core 6's per-pass budget replaces the reference's `timing << 4`; a fresh
-      trigger gets +128 units; a re-trigger-while-busy flush runs to
-      completion.
-- [ ] **`BusArbiter` integration.** The reference has no bus locking at all
-      (deviation #12), but Mimas models it deliberately (`bus_arbiter.rs`), and
-      the CPU side already honors it: every `Sh2` memory access calls
-      `bus_wait()` → `BusArbiter::acquire_bus_sync(core_id, sync)`
-      (`sh2.rs:383-391`, `bus_arbiter.rs:38-52`), which *also deactivates the
-      blocked core in `LockStepSync`* so a DMA-stalled CPU doesn't drag the
-      slack window down for everyone. The DMA engine must be the counterpart:
-      - Call `lock_for_dma()` / `unlock_from_dma()` **per time-slice burst**,
-        not once around a whole transfer. Holding it across a 1 MiB level-0
-        copy would stall both SH-2s for the entire copy — which is exactly what
-        `execute_scu_dma` does today (`sh2.rs:1548`/`:1631`) and a large part of
-        why it must move off Core 0.
-      - `BusArbiter`'s lock is a plain `AtomicBool`, not a count
-        (`bus_arbiter.rs:5`). With DMA levels *and* DSP DMA both able to run on
-        Core 6, either serialize them on Core 6 (simplest — one thread, one
-        lock at a time) or make the lock a counter. Prefer serializing; note
-        the choice in the code.
-      - Core 6 must **never** call `acquire_bus`/`acquire_bus_sync` — it is the
-        lock holder; doing so would self-deadlock. This is why
-        `execute_scu_dma` uses `raw_read_byte`/`raw_write_byte` today
-        (`sh2.rs:1553`); the new engine should reach `WorkRam` directly instead,
-        the way `scu_dsp.rs`'s `read_long`/`write_long` already do.
-      - Decide and state whether DSP DMA also takes the bus lock (it does not
-        today — **D-DSP-8**). Recommended: yes, same policy, since both engines
-        contend for the same physical bus.
-- [ ] **`LockStepSync` integration.** Core 6 currently parks unless the DSP is
-      executing (`lib.rs:320-341`: `set_thread_active(6, false)` →
-      `park_while_inactive(6)` → step while `is_executing()` → re-park).
-      Extend, don't replace, that shape:
-      - Wake condition becomes "DSP executing **or** any DMA level busy". A
-        `DnEN` write that starts a transfer calls `sync.set_thread_active(6,
-        true)` from `Sh2::write_long`, exactly as the `EX` write does today
-        (`sh2.rs:732-736`).
-      - Re-park only when *both* are idle.
-      - Keep calling `sync_core(6, cycles)` inside the work loop so the DMA
-        engine participates in the slack window rather than running unbounded
-        ahead.
-      - Note the deliberate ordering hazard: Core 6 holds the bus lock while
-        Cores 0/1 block in `acquire_bus_sync`, which deactivates them in
-        `LockStepSync`. Core 6 must not then block waiting on *them* in
-        `sync_core`. Verify with a targeted adversarial test (see below);
-        `saturn-core/tests/adversarial_tests.rs` already hosts this class of
-        test.
+- [x] **Scheduling** (§2.6): `Scu::step_dma_pass` services all three levels
+      per pass with their own private copy of the same budget, in strict
+      textual order 0 → 1 → 2. No priority arbitration between levels,
+      matching the reference exactly.
+- [x] **Cost model** (§2.6): one fill/copy iteration (2 or 4 bytes) costs one
+      unit, matching the reference's `*time -= 1` exactly. Core 6's
+      per-pass budget (`DMA_BUDGET_PER_PASS = 512`, `lib.rs`) replaces the
+      reference's `timing << 4` — a Mimas-specific constant, not a
+      translation, since Core 6 has no per-SH-2-instruction cycle bus to
+      derive one from; chosen small enough to keep the bus lock held only
+      briefly per pass. A fresh trigger additionally gets its own +128-unit
+      burst (`service_trigger`); a re-trigger-while-busy flush runs to
+      completion (see 4a's simplification note).
+- [x] **`BusArbiter` integration.** `Scu::step_dma_pass` calls
+      `lock_for_dma()`/`unlock_from_dma()` once per Core-6 pass (bounded to
+      `3 × budget_per_level` iterations), not once around a whole transfer
+      — a large DMA no longer stalls Core 0/1 for its entire duration, the
+      exact problem `execute_scu_dma` had. DMA and DSP are serialized on
+      Core 6 (one thread, sequential `if dsp.is_executing() {...} if
+      dma_active() {...}` per loop iteration) rather than given a counting
+      lock — the simpler of the two options the plan offered, noted here as
+      the choice made. The DMA engine reaches `WorkRam` directly via
+      `scu_dsp.rs`'s (now `pub(crate)`) address-decode helpers, exactly as
+      the plan anticipated, so Core 6 never calls `acquire_bus`/
+      `acquire_bus_sync` on itself. DSP DMA still does not take the bus
+      lock (**D-DSP-8**, unchanged) — left as a separate, pre-existing gap;
+      not addressed by this phase.
+- [x] **`LockStepSync` integration.** Core 6's loop condition became
+      `dsp.is_executing() || scu.dma_active()`; a `DnEN` write that starts a
+      transfer calls `sync.set_thread_active(6, true)` from
+      `Sh2::write_long`, exactly like the `EX` write already does. Re-parks
+      only when both are idle. `sync_core(6, cycles)` is still called once
+      per loop iteration, after the pass's own `unlock_from_dma()` has
+      already run — preserving the ordering the plan calls out explicitly
+      (Core 6 must not hold the bus lock while also blocking on other cores
+      in `sync_core`). Verified by a real cross-thread adversarial test
+      (see Testing below) — including a genuine lost-wakeup race this
+      phase's own test-writing surfaced (see that test's doc comment).
 
 ### Testing (Phase 4)
 
-- [ ] **Direct copy**, hand-derived: fill High WRAM with a known generator
-      (`byte[i] = (i * 7 + 3) & 0xFF`), program `D0R`/`D0W`/`D0C`/`D0AD`,
-      trigger, and assert the destination image against the same generator
-      computed in the test — with the expected stride derived from §1.2's
-      `write_add` table by hand, not by reading the implementation.
-- [ ] **Fill mode**, hand-derived: `DnAD` bit 8 clear, a source in Low WRAM
-      (constant-source region) → assert the destination is `count/4` copies of
-      one long. Then repeat with a source in a non-constant region and assert
-      the re-read behavior differs.
-- [ ] **B-Bus split**: destination in VDP2 VRAM → assert the two-16-bit-write
-      ordering (high half first) produced the right byte order, and that the
-      destination pointer advanced by `write_add` **twice** per iteration.
-- [ ] **Count clamps**: level 1 with `DnC = 0` moves exactly `0x1000` bytes;
-      level 0 with `DnC = 0` moves exactly `0x100000`; level 1 with
-      `DnC = 0x12345` moves `0x345`. Derived from §1.2, not from the code.
-- [ ] **Indirect**, hand-built: construct a 3-descriptor chain in real Work RAM
-      with the last one's source carrying bit 31, place the table at `DnW`, and
-      assert all three destinations. Add a negative test that the *old* buggy
-      layout (end bit in the count word, table at `DnR`) produces the wrong
-      answer — this is the regression guard for D-DMA-2/3.
-- [ ] **Completion interrupt**: assert vector `0x4B` / level 5 fires exactly
-      once at the end of a level-0 direct transfer, and once at end-of-list
-      (not per descriptor) for an indirect one.
-- [ ] **`DSTA` liveness**: mid-transfer read shows bit 4 set; post-transfer
-      read shows it clear.
-- [ ] **Threading**: a `SaturnSystem`-level test where Core 0 triggers a large
-      level-0 transfer and continues executing — assert Core 0 makes forward
-      progress (its PC advances) and the transfer still completes correctly,
-      i.e. the bus lock is being released between bursts. Plus a shutdown-
-      during-DMA test (`arbiter.abort()` must unblock everyone —
-      `bus_arbiter.rs:67-71`, `PanicGuard`).
+- [x] **Direct copy**, hand-derived: `direct_copy_hand_derived_stride_from_write_add_table` —
+      fills Low WRAM with a known generator, uses a `write_add` (8 bytes)
+      wider than the natural 4-byte unit so the gap between writes is
+      itself checked, deriving expected values and offsets independently.
+- [x] **Fill mode**, hand-derived, split into three focused tests instead of
+      one combined test: `fill_mode_constant_source_writes_count_over_4_copies_of_one_long`,
+      `fill_mode_constant_source_is_cached_once_not_re_read_across_passes`
+      (mutates the source *after* the cache should have primed, across two
+      separate `step_dma_pass` calls, and asserts the mutation never shows
+      up), `fill_mode_non_constant_source_is_re_read_live_every_iteration`
+      (a VDP2 register as source; asserts a value changed between two
+      passes *does* show up in the next iteration).
+- [x] **B-Bus split**: `fill_mode_b_bus_destination_writes_high_half_first_with_double_stride` —
+      VDP2 VRAM destination; asserts high-half-first ordering and that the
+      gap between the two 16-bit writes (`write_add` apart) is untouched.
+- [x] **Count clamps**: `count_clamp_matches_hardware_reference_table`
+      (pure function, all 3 levels, independently derived from §1.2) plus
+      `count_clamp_of_zero_takes_effect_on_a_real_trigger` (an actual
+      triggered level-1 transfer with `DnC = 0`, checking the live
+      `transfer_number` reflects the `0x1000` clamp, not `0`).
+- [x] **Indirect**, hand-built: `indirect_three_descriptor_chain_hand_built`
+      (3 descriptors, last one's source carrying bit 31, table at `DnW`,
+      asserts all three destinations and exactly one completion interrupt
+      at end-of-list). The D-DMA-2/3 regression guard became
+      `indirect_table_pointer_comes_from_dnw_not_dnr_regression_guard_d_dma_2_3` —
+      rather than feeding the engine an "old buggy layout" and checking for
+      a wrong answer (ambiguous to assert against), it points `DnR` at a
+      *different*, also well-formed table and confirms only `DnW`'s table
+      is ever honored, which is the more direct way to prove the old bug
+      (reading from `DnR`) cannot recur.
+- [x] **Completion interrupt**: `direct_transfer_raises_completion_interrupt_exactly_once`
+      (level 2, direct) plus the indirect end-of-list assertion above
+      (level 0, indirect) — covers both the "not per descriptor" case and a
+      plain direct transfer.
+- [x] **`DSTA` liveness**: `dsta_bit_reflects_live_transfer_state_not_a_snapshot`.
+- [x] **Threading**: `scu_dma_engine_on_core6_does_not_stall_core0_for_the_whole_transfer`
+      (`saturn-core/tests/adversarial_tests.rs`) — a real `Sh2` (Core 0)
+      triggers a 4 KiB level-0 transfer and keeps calling real,
+      memory-fetching `step()` (which genuinely contends for the bus)
+      concurrently with a second thread playing Core 6's part
+      (`Scu::step_dma_pass` in a loop); asserts the transfer only completes
+      once Core 6 pumps it (never inline on the CPU's own write) and that
+      Core 0 is never stalled for the whole duration. The generic
+      shutdown-during-DMA case (`arbiter.abort()` unblocking everyone) was
+      already covered by the pre-existing `test_shutdown_deadlock_on_active_dma`,
+      which isn't specific to this engine and needed no changes.
+- [x] **Extra tests beyond the plan's list**, added while chasing edge cases
+      the prose calls out but doesn't spell out as named tests:
+      `immediate_trigger_requires_mode_3to0_equal_7_regression_guard_d_dma_7`,
+      `immediate_trigger_leaves_den_bit_set_real_hardware_never_auto_clears_it`,
+      `retrigger_while_busy_flushes_all_three_levels_to_completion_first`.
 
 **Done signal**: `execute_scu_dma` is gone from `sh2.rs`; a DMA in flight is
-visible as Core 6 activity in `LockStepSync`; `cargo test --workspace` green.
+visible as Core 6 activity in `LockStepSync`; `cargo test --workspace` green
+(165 in `saturn-core`'s own binary, 70 in `e2e-tests`, 9 in
+`adversarial_tests`, plus the other suites, 0 failed). A post-migration
+`MIMAS_BOOT_WATCH_SECS=90` run against `Sega Saturn BIOS (USA).bin` reached
+the same CD-header polling checkpoint observed before this phase, with no
+crash/panic/stall. **Confirmed.**
+
+**Status:** Phase 4 complete. See `history.md` Chapter 31.
 
 ---
 
@@ -891,72 +1041,101 @@ visible as Core 6 activity in `LockStepSync`; `cargo test --workspace` green.
 Blocked on Phase 3 (both timers only exist to raise interrupts) and on an
 H-Blank IN source, which does not exist anywhere today.
 
-- [ ] **H-Blank IN source first.** Core 3 (`lib.rs:204-239`) already paces
-      frames at 16.6 ms. Add a scanline tick — NTSC 263 lines per frame — that
-      calls `Scu::hblank_in()`. Keep it derived from the same frame edge as
-      VBLANK (Phase 3c) so the two cannot drift apart the way Core 0's and
-      Core 3's clocks do today.
-- [ ] `T0C` (`0x90`, §5.1): Timer 0 compare value, interpreted as a **scanline
-      number**.
-- [ ] `T1S` (`0x94`, §5.1): store `T1S`, and — the write side effect — set
-      `timer1_set = 1` and `timer1_preset = val`.
-- [ ] `T1MD` (`0x98`, §5.1): bit 0 = global timer enable (gates all Timer 0
-      comparisons and the Timer 1 reload); bit 7 = Timer 1 mode (0 = fire every
-      line, 1 = fire only when Timer 0 also matched this line). No other bit is
-      read anywhere.
-- [ ] `ScuTimers { timer0, timer1, timer1_counter, timer0_set, timer1_set,
-      timer1_preset }` (§5.1).
-- [ ] **Timer 0** (§5.2): `timer0++` on every H-Blank IN; `timer0 = 0` at
-      V-Blank OUT; compare on both the H-Blank path and immediately after the
-      V-Blank OUT reset (so `T0C == 0` fires at V-Blank OUT), both gated on
-      `T1MD & 1`. On match → `Scu::timer0()` (vector `0x43`, level 12, mask
-      `0x0008`) and `timer0_set = 1`; on mismatch → `timer0_set = 0`.
-- [ ] **Timer 1** (§5.3): reloaded at H-Blank IN when `T1MD & 1` and
-      `timer1_set == 1` (`timer1_set = 0; timer1_counter = timer1_preset`).
-      Counts down by `timing >> 1` per tick; on reaching ≤ 0, `timer1_set = 1`
-      and — if `T1MD & 0x80 == 0`, or if `timer0_set == 1` — `Scu::timer1()`
-      (vector `0x44`, level 11, mask `0x0010`).
-- [ ] **Deviation to fix, not copy** (§5.4, deviation #18): the outer gate
-      `if (T1MD & 0x80 == 0)` in `ScuExec` is a C precedence bug that makes the
-      branch unreachable, so the reference only ticks Timer 1 on the scanline
-      where `LineCount == T0C` (or unconditionally when `T0C > 500`). Implement
-      the *intended* reading — tick every time when `T1MD` bit 7 is clear — and
-      record it in §9. Keep the correctly-written inner test inside
-      `ScuTimer1Exec` (§5.3) as-is.
-- [ ] Pick the tick unit deliberately. The reference's `timing` is
-      `sh2cycles >> 1` (§0), and Timer 1 decrements by `timing >> 1`, i.e. one
-      unit per ~4 SH-2 cycles. Mimas has no global cycle bus; derive it from
-      Core 6's own `sync_core` cycle accounting and document the conversion in
-      the code, rather than inheriting an unexplained shift.
+- [x] **H-Blank IN source first.** Implemented, then relocated: the checklist
+      here originally described adding a scanline tick to Core 3's wall-clock
+      frame loop, which is what landed first. It was superseded within the
+      same session (see `history.md` Chapter 34) -- Core 3's whole wall-clock
+      loop is gone, and H-Blank IN generation now comes from `Sh2::step`'s
+      real Master-cycle batching (`SH2_CYCLES_PER_LINE`) calling
+      `Scu::advance_video_line`, which calls `hblank_in()` internally. This is
+      *more* tightly coupled to VBLANK than the original plan asked for (both
+      now come from the exact same cycle-driven source, not just "the same
+      frame edge") and fixes a real architectural violation the interim
+      version had introduced (a component thread other than the CPU
+      referencing the wall clock at all — see `docs/mimas-architecture-spec.md`
+      §1.5).
+- [x] `T0C` (`0x90`, §5.1): Timer 0 compare value, a scanline number —
+      plain register storage, no special write-side handling needed.
+- [x] `T1S` (`0x94`, §5.1): `Scu::write_long`'s dedicated `0x94` arm stores
+      the raw value *and* sets `timer1_preset = val as i32; timer1_set = true`.
+- [x] `T1MD` (`0x98`, §5.1): bit 0 (global timer enable) and bit 7 (Timer 1
+      mode) implemented exactly as specified; no other bit read anywhere.
+- [x] `ScuTimers { timer0, timer1_counter, timer0_set, timer1_set,
+      timer1_preset }` (§5.1). **Not reproduced**: the reference's own
+      `timer1` field (distinct from `timer1_counter`) is written only once,
+      at reset, to `0`, and never read or written anywhere else in `scu.c` —
+      genuinely dead state, so Mimas doesn't carry a matching field (same call
+      already made for `DmaLevel::mode` in Phase 4).
+- [x] **Timer 0** (§5.2): implemented in `Scu::tick_timer0_and_arm_timer1`/
+      `reset_timer0_at_vblank_out`, confirmed against `ScuSendHBlankIN`'s/
+      `ScuSendVBlankOUT`'s literal bodies (`yabause/src/scu.c:3250-3301`), not
+      inferred from prose. **Correction found while implementing**: `timer0`'s
+      increment (H-Blank IN) and reset-to-zero (V-Blank OUT) are
+      **unconditional** — only the *compare* against `T0C` (and therefore
+      `Scu::timer0()`/`timer0_set`) is gated on `T1MD & 1`. A first draft
+      gated the whole thing on bit 0, which would have silently frozen
+      `timer0` whenever a game temporarily disabled the global timer enable;
+      caught before landing and guarded by
+      `timer0_increments_and_timer1_reload_are_unconditional_only_the_compare_is_gated`.
+- [x] **Timer 1** (§5.3): implemented in `Scu::timer1_tick`, matching the
+      reload/countdown/expiry sequence exactly.
+- [x] **Deviation #18, fixed not copied**: `Scu::timer1_tick` ticks every call
+      (subject only to the correctly-written inner `T1MD` bit 0/bit 7 gates),
+      not gated by the reference's unreachable outer branch. Recorded here and
+      in `timer1_tick`'s own doc comment.
+- [x] Tick unit: **deliberately deviates from the plan's own suggestion**,
+      not just "picked one". The plan proposed deriving it from "Core 6's own
+      `sync_core` cycle accounting" — but `history.md` Chapter 32 (investigated
+      earlier in the same session, while fixing an unrelated threading
+      regression) established that every core's own `cycles` counter fed into
+      `LockStepSync::sync_core` is a *synthetic pacing heartbeat* with no
+      relationship to real elapsed hardware time. Driving Timer 1 from that
+      would have given it an arbitrary, throttle-independent tick rate — wrong,
+      since real hardware's SCU and SH-2 share exactly one physical clock.
+      Timer 1 is instead driven by `Sh2::step`'s own real executed-cycle delta
+      (`SCU_TIMER_BATCH_CYCLES = 128`, chosen small relative to any plausible
+      Timer 1 period; not a translation of the reference's per-deciline
+      granularity), Master-only (`!is_slave` — real hardware has exactly one
+      SCU, and driving this from both cores would double-count).
 
 ### Testing (Phase 5)
 
-- [ ] Hand-traced scanline sequence: `T1MD = 1`, `T0C = 100`; drive 263
-      H-Blank INs plus one V-Blank OUT and assert Timer 0 fires exactly once,
-      on line 100. Derive the expected count offline.
-- [ ] `T0C = 0` fires Timer 0 at V-Blank OUT (§5.2's second compare path).
-- [ ] `T1MD` bit 0 clear → no timer interrupt ever fires, regardless of
-      `T0C`/`T1S`.
-- [ ] `T1MD` bit 7 set → Timer 1 fires only on lines where Timer 0 matched;
-      bit 7 clear → every line (this is the deviation above; assert the
-      *intended* behavior and cite §5.4).
-- [ ] Timer 1 reload: write `T1S`, let it expire, assert `timer1_set` re-arms
-      the reload at the next H-Blank IN.
+- [x] Hand-traced scanline sequence: `hand_traced_scanline_sequence_timer0_fires_once_at_line_100` —
+      `T1MD = 1`, `T0C = 100`; drives 263 H-Blank INs plus one V-Blank OUT,
+      asserts Timer 0 fires exactly once.
+- [x] `T0C = 0` fires Timer 0 at V-Blank OUT: `t0c_zero_fires_timer0_at_vblank_out`.
+- [x] `T1MD` bit 0 clear → no timer interrupt ever fires:
+      `t1md_global_enable_clear_disables_both_timers`.
+- [x] `T1MD` bit 7 semantics, both readings, deviation #18 cited directly:
+      `t1md_bit7_set_gates_timer1_on_timer0_match_intended_reading_deviation_18`,
+      `t1md_bit7_clear_fires_timer1_every_expiry_regardless_of_timer0`.
+- [x] Timer 1 reload re-arming: `timer1_reload_rearms_at_the_next_hblank_in`.
+- [x] **Beyond the plan's list**: `timer1_countdown_decrements_by_cycles_shifted_right_twice_hand_derived`
+      (the `cycles >> 2` arithmetic, independently re-derived, not trusted
+      from the implementation), `only_master_sh2_drives_scu_timer1_not_slave`
+      (Master/Slave wiring, mirroring the equivalent DMA/interrupt tests from
+      earlier phases), plus the video-line tests under Chapter 34's own
+      checklist entry below.
 
 **Done signal**: both timers raise their vectors through the Phase 3
 controller; H-Blank IN exists as a first-class event other subsystems (VDP2
-line-based effects, later) can consume.
+line-based effects, later) can consume — and, as of Chapter 34, so does
+V-Blank IN/OUT itself, both now driven by the identical cycle-accurate source.
+**Confirmed.** See `history.md` Chapters 33-34.
 
 ---
 
 ## Phase 6 — Start factors, DSP End, Draw End: closing the loop
 
+**Status:** Done — see `history.md` Chapter 35.
+
 The pieces that only make sense once Phases 3-5 exist.
 
-- [ ] **DMA start factors** (§2.3) — wire `ScuChekIntrruptDMA(id)`'s equivalent
-      into each source, *after* the interrupt dispatch and **unconditional on
-      the interrupt mask** (§2.3: a masked V-Blank IN still starts a DMA armed
-      on factor 0):
+- [x] **DMA start factors** (§2.3) — wired via a new private
+      `Scu::check_dma_start_factor(factor_id: u8)`, called from every source
+      *after* its interrupt dispatch and **unconditional on the interrupt
+      mask** (verified by a dedicated `masked_vblank_in_still_starts_a_factor_armed_dma`
+      test — a masked V-Blank IN still starts a DMA armed on factor 0):
       | id | Factor | Raised from |
       |---|---|---|
       | 0 | V-Blank IN | Phase 3 `vblank_in` |
@@ -966,40 +1145,76 @@ The pieces that only make sense once Phases 3-5 exist.
       | 4 | Timer 1 | Phase 5 `timer1` |
       | 5 | Sound Request | Phase 3 `sound_request` |
       | 6 | Sprite Draw End | `draw_end`, below |
-      | 7 | Immediate | Phase 4's `DnEN` bit-0 path |
-      Note §2.3's exclusions: DSP End, System Manager, Pad, the three DMA-end
-      senders, DMA Illegal and all 16 externals do **not** start a DMA.
-- [ ] For each level independently: `if (DnEN & 0x100) && (DnMD & 0x7) == id` →
-      snapshot + start + `DnEN = 0` (§2.2 path b). Re-trigger-while-busy uses
-      the same all-levels flush as the immediate path.
-- [ ] **DSP End interrupt** (§3.12): `ENDI` sets the `E` flag *and* raises
-      vector `0x45`, level 10, mask `0x0020`. Replaces the TODO comment at
-      `scu_dsp.rs:473-476`. Note `E` is sticky — the Program Control Port write
-      mask preserves bit 18 (§3.9.1), so nothing but a reset clears it.
-- [ ] **Sprite Draw End** (`0x4D`, level 2, mask `0x2000`, factor 6): raised by
-      VDP1 when a command list completes. `vdp::execute_vdp1` runs on Core 3
-      (`lib.rs:216`) and raises no interrupt today. Coordinate with
-      `docs/implementation-plans/vdp1.md` — this plan owns the SCU-side entry
-      point, not the VDP1-side trigger condition.
+      | 7 | Immediate | Phase 4's `DnEN` bit-0 path (unchanged, not part of this check) |
+      §2.3's exclusions (DSP End, System Manager, Pad, the three DMA-end
+      senders, DMA Illegal, all 16 externals) confirmed by direct reading of
+      `yabause/src/scu.c`'s `ScuSendDSPEnd`/`ScuSendSystemManager`/
+      `ScuSendPadInterrupt`/`ScuSendLevel0/1/2DMAEnd`/`ScuSendDMAIllegal` —
+      none call `ScuChekIntrruptDMA`, so none of those methods call
+      `check_dma_start_factor`.
+      One real-order subtlety found while implementing this: `ScuSendHBlankIN`'s
+      internal `ScuSendTimer0()` call (with its own factor-3 check) happens
+      **before** the Timer-1-reload-arm check, not after — required
+      restructuring `tick_timer0_and_arm_timer1` to drop and re-acquire the
+      `timers` lock around the `self.timer0()` call so the real statement
+      order is preserved. Covered by
+      `hblank_in_can_start_two_different_dma_levels_on_factors_2_and_3_in_one_call`.
+- [x] For each level independently: `if (DnEN & 0x100) && (DnMD & 0x7) == id` →
+      snapshot + start + `DnEN = 0` (§2.2 path b), reusing Phase 4's
+      `trigger_pending`/`snapshot_and_start`/`service_trigger` machinery.
+      Re-trigger-while-busy uses the same all-levels flush as the immediate
+      path (unchanged from Phase 4). A new `DmaLevel::clear_den_after_trigger`
+      bool distinguishes this one-shot-clear path from the immediate-trigger
+      path, which real hardware leaves `DnEN` untouched on (already-tested
+      Phase 4 asymmetry) — `service_trigger` reads the flag *before*
+      `snapshot_and_start` overwrites the struct, then conditionally zeroes
+      `DnEN` after the burst completes.
+- [x] **DSP End interrupt** (§3.12): `ENDI` sets the `E` flag *and* raises
+      vector `0x45`, level 10, mask `0x0020`. `ScuDsp::step`/`execute_other`
+      changed from returning `()` to `bool` (true exactly on the instruction
+      where `ENDI` just executed); Core 6 (`lib.rs`) checks the return value
+      after `step()` returns (lock released) and calls `Scu::dsp_end()` from
+      outside the `dsp` lock, respecting the module's lock-ordering rule.
+      `E` confirmed sticky — `PCP_WRITABLE_MASK` already excluded bit 18
+      before this phase; no fix needed there, only the interrupt-raising wire
+      was missing.
+- [ ] **Sprite Draw End** (`0x4D`, level 2, mask `0x2000`, factor 6): `draw_end()`
+      itself is implemented and tested (including its factor-6 DMA-start
+      check), but nothing calls it yet — VDP1's `execute_vdp1` (Core 3) raises
+      no interrupt on command-list completion. Deliberately deferred;
+      coordinate with `docs/implementation-plans/vdp1.md` when that plan wires
+      the trigger condition. This plan owns the SCU-side entry point, which is
+      done.
 - [ ] **Pad interrupt** (`0x48`, level 8, mask `0x0100`): SMPC-side trigger;
-      coordinate with `docs/implementation-plans/smpc-peripheral.md`.
-- [ ] **External interrupts 00-15** (`0x50`-`0x5F`): no A-Bus device is
-      emulated, so these have no producer. Leave the entry points unreachable
-      and say so — do not invent a caller.
-- [ ] **DMA Illegal** (`0x4C`): illegal-DMA detection is unimplemented in the
-      reference too (deviation #14). Leave the entry point unreachable; if
-      Phase 4 ever grows address-validity checks, this is where they report.
+      deliberately deferred to `docs/implementation-plans/smpc-peripheral.md`.
+- [x] **External interrupts 00-15** (`0x50`-`0x5F`): no A-Bus device is
+      emulated, so these have no producer. Entry points remain unreachable, as
+      intended — no caller invented.
+- [x] **DMA Illegal** (`0x4C`): illegal-DMA detection is unimplemented in the
+      reference too (deviation #14). Entry point remains unreachable, as
+      intended.
 
 ### Testing (Phase 6)
 
-- [ ] Per factor 0-6: arm a level with `DnEN = 0x100` and `DnMD = id`, raise
-      the source, assert the transfer ran and `DnEN` was cleared to 0
-      (one-shot).
-- [ ] **Masked-factor test**: `IMS` masking V-Blank IN, armed level on factor
-      0 → the DMA still starts (§2.3). This is counterintuitive and worth a
-      dedicated test.
-- [ ] `ENDI` raises vector `0x45` and leaves `E` set across a subsequent
-      Program Control Port write (sticky, §3.9.1).
+- [x] Per factor 0-6: `assert_factor_arms_and_starts_dma` (a shared helper
+      parameterized by source function pointer and factor id) arms a level
+      with `DnEN = 0x100` and `DnMD = id`, raises the source, asserts the
+      transfer ran and `DnEN` was cleared to 0 (one-shot) — 7 tests,
+      `dma_start_factor_0_vblank_in` through `dma_start_factor_6_draw_end`.
+- [x] **Masked-factor test**: `masked_vblank_in_still_starts_a_factor_armed_dma`
+      — `IMS` left at its power-on default (V-Blank IN masked), armed level on
+      factor 0 → the DMA still starts (§2.3).
+- [x] `endi_raises_dsp_end_and_leaves_e_set_across_a_subsequent_control_port_write`
+      — simulates Core 6's exact call pattern, asserts vector `0x45`/level 10
+      delivered and `E` stays set across a subsequent Program Control Port
+      write (sticky, §3.9.1).
+- [x] Two extra tests beyond the plan's minimum, added once the statement-order
+      and asymmetry subtleties above were found:
+      `hblank_in_can_start_two_different_dma_levels_on_factors_2_and_3_in_one_call`
+      (validates the real statement-order fix — a single `hblank_in()` call
+      starts both a factor-2-armed level and a factor-3-armed level) and
+      `immediate_trigger_never_sets_clear_den_after_trigger` (regression guard
+      for the `clear_den_after_trigger` asymmetry, end to end).
 
 ---
 

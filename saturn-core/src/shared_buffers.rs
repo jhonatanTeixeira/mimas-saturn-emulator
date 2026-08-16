@@ -43,8 +43,6 @@ pub struct WorkRam {
     pub vdp2_cram: RwLock<Box<[u8; 0x1000]>>,
     /// VDP2 registers (0x05F80000-0x05FBFFFF).
     pub vdp2_regs: RwLock<Box<[u8; 0x200]>>,
-    /// SCU registers (0x05FE0000-0x05FEFFFF).
-    pub scu_regs: RwLock<Box<[u8; 0x100]>>,
     /// CS2 / CD-ROM block registers (0x05800000-0x058FFFFF). The real CD
     /// command protocol lives in `Cdrom` (CR1-4/HIRQ/DTR); this is a plain
     /// memory stub until that's wired into the CPU's address space.
@@ -60,6 +58,14 @@ pub struct WorkRam {
     /// and its register-offset `switch` in `smpc.c`.
     pub smpc_regs: RwLock<Box<[u8; 0x80]>>,
     pub mem4b: std::sync::atomic::AtomicBool,
+    /// Real hardware: TVSTAT's VBLANK status bit, currently true from
+    /// VBLANK-IN until VBLANK-OUT. Core 3 (`vdp2-composite`) sets/clears
+    /// this on its own frame-render clock (`docs/implementation-plans/scu.md`
+    /// Phase 3), the same clock that now also raises the VBLANK-IN/OUT
+    /// interrupts via `Scu` -- both SH-2 cores read it (via `Sh2::tvstat_word`)
+    /// with `Acquire`, paired with Core 3's `Release` store, mirroring
+    /// `mem4b`'s existing cross-thread-flag discipline just above.
+    pub vblank_active: std::sync::atomic::AtomicBool,
 }
 
 impl WorkRam {
@@ -78,11 +84,11 @@ impl WorkRam {
             vdp2_vram: RwLock::new(vec![0; 0x80000].into_boxed_slice().try_into().unwrap()),
             vdp2_cram: RwLock::new(vec![0; 0x1000].into_boxed_slice().try_into().unwrap()),
             vdp2_regs: RwLock::new(vec![0; 0x200].into_boxed_slice().try_into().unwrap()),
-            scu_regs: RwLock::new(vec![0; 0x100].into_boxed_slice().try_into().unwrap()),
             cs2_regs: RwLock::new(vec![0; 0x1000].into_boxed_slice().try_into().unwrap()),
             backup_ram: RwLock::new(vec![0; 0x10000].into_boxed_slice().try_into().unwrap()),
             smpc_regs: RwLock::new(vec![0; 0x80].into_boxed_slice().try_into().unwrap()),
             mem4b: std::sync::atomic::AtomicBool::new(false),
+            vblank_active: std::sync::atomic::AtomicBool::new(false),
         }
     }
 

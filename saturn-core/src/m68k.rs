@@ -51,11 +51,22 @@ pub struct M68k {
     pub pc: u32,
     pub running: bool,
     work_ram: Arc<WorkRam>,
-    /// Set when a real MCIPD write both requests and is enabled (via
-    /// MCIEB) for a given interrupt source -- see `check_main_interrupt`.
-    /// `None` when nothing has wired the SH-2 side up to observe this
-    /// (e.g. plain unit tests).
-    pub sound_req_irq: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// The real SCU, reached directly (cross-thread) on a real MCIPD write
+    /// that MCIEB also enables -- see the write path below. `None` when
+    /// nothing has wired the SH-2 side up to observe this (e.g. plain unit
+    /// tests). Event-driven, not polled: this is called exactly once, at
+    /// the moment the sound driver writes MCIPD, never on a per-sample or
+    /// per-instruction cadence (`docs/implementation-plans/scu.md` Phase 3
+    /// -- replaces the old `sound_req_irq: Arc<AtomicBool>`, which
+    /// `Sh2::service_pending_interrupt` used to poll once per CPU step).
+    pub scu: Option<Arc<crate::scu::Scu>>,
+    /// `docs/implementation-plans/scu.md` Phase 6: `Scu::sound_request` can
+    /// arm a DMA level on start factor 5, and `Scu` deliberately holds no
+    /// `LockStepSync` handle of its own (the same reason
+    /// `Scu::request_dma_trigger` doesn't wake Core 6 itself) -- so this
+    /// thread (Core 4) is the one that has to. `None` when nothing has
+    /// wired this core up to a real `SaturnSystem` (e.g. plain unit tests).
+    pub sync: Option<Arc<crate::sync::LockStepSync>>,
 }
 
 impl M68k {
@@ -67,7 +78,8 @@ impl M68k {
             pc: 0,
             running: false,
             work_ram,
-            sound_req_irq: None,
+            scu: None,
+            sync: None,
         }
     }
 
@@ -143,8 +155,19 @@ impl M68k {
                 let mcipd =
                     u16::from_be_bytes([ram[SCSP_MCIPD_OFFSET], ram[SCSP_MCIPD_OFFSET + 1]]);
                 if mcieb & mcipd != 0 {
-                    if let Some(ref flag) = self.sound_req_irq {
-                        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(ref scu) = self.scu {
+                        scu.sound_request();
+                        // Phase 6: sound_request can arm a DMA level on
+                        // start factor 5 -- wake Core 6 if it did. Cheap
+                        // and safe to call defensively (see `Sh2::step`'s
+                        // identical reasoning): `dma_active` just checks 3
+                        // flags, and `set_thread_active` is a no-op if
+                        // Core 6 is already active.
+                        if scu.dma_active() {
+                            if let Some(ref sync) = self.sync {
+                                sync.set_thread_active(6, true);
+                            }
+                        }
                     }
                 }
             }
@@ -1411,23 +1434,30 @@ mod tests {
         // about" mask, set up before the driver handshake begins.
         let work_ram = Arc::new(WorkRam::new());
         let mut cpu = M68k::new(work_ram.clone());
-        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        cpu.sound_req_irq = Some(flag.clone());
+        let scu = Arc::new(crate::scu::Scu::new());
+        scu.write_long(0xA0, 0x0000); // unmask Sound Request (IMS resets all-masked)
+        let target = Arc::new(std::sync::Mutex::new(crate::sh2::InterruptQueue::new()));
+        scu.set_master_target(target.clone());
+        cpu.scu = Some(scu);
         cpu.reset();
 
         // MCIPD bit 0x20 set, but MCIEB never enabled it: must NOT fire.
         cpu.write_byte(0x0010_002D, 0x20); // MCIPD low byte
         assert!(
-            !flag.load(std::sync::atomic::Ordering::Relaxed),
+            target.lock().unwrap().pending.is_empty(),
             "MCIPD alone, without MCIEB, must not raise the interrupt"
         );
 
         // Now enable it in MCIEB, then request it again via MCIPD: must fire.
         cpu.write_byte(0x0010_002B, 0x20); // MCIEB low byte
         cpu.write_byte(0x0010_002D, 0x20); // MCIPD low byte again
-        assert!(
-            flag.load(std::sync::atomic::Ordering::Relaxed),
+        let q = target.lock().unwrap();
+        assert_eq!(
+            q.pending.len(),
+            1,
             "MCIPD with the matching MCIEB bit enabled must raise the interrupt"
         );
+        assert_eq!(q.pending[0].vector, 0x46, "Sound Request's real vector");
+        assert_eq!(q.pending[0].level, 9, "Sound Request's real level");
     }
 }

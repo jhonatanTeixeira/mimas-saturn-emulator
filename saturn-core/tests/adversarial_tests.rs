@@ -477,3 +477,148 @@ fn test_sndon_signal_publishes_sound_ram_writes_across_threads() {
         reader.join().unwrap();
     });
 }
+
+/// `docs/implementation-plans/scu.md` Phase 4's own required threading
+/// test: a real Core-0-like `Sh2` triggers a large level-0 DMA transfer,
+/// then keeps stepping (real memory-fetching `Sh2::step()`, which calls
+/// `bus_wait()` -> `BusArbiter::acquire_bus_sync` on every instruction
+/// fetch) while a second thread plays Core 6's part (`Scu::step_dma_pass`,
+/// mirroring `SaturnSystem`'s real `scu-dma-dsp` loop). Proves Phase 4c's
+/// whole point: per-burst bus locking releases the bus between passes, so
+/// Core 0 makes forward progress instead of being stalled for the
+/// transfer's entire duration -- which is exactly what the old
+/// `Sh2::execute_scu_dma` stand-in (one lock held for the whole copy, all
+/// on Core 0's own thread) used to do. Wrapped in `assert_completes_within`
+/// so a real regression here (Core 0 permanently stuck in
+/// `acquire_bus_sync`, or the DMA thread never observing the trigger) is a
+/// hard timeout failure, not a hang of `cargo test` itself.
+#[test]
+fn scu_dma_engine_on_core6_does_not_stall_core0_for_the_whole_transfer() {
+    // A generous timeout: this test's own busy-poll loops (`thread::yield_now`)
+    // are legitimately slower to converge under heavy scheduling contention
+    // from `cargo test --workspace` running many other threads/compiles
+    // concurrently -- observed in practice -- without that being a real
+    // deadlock. A genuine regression (the lost-wakeup class of bug this
+    // test guards against) hangs forever regardless of the timeout length,
+    // so a wider margin only costs time on an already-contended machine,
+    // never correctness.
+    assert_completes_within(Duration::from_secs(30), || {
+        let arbiter = Arc::new(BusArbiter::new());
+        let work_ram = Arc::new(saturn_core::WorkRam::new());
+        // 7 slots so index 6 is valid -- `Sh2::write_long`'s DMA-trigger
+        // wake call and this test's own Core-6 stand-in both hardcode `6`,
+        // matching `SaturnSystem`'s real core numbering. All 7 are
+        // deactivated up front, *before* the DMA thread is spawned, for two
+        // independent reasons: (1) indices 0-5 have nothing driving their
+        // cycles (this test steps Core 0 with raw `step()`, not
+        // `run_loop`) -- left active by the constructor's default, they'd
+        // sit frozen at cycle 0 forever and the DMA thread's own
+        // `sync_core(6, ..)` heartbeat below would eventually block
+        // waiting for them to "catch up". (2) index 6 must start inactive
+        // *from this thread's point of view* too -- `park_while_inactive`
+        // and `set_thread_active` share one mutex, so as long as the flag
+        // is already `false` before the DMA thread ever calls
+        // `park_while_inactive`, the eventual trigger's wake-up can't be
+        // lost to a race no matter how the two threads interleave; leaving
+        // it at the constructor's default `true` very nearly deadlocked
+        // this test once (the trigger's "reactivate" call became a
+        // no-op because it ran before the DMA thread's own startup
+        // deactivation, silently swallowing the one wake-up it needed).
+        let sync = Arc::new(LockStepSync::new(7, 100));
+        for idx in 0..7 {
+            sync.set_thread_active(idx, false);
+        }
+
+        let mut cpu = Sh2::new(false, arbiter.clone(), work_ram.clone());
+        cpu.sync = Some(sync.clone());
+        cpu.core_id = 0;
+
+        const ITERS: u32 = 1024; // 4 KiB -- spans several Core-6 budget passes
+        let src = 0x0020_0000u32;
+        let dst = 0x0020_8000u32;
+        for i in 0..ITERS {
+            cpu.write_long(src + i * 4, i.wrapping_mul(2_654_435_761));
+        }
+        cpu.write_long(0x05FE_0000, src); // D0R
+        cpu.write_long(0x05FE_0004, dst); // D0W
+        cpu.write_long(0x05FE_0008, ITERS * 4); // D0C
+        cpu.write_long(0x05FE_000C, 0x102); // D0AD: copy mode, write_add = 4
+        cpu.write_long(0x05FE_0014, 0x7); // D0MD: direct, factor = 7 (immediate)
+
+        // Barrier against a genuine race this test's own harness can hit
+        // (production's real Core 6 thread deactivates itself once at
+        // `SaturnSystem::start()`, long before real BIOS/game code could
+        // possibly reach a DMA-triggering write): if the main thread
+        // triggers *before* the spawned thread below has run its own
+        // initial `set_thread_active(6, false)`, that later call clobbers
+        // the trigger's reactivation, and the thread parks forever with no
+        // one left to wake it.
+        let dma_thread_ready = Arc::new(AtomicBool::new(false));
+        let dma_thread_ready_c6 = dma_thread_ready.clone();
+
+        let scu = cpu.scu.clone();
+        let sync_c6 = sync.clone();
+        let arbiter_c6 = arbiter.clone();
+        let work_ram_c6 = work_ram.clone();
+        let scu_c6 = scu.clone();
+        let dma_thread = thread::spawn(move || {
+            sync_c6.set_thread_active(6, false);
+            dma_thread_ready_c6.store(true, Ordering::Release);
+            let mut cycles = 0u64;
+            loop {
+                if !sync_c6.park_while_inactive(6) {
+                    return;
+                }
+                while scu_c6.dma_active() {
+                    if sync_c6.is_shutdown() {
+                        return;
+                    }
+                    scu_c6.step_dma_pass(&work_ram_c6, &arbiter_c6, 256); // small per-pass budget
+                    cycles += 10;
+                    sync_c6.sync_core(6, cycles);
+                    thread::yield_now();
+                }
+                sync_c6.set_thread_active(6, false);
+            }
+        });
+        while !dma_thread_ready.load(Ordering::Acquire) {
+            thread::yield_now();
+        }
+
+        // Trigger -- `Sh2::write_long`'s own DMA-trigger handling wakes the
+        // stand-in thread above via `sync.set_thread_active(6, true)`; the
+        // transfer must NOT run inline on this call.
+        cpu.write_long(0x05FE_0010, 1);
+        assert_eq!(
+            cpu.read_long(dst),
+            0,
+            "the transfer must not complete synchronously on Core 0's own write"
+        );
+
+        // Core 0 keeps stepping real NOPs -- each fetch calls bus_wait(),
+        // so this genuinely contends with Core 6's bus lock. Forward
+        // progress here (not a hang) is the whole point of Phase 4c.
+        for i in 0..600u32 {
+            cpu.write_word(0x0600_2000 + i * 2, 0x0009); // NOP
+        }
+        cpu.pc = 0x0600_2000;
+        for _ in 0..500 {
+            cpu.step();
+        }
+
+        // Wait for the transfer to actually finish.
+        while scu.dma_active() {
+            thread::yield_now();
+        }
+        sync.request_shutdown();
+        dma_thread.join().unwrap();
+
+        for i in 0..ITERS {
+            assert_eq!(
+                cpu.read_long(dst + i * 4),
+                i.wrapping_mul(2_654_435_761),
+                "word {i}"
+            );
+        }
+    });
+}

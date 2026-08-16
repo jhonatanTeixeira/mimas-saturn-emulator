@@ -48,14 +48,17 @@ This document details the architectural design for the **Mimas** Sega Saturn emu
   * Running `std::thread::sleep` on a per-instruction scale is impossible. Instead, each CPU thread executes instruction cycles in batches representing a small fraction of virtual time (e.g., 1ms increments: ~28,600 instructions for the 28.6 MHz SH-2).
   * After executing a batch, the thread measures elapsed host time and sleeps/waits for the remaining duration of the slice.
   * Synchronization between Master and Slave SH-2 cores is enforced at the batch boundary, keeping their internal cycle counters in a lockstep margin (bounded-slack) of few cycles.
+  * **This wall-clock reference is scoped to the CPU cores' own pacing, and nowhere else.** It is not a license for any other component to run its own independent wall-clock timer -- see §1.5.
 
 ---
 
 ### 1.5. No Polling Loops (Event-Driven Suspension)
-* **Decision**: No component thread is allowed to loop on a condition variable or register status without parking.
-* **Details**: 
+* **Decision**: The only continuous loop anywhere in the system is the CPU's own (§1.4). Every other component thread is parked-until-woken; none of them may reference the host wall clock (`Instant::now()`) at all. No component thread is allowed to loop on a condition variable or register status without parking.
+* **Details**:
   * If a CPU core executes a `SLEEP` opcode or spins on a peripheral flag (e.g., waiting for CD-ROM read), it yields execution.
   * When a thread has no active work (e.g., the Slave SH-2 is parked, or the SCU DSP is idle), it is parked on a `Condvar` or blocks on a channel. It remains suspended until an external hardware event (an interrupt or write) wakes it up.
+  * **Timing-generator components (VDP2's H-Blank/V-Blank, SCU timers) are driven by real Master SH-2 cycles, never a wall clock.** This mirrors the reference emulator's own architecture exactly, not a Mimas invention: Yabause's main loop ties `yabsys.LineCount`/VBlank generation and even SCSP/SMPC/CD-block pacing to `sh2cycles` (real executed CPU cycles per batch), with no independent host-clock timer anywhere (`yabause/src/yabause.c:762-810`). Mimas's Master SH-2 (`Sh2::step`) batches its own real executed cycles (`SH2_CYCLES_PER_LINE`, `SCU_TIMER_BATCH_CYCLES`) and calls into `Scu::advance_video_line`/`Scu::timer1_tick` directly -- the *event* that wakes a parked component (e.g. Core 3, for the actual VDP2 frame render) is Master SH-2 crossing a cycle threshold, not a fixed real-time interval. A wall-clock-timed version of this was tried and measured as a real regression (see `history.md`, the chapter on Core 3's redesign): it broke the bounded-slack lockstep model in §1.4, silently throttling Master SH-2 down to the timer thread's own wall-clock cadence.
+  * **Known gap, not a rule exception**: Core 5 (SCSP) still runs a continuous loop today, because real hardware's audio synthesizer genuinely never stops regardless of what any CPU is doing -- this is tracked as follow-up work (moving its own pacing onto the same cycle-batched model, or an equivalent), not treated as satisfying this section's decision. See `CLAUDE.md`'s "Known architecture debt" for the current, honest state of every component thread against this rule.
 
 ---
 
