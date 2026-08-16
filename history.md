@@ -2239,3 +2239,148 @@ Milestone 3 implements the complete Sega Saturn CD-Block (`Cs2`) architecture, c
 ### Verification:
 - All 295 unit, sync, adversarial, real-fixture, and e2e tests passing across the workspace (`cargo test --workspace`).
 - 0 compiler warnings; `cargo fmt --all` formatted.
+
+## Chapter 37 — Milestone 4: SMPC Phase 7 — recovering an interrupted session, restoring a Phase 5 regression, closing out the milestone
+
+Phase 7 (`docs/implementation-plans/smpc-peripheral.md`) was started in a separate session that
+ran out of budget mid-edit, leaving `saturn-core/src/smpc.rs` with a genuine syntax error (an
+unclosed `while` loop inside `chunk_port_data`) and a scattering of half-finished helper scripts
+(`patch_smpc.py`, `replay2.py`-`replay4.py`, etc.) at the repo root. Picking this up meant first
+establishing what was actually true about the code before extending it -- exactly the same
+discipline this project has applied to every externally-authored pass so far, not a special case
+for an interrupted one.
+
+**What the interrupted session got right, verified independently against
+`docs/hardware-reference/smpc-peripheral.md` rather than trusted at face value:** the
+`PeripheralState` enum design (`Disconnected`/`Pad`/`Wheel`/`MissionStick`/`Pad3D`/`TwinSticks`/
+`Gun`/`Keyboard`/`Mouse`, each carrying its own typed state, with a single `to_port_data()` entry
+point) is sound and matches the project's own established "port what hardware does" convention
+better than the old `PadState`-with-a-`connected`-bool design it replaced. The digital-synthesis-
+from-analog-axes hysteresis thresholds (§9.5) -- Wheel `0x67`/`0x97`, Mission Stick/Twin Sticks
+`0x56`/`0xAB`/`0x65`/`0xA9` -- were numerically exact against the reference table on first check.
+`chunk_port_data`'s core algorithm (status byte, then ID+data if connected, repeated per port),
+once its missing closing brace was restored, already matched §5.5's own worked examples exactly
+(`F1 02 FF FF | F0` for one idle pad) -- the *previous*, pre-Phase-7 code had actually been
+wrong here (a fabricated `0xF0`-fixed-plus-size-nibble 2-byte header with no basis in the real
+format), so Phase 7 fixed a real, pre-existing bug just by getting the chunker's own shape right.
+
+**Real bugs found and fixed, each independently re-derived from the hardware reference, not
+guessed:**
+
+1. **Gun's `PortData::size` was `1`, should be `0`.** Real hardware's `port->size == 1` counts
+   the status byte itself in its own flat-array model (`§5.5`: "the port contributes exactly one
+   byte"). Mimas's `PortData` splits `status`/`id` into their own fields and `chunk_port_data`
+   already writes the status byte unconditionally -- so `size` there means "extra bytes past
+   status+id" (see `PadState`'s `size == 2`, its two data bytes), and the gun-equivalent value is
+   `0`, not a direct copy of the C struct's own count. Getting this wrong made every gun report
+   one stray, unspecified byte too long. A dedicated end-to-end test
+   (`gun_contributes_only_its_status_byte_to_the_intback_stream`) now pins the *observable*
+   stream shape down, not just the `size` field in isolation.
+2. **`MissionStickState::axis3` and `TwinSticksState::axis7` were double-processed.** The
+   interrupted session's `to_port_data()` unconditionally computed `0xFF - axis` for both fields,
+   but §9.3's own initializer table gives their *default* value as a plain `0x7F`, same as every
+   other axis -- the `-(s8)val` inversion (§9.5) only applies when real hardware's
+   `PerAxis3Value`/`PerAxis7Value` setter is actually called with a *live* joystick reading, not
+   to the field's resting value. Since no live analog-input frontend exists to call such a
+   setter, both fields are now treated as already-encoded wire bytes (matching the convention
+   `MouseState`'s displacement fields already used), and `to_port_data()` copies them through
+   directly -- fixing a default-value bug (`0x80` reported at idle instead of `0x7F`) that would
+   have affected every game probing these two peripheral types even before any input existed.
+3. **`TwinSticksState::axis7`'s default was set to `0x00`, matching real hardware's own `[BUG]`
+   #39 -- which turned out to be the wrong call**, caught by actually reading
+   `docs/implementation-plans/smpc-peripheral.md` Phase 7's own checklist *before* declaring the
+   fix done: the plan explicitly says "Mimas must initialise all 9" (i.e. deliberately diverge
+   from Yabause's own bug and use the neutral `0x7F` here too), a decision already made and
+   documented, not left open for this pass to re-litigate. Corrected to `0x7F` once found --
+   the lesson worth keeping: the hardware-reference doc describes what real hardware/Yabause
+   *does*, the implementation-plan doc records what this project *decided to do about it*, and
+   the second one wins when they disagree, precisely because it exists to make exactly that kind
+   of call once instead of every time someone touches the code.
+4. **Mouse's `PerFlush` equivalent (§5.4 step 2 / §9.6) was entirely unimplemented** -- an
+   INTBACK peripheral snapshot never cleared a mouse's accumulated sign/overflow/displacement
+   bytes afterward, so a mouse's motion deltas would (once a live input source ever drives them)
+   accumulate forever rather than resetting each poll. Added `PeripheralState::flush_mouse_deltas`,
+   wired into the snapshot step at the exact point real hardware calls it (after the snapshot
+   copy, before the chunk that reads it) -- and, per the reference's own catalogued bug (§10.1
+   #42, "only flushes a mouse in the port's first slot, hard-codes the ID"), implemented the
+   *fixed* version (matches on the `Mouse` enum variant, works regardless of "slot") since that
+   costs nothing extra here and multi-tap (the only way "which slot" would matter) is itself
+   deferred.
+5. **The INTBACK peripheral-chunk SR (status register) formula was wrong.** The code computed
+   `SR = 0x6F`, then conditionally OR'd in `0x80` based on a made-up "is there more data pending"
+   check. §5.3 gives the real formula as a *separate* one from the status-block path's
+   `0x4F | (intback << 5)`: `0xC0 | (IREG1 >> 4)` for the first chunk of a sequence, `0x80 |
+   (IREG1 >> 4)` for every subsequent one -- and explicitly flags, as its own `[QUIRK]`, that
+   real hardware has **no** "more chunks remain" bit at all; the game is expected to derive that
+   from the port-status/size bytes it already parsed. The made-up check wasn't just wrong, it was
+   inventing behavior the reference explicitly documents as absent. Fixed to the real formula;
+   caught by a restored regression test (`intback_peripheral_sr_first_vs_subsequent`) that failed
+   immediately against the buggy version, not written to match it.
+6. **Port 1's default peripheral state regressed to `Disconnected`.** The `PeripheralState`
+   refactor's constructor used `PeripheralState::default()` (`Disconnected`) for *both* ports,
+   losing the Milestone-4-Phase-5-era fix (Chapter 35's SMPC work, not this chapter's CS2 one --
+   see the phased plan) that made port 1 default to a connected idle pad, the common
+   single-player case. Restored: port 1 defaults to `Pad(PadState::default())`, port 2 to
+   `Disconnected`, with a regression test (`port1_defaults_to_a_connected_pad_port2_to_disconnected`).
+
+**A full subsystem silently deleted, not just buggy: PDR1/PDR2/DDR1/DDR2/IOSEL/EXLE.** The
+direct-access-port write handling built and tested in an earlier pass on this milestone (already
+marked `[x]` "done" in the plan) was entirely absent from `on_register_write` in the interrupted
+session's version of the file -- not modified, gone, along with every one of its tests
+(`pdr1_four_phase_idle_pad`, `ddr1_id_nibble_table`, etc.; 15 tests total, confirmed missing by
+diffing the test count against the last known-green run of this same file). Restored and
+extended for Phase 7's actual scope: the DDR1/DDR2 ID-nibble table now covers all nine
+`PeripheralState` variants (§6.3's real table -- `0x7C` pad/gun, `0x71` 3D-pad/keyboard, `0x70`
+mouse, `0x7F` nothing, and a `None` "leave PDR untouched" result for wheel/mission-stick/twin-
+sticks, the one row real hardware doesn't support at all), and PDR1 mode `0x00`'s gun-button
+read (§6.2) is now implemented now that `GunState` exists to read from. Mode `0x40` (`do_th_mode`,
+the Mega Drive ID acquisition `[HACK]`) was restored byte-for-byte from what this project had
+already built and verified, not re-derived from scratch.
+
+**Deliberately out of scope, and why, matching the project's own "say so explicitly" rule rather
+than silently narrowing the phase:**
+
+- **Multi-tap** (§9.2, `0x16` status, 6 dynamically-managed slots of possibly-mixed peripheral
+  types). `PortData`'s shape (one `id` field, one flat `data[]`) only fits a single peripheral
+  per port; a real tap needs a structurally different representation plus the >32-byte chunking
+  edge cases §5.4 documents (`[BUG]`: multi-chunk continuations re-send the first 32 bytes).
+  Large enough to deserve its own pass, not a corner cut into this one.
+- **The live light-gun position path** (§6.4/§6.5's VDP2 external latch: `/4` scale, inverted Y,
+  a resolution-derived clamp). Needs a live gun/pointer input source -- no frontend supplies one,
+  the same limitation Milestone 4 Phase 4 already accepted for analog pad axes in general (only
+  player 1's *digital* buttons are wired, via `mimas_window.rs`'s keyboard mapping) -- and VDP2
+  external-latch register wiring this plan doesn't own. `GunState` stores what it can
+  (trigger/start/position fields) for whenever that frontend work happens.
+- **Mouse overflow-bit generation.** Both §10.1 #41 and this phase's own checklist ask for it,
+  but `docs/hardware-reference/smpc-peripheral.md` §9.6 is explicit that the *reference itself*
+  has "no saturation and no overflow-flag generation" -- there is no citable source anywhere in
+  this project's material for what real silicon's actual trigger condition is. Implementing a
+  guessed threshold would violate `CLAUDE.md`'s "never assert a value you haven't independently
+  derived" rule as directly as any test-value fabrication would. Left unimplemented and said so,
+  rather than invented and left silent.
+
+**Testing philosophy note, worth restating because this pass leaned on it twice.** Every expected
+byte in the new tests (`saturn-core/tests/peripheral_tests.rs`, the restored PDR/DDR/INTBACK tests
+in `smpc.rs`) was hand-computed from §9.3-9.7's tables and formulas before being written into an
+assertion -- e.g. `pdr1_four_phase_a_and_right`'s four expected `PDR1` values are each worked
+through the real `(val & 0x80) | 0x10 | (...)` formula by hand in the test's own comments, not
+read back from a passing run. This is what caught bug #5 above: the SR test's *hand-derived*
+expected value (`0xC0`, from the real formula) disagreed with what the code produced (`0x40`),
+immediately pointing at the actual bug rather than being written to match it.
+
+Verification: `cargo build --workspace` clean, 0 warnings (`peripheral_extensions.rs`, an
+unwired, superseded skeleton left over from the interrupted session, and every stray
+`*.py` patch script were deleted, not left as clutter). `cargo test --workspace` green -- 324
+tests total (up from 295 at the end of Milestone 3: 69 e2e, 221 saturn-core lib, 9 adversarial, 7
+new `peripheral_tests`, 6 real-fixtures, 1 `smpc_integration_tests`, 11 sync-tests). `cargo fmt
+--all` clean. A real `MIMAS_BOOT_WATCH_SECS=90` run against `scratch/ra_system/saturn_bios.bin`
+(release build) reached the identical, previously-documented settling PC (`0x06001694`) both
+before and after this pass's fixes -- no regression, as expected, since none of this phase's
+changes touch anything the BIOS boot path itself exercises before that point.
+
+**Documentation touched:** `docs/implementation-plans/smpc-peripheral.md` (Phase 7's checklist
+and testing section, item by item, `[x]`/`[ ]`/annotated per what's actually true --
+`docs/hardware-reference/smpc-peripheral.md`'s own §9.3/§9.5/§9.6 citations added throughout
+rather than left to memory), `.development/phased_development_plan.md` (Milestone 4's intro line
+and Phase 7's own line -- Milestone 4 is now fully landed modulo Phase 7's two named
+deferrals).

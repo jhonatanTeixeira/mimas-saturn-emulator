@@ -130,7 +130,8 @@ above). `cs2-cdblock.md`'s own phase order already sequences correctly; Phase 4 
 
 ## Milestone 4 — Finish SMPC & peripherals
 
-Three of eight phases already done.
+All eight phases landed; Phase 7 has two explicitly deferred sub-items (multi-tap, the live
+gun/VDP2 latch path) rather than being fully closed out.
 
 - [x] `smpc-peripheral.md` Phase 0 — Extract a real `Smpc` type (pure refactor) — **done**,
       see `history.md` Chapter 14
@@ -140,19 +141,23 @@ Three of eight phases already done.
       gap it surfaced)
 - [x] `smpc-peripheral.md` Phase 2 — Complete the INTBACK status block: RTC, SMEM, region,
       system flags — **done**
-- [ ] `smpc-peripheral.md` Phase 3 — The remaining commands: NMIREQ, MSHON, CDON/CDOFF, SYSRES,
+- [x] `smpc-peripheral.md` Phase 3 — The remaining commands: NMIREQ, MSHON, CDON/CDOFF, SYSRES,
       CKCHG320/352 (CDON/CDOFF are meaningful only once Milestone 3 has wired the CD block in —
       fine to implement as accepted no-ops before that, per the phase's own notes)
-- [ ] `smpc-peripheral.md` Phase 4 — Peripherals: the digital pad, the INTBACK peripheral path,
+- [x] `smpc-peripheral.md` Phase 4 — Peripherals: the digital pad, the INTBACK peripheral path,
       and frontend input (the single largest functional gap — nothing in the workspace can
       express "a button is pressed" today)
-- [ ] `smpc-peripheral.md` Phase 5 — The direct-access port: PDR1/PDR2, DDR1/DDR2, IOSEL, EXLE
-- [ ] `smpc-peripheral.md` Phase 6 — Real command timing, and moving the SMPC onto Core 7
+- [x] `smpc-peripheral.md` Phase 5 — The direct-access port: PDR1/PDR2, DDR1/DDR2, IOSEL, EXLE
+- [x] `smpc-peripheral.md` Phase 6 — Real command timing, and moving the SMPC onto Core 7
       (**coordinate with `cs2-cdblock.md`'s own Core 7 work** — same physical thread, see above.
       Also the point to size SMPC's own dispatch cadence to its real ~83µs timing rather than
       the generic per-core clamp — see `../docs/lessons-from-yabasanshiro.md` §6)
-- [ ] `smpc-peripheral.md` Phase 7 — Extended peripheral types: multi-tap, mouse, keyboard,
-      light gun *(game compatibility)*
+- [x] `smpc-peripheral.md` Phase 7 — Extended peripheral types: wheel, mission stick, 3D pad,
+      twin sticks, mouse, keyboard, and a gun's status-only presence *(game compatibility)* —
+      **mostly done**; multi-tap (dynamic 6-slot chaining) and the live gun/VDP2 external-latch
+      position path are explicitly deferred as genuinely separate pieces of work, not partial
+      versions of what's listed. See `history.md` Chapter 37 and the phase's own checklist for
+      exactly what's done vs. deferred, item by item.
 
 ---
 

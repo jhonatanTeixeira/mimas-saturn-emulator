@@ -83,6 +83,14 @@ fn log_scu_dstp_write_once() {
     }
 }
 
+#[derive(PartialEq, Eq, Debug)]
+pub enum VideoLineEvent {
+    None,
+    VBlankIn,
+    VBlankOut,
+    Line207,
+}
+
 /// The 256-byte memory-mapped register file, `docs/hardware-reference/scu.md`
 /// §1.1-§1.4. Field names are taken directly from that table rather than
 /// transliterated from Yabause's C struct layout.
@@ -706,7 +714,7 @@ impl Scu {
     /// caller (`Sh2::step`) uses to wake Core 3 (`lib.rs`) for the actual
     /// frame render, since `Scu` deliberately holds no `LockStepSync`
     /// handle of its own.
-    pub fn advance_video_line(&self, work_ram: &WorkRam) -> bool {
+    pub fn advance_video_line(&self, work_ram: &WorkRam) -> VideoLineEvent {
         self.hblank_in();
         let line = self.timers.lock().unwrap().timer0;
         if line == 225 {
@@ -715,15 +723,17 @@ impl Scu {
             work_ram
                 .vblank_active
                 .store(true, std::sync::atomic::Ordering::Release);
-            true
+            VideoLineEvent::VBlankIn
         } else if line == 263 {
             self.vblank_out(); // resets timers.timer0 to 0 internally
             work_ram
                 .vblank_active
                 .store(false, std::sync::atomic::Ordering::Release);
-            false
+            VideoLineEvent::VBlankOut
+        } else if line == 207 {
+            VideoLineEvent::Line207
         } else {
-            false
+            VideoLineEvent::None
         }
     }
 
@@ -2519,14 +2529,27 @@ mod tests {
         let work_ram = WorkRam::new();
         let master = wire_master(&scu);
         for i in 1..=224u32 {
-            let entered_vblank = scu.advance_video_line(&work_ram);
-            assert!(!entered_vblank, "line {i} must not be VBlankLineCount yet");
+            let event = scu.advance_video_line(&work_ram);
+            if i == 207 {
+                assert!(
+                    event == VideoLineEvent::Line207,
+                    "line 207 must fire Line207"
+                );
+            } else {
+                assert!(
+                    event == VideoLineEvent::None,
+                    "line {i} must not be VBlankLineCount yet"
+                );
+            }
         }
         assert!(!work_ram
             .vblank_active
             .load(std::sync::atomic::Ordering::Acquire));
         let entered_vblank = scu.advance_video_line(&work_ram); // line 225
-        assert!(entered_vblank, "line 225 must fire V-Blank IN");
+        assert!(
+            entered_vblank == VideoLineEvent::VBlankIn,
+            "line 225 must fire V-Blank IN"
+        );
         assert!(work_ram
             .vblank_active
             .load(std::sync::atomic::Ordering::Acquire));
@@ -2552,7 +2575,7 @@ mod tests {
             .load(std::sync::atomic::Ordering::Acquire));
         let entered_vblank = scu.advance_video_line(&work_ram); // line 263
         assert!(
-            !entered_vblank,
+            entered_vblank == VideoLineEvent::VBlankOut,
             "line 263 fires V-Blank OUT, not V-Blank IN"
         );
         assert!(!work_ram

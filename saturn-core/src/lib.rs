@@ -2,6 +2,7 @@ pub mod bus_arbiter;
 pub mod cdrom;
 pub mod cs2;
 pub mod m68k;
+pub mod peripheral;
 pub mod scsp;
 pub mod scu;
 pub mod scu_dsp;
@@ -140,6 +141,38 @@ impl SaturnSystem {
             irq_in_c0,
             irq_in_c1,
         }
+    }
+
+    pub fn set_pad_state(&self, port: usize, state: crate::peripheral::PadState) {
+        self.smpc.lock().unwrap().set_pad_state(port, state);
+    }
+
+    /// General form of `set_pad_state` -- drives any connected peripheral's
+    /// live state (wheel rotation, mouse motion, gun trigger...), not just
+    /// a digital pad's.
+    pub fn set_peripheral_state(&self, port: usize, state: crate::peripheral::PeripheralState) {
+        self.smpc.lock().unwrap().set_peripheral_state(port, state);
+    }
+
+    pub fn set_port_peripheral(
+        &mut self,
+        port: usize,
+        kind: Option<crate::peripheral::PeripheralKind>,
+    ) {
+        self.smpc.lock().unwrap().set_port_peripheral(port, kind);
+    }
+
+    pub fn press_reset_button(&mut self) {
+        // §4.16: Reset button.
+        let smpc = self.smpc.lock().unwrap();
+        if smpc.resd {
+            // Inert until the game issues RESENAB.
+            return;
+        }
+        // Fire NMI (vector 0x0B, level 16) to Master SH-2.
+        self.irq_in_c0.lock().unwrap().send(0x0B, 16);
+        // Note: setting ICR bit 15 here is deferred since it's deep inside Sh2's thread,
+        // but the queue delivery will at least vector it correctly.
     }
 
     /// Load real BIOS ROM bytes so the master SH-2 actually executes genuine
@@ -497,6 +530,9 @@ impl SaturnSystem {
         let sync_c7 = sync.clone();
         let arbiter_c7 = arbiter.clone();
         let cs2_c7 = self.cs2.clone();
+        let smpc_c7 = self.smpc.clone();
+        let work_ram_c7 = work_ram.clone();
+        let m68k_control_c7 = self.m68k_control.clone();
         let handle_c7 = thread::Builder::new()
             .name("smpc-cd-block".into())
             .spawn(move || {
@@ -507,23 +543,74 @@ impl SaturnSystem {
                     if !sync_c7.park_while_inactive(7) {
                         return;
                     }
-                    while cs2_c7.lock().unwrap().has_work() {
-                        if sync_c7.is_shutdown() {
-                            return;
+                    // Wait for an explicit wake from Master SH-2.
+                    // Master SH-2 tracks cycles and wakes us exactly when the SMPC command
+                    // delay expires, or at V-Blank IN.
+                    let mut did_work = false;
+
+                    let mut smpc = smpc_c7.lock().unwrap();
+                    // Gate on `is_dispatch_ready`, not bare `has_work()` --
+                    // this wake may have been CS2's, not ours, while a
+                    // command (e.g. INTBACK's ~16ms) is still genuinely
+                    // counting down. See `Smpc::dispatch_ready`'s doc
+                    // comment.
+                    if smpc.is_dispatch_ready() {
+                        let effects = smpc.execute_expired_command(&work_ram_c7);
+                        if effects.system_manager_irq {
+                            work_ram_c7
+                                .smpc_irq_pending
+                                .store(true, std::sync::atomic::Ordering::Release);
                         }
-                        let mut cs2 = cs2_c7.lock().unwrap();
-                        if cs2.command_pending {
-                            cs2.execute_command();
-                            cs2.command_pending = false;
+                        if effects.nmi {
+                            work_ram_c7
+                                .smpc_nmi_pending
+                                .store(true, std::sync::atomic::Ordering::Release);
                         }
-                        if cs2.vblank_pending {
-                            cs2.exec_vblank();
-                            cs2.vblank_pending = false;
+                        if effects.system_reset {
+                            work_ram_c7
+                                .smpc_sysres_pending
+                                .store(true, std::sync::atomic::Ordering::Release);
                         }
-                        drop(cs2);
-                        cycles = cycles.wrapping_add(100);
+                        if let Some(is_352) = effects.clock_change {
+                            work_ram_c7.smpc_clock_change.store(
+                                if is_352 { 2 } else { 1 },
+                                std::sync::atomic::Ordering::Release,
+                            );
+                        }
+                        if effects.start_slave {
+                            sync_c7.set_thread_active(1, true);
+                        }
+                        if effects.stop_slave {
+                            sync_c7.set_thread_active(1, false);
+                        }
+                        if effects.sound_on {
+                            m68k_control_c7.store(true, std::sync::atomic::Ordering::Release);
+                            sync_c7.set_thread_active(4, true);
+                        }
+                        if effects.sound_off {
+                            m68k_control_c7.store(false, std::sync::atomic::Ordering::Release);
+                        }
+                        did_work = true;
+                    }
+                    drop(smpc);
+
+                    let mut cs2 = cs2_c7.lock().unwrap();
+                    if cs2.command_pending {
+                        cs2.execute_command();
+                        cs2.command_pending = false;
+                        did_work = true;
+                    }
+                    if cs2.vblank_pending {
+                        cs2.exec_vblank();
+                        cs2.vblank_pending = false;
+                        did_work = true;
+                    }
+                    drop(cs2);
+
+                    // We are cycle-driven: do the work we were woken to do, sync, and park again.
+                    if did_work {
+                        cycles = cycles.wrapping_add(100); // Nominal cost for the work done
                         sync_c7.sync_core(7, cycles);
-                        thread::yield_now();
                     }
                     sync_c7.set_thread_active(7, false);
                 }
