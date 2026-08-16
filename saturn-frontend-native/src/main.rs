@@ -46,6 +46,17 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--help" | "-h" => {
+                println!("Mimas Sega Saturn Emulator");
+                println!("Usage: saturn-frontend-native --bios <path> [--chd <path>] [--speed <multiplier>] [--framedump <path>]");
+                println!("Options:");
+                println!("  --bios, -b <path>        Path to BIOS ROM image (required)");
+                println!("  --chd, -c <path>         Path to CD-ROM CHD disc image (optional)");
+                println!("  --speed, -s <multiplier> Emulation speed multiplier (e.g. 1.0)");
+                println!("  --framedump <path>       Dump rendered frame to PNG file");
+                println!("  --help, -h               Show this help message");
+                process::exit(0);
+            }
             "--bios" | "-b" => {
                 if i + 1 < args.len() {
                     bios_path = Some(args[i + 1].clone());
@@ -69,7 +80,10 @@ fn main() {
                     match args[i + 1].parse::<f64>() {
                         Ok(mult) => speed_multiplier = Some(mult),
                         Err(_) => {
-                            eprintln!("Error: --speed requires a number (e.g. 1.0 for real speed), got '{}'", args[i + 1]);
+                            eprintln!(
+                                "Error: Invalid --speed value '{}', expected a float",
+                                args[i + 1]
+                            );
                             process::exit(1);
                         }
                     }
@@ -104,13 +118,19 @@ fn main() {
     };
 
     if !Path::new(&bios).is_file() {
-        eprintln!("Error: BIOS file not found at: {}", bios);
+        eprintln!(
+            "Error: Failed to read BIOS image: BIOS file not found at: {}",
+            bios
+        );
         process::exit(1);
     }
 
     if let Some(ref chd) = chd_path {
         if !Path::new(chd).is_file() {
-            eprintln!("Error: CHD file not found at: {}", chd);
+            eprintln!(
+                "Error: Failed to open CHD image: CHD file not found at: {}",
+                chd
+            );
             process::exit(1);
         }
     }
@@ -153,15 +173,16 @@ fn main() {
     // Try reading CHD if path provided -- this is a genuine CHD hunk read
     // (via the `chd` crate), not a mocked result, for any real disc image.
     if let Some(ref chd) = chd_path {
-        match Cdrom::open_chd(chd) {
-            Ok(mut cdrom) => {
-                let mut sector = vec![0; 2048];
-                match cdrom.read_sector(150, &mut sector) {
-                    Ok(()) => println!("CD-ROM: read sector 150 ({} bytes)", sector.len()),
+        match system.load_disc(chd) {
+            Ok(()) => {
+                let mut cdrom = Cdrom::open_chd(chd).unwrap();
+                let mut sector = [0u8; 2448];
+                match cdrom.read_sector_fad(150, &mut sector) {
+                    Ok(()) => println!("CD-ROM: loaded disc and read sector 150 (2448 bytes)"),
                     Err(e) => eprintln!("CD-ROM: failed to read sector 150: {}", e),
                 }
             }
-            Err(e) => eprintln!("CD-ROM: failed to open {}: {}", chd, e),
+            Err(e) => eprintln!("CD-ROM: failed to load {}: {}", chd, e),
         }
     }
 

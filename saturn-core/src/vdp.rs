@@ -84,7 +84,7 @@ pub fn execute_vdp1(ram: &WorkRam) {
     }
     drop(regs);
 
-    let mut vram = ram.vdp1_vram.write().unwrap();
+    let vram = ram.vdp1_vram.write().unwrap();
     let mut fb = ram.vdp1_framebuffer.write().unwrap();
 
     let mut cmd_addr = 0usize;

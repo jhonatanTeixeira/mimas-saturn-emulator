@@ -105,26 +105,26 @@ This is the empirically-next wall per the live BIOS trace (see "How this order w
 above). `cs2-cdblock.md`'s own phase order already sequences correctly; Phase 4 needs Milestone
 2's SCU DMA controller.
 
-- [ ] `cs2-cdblock.md` Phase 1 — Wire the CD block into the system and decode CS2 for real
+- [x] `cs2-cdblock.md` Phase 1 — Wire the CD block into the system and decode CS2 for real
       (this is also where Core 7 gets its first real work — replace its permanent busy-spin
       placeholder loop with real `park_while_inactive` use, see
-      `../docs/lessons-from-yabasanshiro.md` §1)
-- [ ] `cs2-cdblock.md` Phase 2 — The CR1-4/HIRQ handshake, and the commands BIOS boot probes with
-      (this is the specific phase most likely to actually move the wall)
-- [ ] `cs2-cdblock.md` Phase 3 — Drive/disc state machine and the two free-running engines
+      `../docs/lessons-from-yabasanshiro.md` §1) — **done**, see `history.md` Chapter 36
+- [x] `cs2-cdblock.md` Phase 2 — The CR1-4/HIRQ handshake, and the commands BIOS boot probes with
+      (this is the specific phase most likely to actually move the wall) — **done**, see `history.md` Chapter 36
+- [x] `cs2-cdblock.md` Phase 3 — Drive/disc state machine and the two free-running engines
       (size their dispatch cadence to SMPC/CD-block's own real thresholds, not the generic
       per-core clamp used today — see `../docs/lessons-from-yabasanshiro.md` §6, including the
-      `if`-vs-`while` threshold-check pitfall a sibling project already hit here)
-- [ ] `cs2-cdblock.md` Phase 4 — Sector buffers, partitions, filters, and getting data to the CPU
-      (depends on `scu.md` Phase 4)
-- [ ] `cs2-cdblock.md` Phase 5 — Playback, seek, scan, subcode, CDDA *(game compatibility —
+      `if`-vs-`while` threshold-check pitfall a sibling project already hit here) — **done**, see `history.md` Chapter 36
+- [x] `cs2-cdblock.md` Phase 4 — Sector buffers, partitions, filters, and getting data to the CPU
+      (depends on `scu.md` Phase 4) — **done**, see `history.md` Chapter 36
+- [x] `cs2-cdblock.md` Phase 5 — Playback, seek, scan, subcode, CDDA *(game compatibility —
       lower priority than 1-4)* — before/while landing this, replace `Cdrom`'s single-hunk cache
       (`cdrom.rs`'s `current_hunk_num`) with a small LRU: CDDA interleaved with data reads is
       exactly the access pattern that thrashes a 1-slot cache, per
-      `../docs/lessons-from-yabasanshiro.md` §2
-- [ ] `cs2-cdblock.md` Phase 6 — Filesystem commands and IP.BIN *(game compatibility)*
-- [ ] `cs2-cdblock.md` Phase 7 — Remaining commands: MPEG stubs, FAD search, MPEG ROM *(game
-      compatibility, lowest priority in this file)*
+      `../docs/lessons-from-yabasanshiro.md` §2 — **done**, see `history.md` Chapter 36
+- [x] `cs2-cdblock.md` Phase 6 — Filesystem commands and IP.BIN *(game compatibility)* — **done**, see `history.md` Chapter 36
+- [x] `cs2-cdblock.md` Phase 7 — Remaining commands: MPEG stubs, FAD search, MPEG ROM *(game
+      compatibility, lowest priority in this file)* — **done**, see `history.md` Chapter 36
 
 ---
 

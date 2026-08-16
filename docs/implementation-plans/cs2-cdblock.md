@@ -114,19 +114,19 @@ Do not guess which commands the BIOS issues. `.development/current_blocker.md` a
 `history.md` Chapter 12's: Core 0 settles at PC `0x060131A8` inside a counted loop, after the
 SCU DSP interpreter landed. Nothing in that trace has been tied to the CD block yet.
 
-- [ ] Run `MIMAS_BOOT_WATCH_SECS=280 ./target/release/saturn-frontend-native --bios <real.bin>`
+- [x] Run `MIMAS_BOOT_WATCH_SECS=280 ./target/release/saturn-frontend-native --bios <real.bin>`
       and `grep '\[REGACCESS\] Cs2Regs'` on stderr. `log_reg_access_once` (`sh2.rs:242-257`)
       already treats `MemRegion::Cs2Regs` as interesting (`sh2.rs:246`), so this needs no code
       change. Record the exact offsets and directions in `.development/current_blocker.md`.
-- [ ] Repeat with `--chd <disc.chd>` to see whether the probe sequence differs with a disc
+- [x] Repeat with `--chd <disc.chd>` to see whether the probe sequence differs with a disc
       "present" (it should not yet — nothing connects the CHD to the register block).
-- [ ] Expected, but **verify rather than assume**: a real BIOS probes the drive long before it
+- [x] Expected, but **verify rather than assume**: a real BIOS probes the drive long before it
       wants game data. §3.1's `CDB_STAT_NODISC`/`CDB_STAT_OPEN` paths and §5.1's `0x00`
       Get Status / `0x01` Get Hardware Info / `0xE0` Authenticate Device exist precisely for
       that. The BIOS's own CD-player screen is already a tracked milestone
       (`milestone-tests/fixtures/cd_player_screen.jpg`), and that screen cannot render without a
       drive that answers status queries.
-- [ ] **Gotcha**: once Phase 1 moves CS2 decoding above `raw_read_byte`/`raw_write_byte`, the
+- [x] **Gotcha**: once Phase 1 moves CS2 decoding above `raw_read_byte`/`raw_write_byte`, the
       `log_reg_access_once` calls at `sh2.rs:400` and `sh2.rs:506` stop seeing CS2 traffic. Add
       an equivalent call at the new word/long interception point in the same commit, or the
       `[REGACCESS]` recipe silently goes blind on exactly the subsystem being built.
@@ -141,17 +141,17 @@ No commands yet — this phase is pure plumbing plus the two decode-bug fixes.
 
 ### 1.1 New `saturn-core/src/cs2.rs`
 
-- [ ] `pub struct Cs2` with the register file from §0 / §1.2:
+- [x] `pub struct Cs2` with the register file from §0 / §1.2:
       `hirq: u16`, `hirqmask: u16`, `cr1..cr4: u16`, `mpegrgb: u16`.
-- [ ] Drive report state (§2.1, §3.1): `status: u8`, `fad: u32`, `options: u8`, `repcnt: u8`,
+- [x] Drive report state (§2.1, §3.1): `status: u8`, `fad: u32`, `options: u8`, `repcnt: u8`,
       `ctrladdr: u8`, `track: u8`, `index: u8`.
-- [ ] Command scheduling state (§2, §7): `command_pending: bool` (Yabause's `_command`),
+- [x] Command scheduling state (§2, §7): `command_pending: bool` (Yabause's `_command`),
       `command_timing_us: i32`, `command_execlock_us: i32`, `delay_irq: u16`.
-- [ ] Info-transfer state (§1.7): `infotranstype: i8` (−1 = idle), `transfercount: u32`,
+- [x] Info-transfer state (§1.7): `infotranstype: i8` (−1 = idle), `transfercount: u32`,
       `cdwnum: u32`, `toc: [u32; 102]`.
-- [ ] Disc backend: `disc: Option<Cdrom>`, plus a `backend_status()` returning the four §6.1
+- [x] Disc backend: `disc: Option<Cdrom>`, plus a `backend_status()` returning the four §6.1
       codes (0 spinning / 1 not spinning / 2 no disc / 3 tray open).
-- [ ] Reset values, exactly per §1.5 / §1.3 / §5.4 / §3.2 — these are the first
+- [x] Reset values, exactly per §1.5 / §1.3 / §5.4 / §3.2 — these are the first
       independently-verifiable facts in the subsystem:
       `CR1=0x0043 CR2=0x4442 CR3=0x4C4F CR4=0x434B` (ASCII `\0C`,`DB`,`LO`,`CK`),
       `HIRQ=0xFFFF` (every flag set), `HIRQMASK=0x0000`,
@@ -159,11 +159,11 @@ No commands yet — this phase is pure plumbing plus the two decode-bug fixes.
       and with a disc present `status=PAUSE(0x01)`, `FAD=150`, `options=0`, `repcnt=0`,
       `ctrladdr=0x41`, `track=1`, `index=1`; with no disc `status=NODISC(0x07)` and
       `FAD=0xFFFFFFFF`, `options/repcnt/ctrladdr/track/index = 0xFF`.
-- [ ] `const` block for the 14 HIRQ bits (§1.3), named as in the reference:
+- [x] `const` block for the 14 HIRQ bits (§1.3), named as in the reference:
       `CMOK 0x0001`, `DRDY 0x0002`, `CSCT 0x0004`, `BFUL 0x0008`, `PEND 0x0010`, `DCHG 0x0020`,
       `ESEL 0x0040`, `EHST 0x0080`, `ECPY 0x0100`, `EFLS 0x0200`, `SCDQ 0x0400`, `MPED 0x0800`,
       `MPCM 0x1000`, `MPST 0x2000`. Bits 14-15 undefined.
-- [ ] `const` block for the 12 status values (§3.1): `BUSY 0x00`, `PAUSE 0x01`, `STANDBY 0x02`,
+- [x] `const` block for the 12 status values (§3.1): `BUSY 0x00`, `PAUSE 0x01`, `STANDBY 0x02`,
       `PLAY 0x03`, `SEEK 0x04`, `SCAN 0x05`, `OPEN 0x06`, `NODISC 0x07`, `RETRY 0x08`,
       `ERROR 0x09`, `FATAL 0x0A`, plus flags `PERI 0x20`, `TRNS 0x40`, `WAIT 0x80` and the
       pseudo-value `REJECT 0xFF`.
@@ -175,63 +175,63 @@ established pattern is `scu_dsp`: an `Arc<Mutex<T>>` field on `SaturnSystem` (`l
 constructed in `new()` (`lib.rs:102`), cloned into the Core 0 closure (`lib.rs:139`) and assigned
 through a public `Option` field after construction (`lib.rs:151`).
 
-- [ ] `SaturnSystem.cs2: Arc<Mutex<Cs2>>`, constructed in `SaturnSystem::new` (`lib.rs:89-104`).
-- [ ] `Sh2.cs2: Option<Arc<Mutex<Cs2>>>`, defaulted to `None` in `Sh2::new` (`sh2.rs:260-...`)
+- [x] `SaturnSystem.cs2: Arc<Mutex<Cs2>>`, constructed in `SaturnSystem::new` (`lib.rs:89-104`).
+- [x] `Sh2.cs2: Option<Arc<Mutex<Cs2>>>`, defaulted to `None` in `Sh2::new` (`sh2.rs:260-...`)
       so every existing unit test still builds unchanged.
-- [ ] Assign `cpu.cs2 = Some(cs2_c0)` in the Core 0 closure (`lib.rs:140-153`). Core 1 (slave)
+- [x] Assign `cpu.cs2 = Some(cs2_c0)` in the Core 0 closure (`lib.rs:140-153`). Core 1 (slave)
       also has a CS2 window on real hardware — wire it too, but note the A-bus interrupt goes to
       the master only (§4.2 of `hardware-reference/scu.md`: `SendInterrupt` targets `MSH2`).
-- [ ] `SaturnSystem::load_disc(&mut self, path: &str) -> Result<(), String>` that constructs the
+- [x] `SaturnSystem::load_disc(&mut self, path: &str) -> Result<(), String>` that constructs the
       `Cdrom` and installs it into `Cs2`. Mirrors `load_bios` (`lib.rs:109-111`). Safe to call
       before *or* after `start()` — after `start()` it must also set `isdiskchanged` so the 3 Hz
       poll (§3.2) picks it up in Phase 3.
-- [ ] Rewrite `saturn-frontend-native/src/main.rs:148-161` to call `system.load_disc(chd)` before
+- [x] Rewrite `saturn-frontend-native/src/main.rs:148-161` to call `system.load_disc(chd)` before
       `system.start()` instead of doing its own one-shot `Cdrom::open_chd` + `read_sector(150,…)`
       demo. **Note that demo is also wrong on its own terms**: it passes `150` as an LBA, but
       `LBA + 150 = FAD` (§9) — FAD 150 *is* LBA 0. The IP.BIN sector it means to read is LBA 0.
 
 ### 1.3 Real CS2 address decode in `sh2.rs`
 
-- [ ] Change `MemRegion::Cs2Regs(usize)`'s payload to the §1.1 mask: `sh2.rs:356-357` currently
+- [x] Change `MemRegion::Cs2Regs(usize)`'s payload to the §1.1 mask: `sh2.rs:356-357` currently
       computes `a - 0x0580_0000`, which is correct as an offset; the bug is downstream
       (`& 0xFFF`). Decode the offset against the §1.2 table instead of indexing an array.
-- [ ] Add a `Cs2Port` enum resolving an offset to one of: `DataFifo` (`0x18000`),
+- [x] Add a `Cs2Port` enum resolving an offset to one of: `DataFifo` (`0x18000`),
       `Hirq` (`0x90008`/`0x9000A`), `HirqMask` (`0x9000C`/`0x9000E`), `Cr1` (`0x90018`/`0x9001A`),
       `Cr2` (`0x9001C`/`0x9001E`), `Cr3` (`0x90020`/`0x90022`), `Cr4` (`0x90024`/`0x90026`),
       `MpegRgb` (`0x90028`/`0x9002A`), `InfoPort` (`0x98000`), `Undocumented`.
       Both aliases of each 16-bit register are the *same* register with the *same* side effects
       (§1.2, and §1.5's note that reading either CR4 alias clears `_command`).
-- [ ] Enforce the §10 [QUIRK 2] width asymmetry:
+- [x] Enforce the §10 [QUIRK 2] width asymmetry:
       - `DataFifo`: 32-bit read and 32-bit write only.
       - `InfoPort`: 16-bit read only (no write path, no 32-bit path).
       - `Hirq`/`HirqMask`/`Cr1`-`Cr4`/`MpegRgb`: 16-bit R/W; 32-bit **read** returns the 16-bit
         value duplicated into both halves, `(v << 16) | v` (§1.2 last paragraph); 32-bit write is
         *not* decoded (falls to `Undocumented`).
       - `Undocumented`: reads return 0, writes are dropped. (Log once, as Yabause does.)
-- [ ] Byte access: `raw_read_byte`'s `MemRegion::Cs2Regs` arm (`sh2.rs:469-472`) returns a
+- [x] Byte access: `raw_read_byte`'s `MemRegion::Cs2Regs` arm (`sh2.rs:469-472`) returns a
       constant `0xFF`; `raw_write_byte`'s arm (`sh2.rs:562-571`) drops the write. §1.1, §10
       [QUIRK 1]. Add a comment saying this models the empty-cartridge A-bus open-bus value and
       that a Netlink/JapModem cart would instead route these to a UART.
-- [ ] Delete `Sh2::execute_cdrom_command` (`sh2.rs:1641-1671`) and its `off == 6 || off == 7`
+- [x] Delete `Sh2::execute_cdrom_command` (`sh2.rs:1641-1671`) and its `off == 6 || off == 7`
       trigger (`sh2.rs:568-570`).
-- [ ] Delete `Sh2::cdrom_command_executed` (`sh2.rs:86`, `:279`) and the three
+- [x] Delete `Sh2::cdrom_command_executed` (`sh2.rs:86`, `:279`) and the three
       `address == 0x0600_1000` hacks (`sh2.rs:604-606`, `:631-633`, `:666-668`).
-- [ ] Delete `Cdrom::send_command` (`cdrom.rs:112-130`) and the unread `Cdrom::dma_triggered`
+- [x] Delete `Cdrom::send_command` (`cdrom.rs:112-130`) and the unread `Cdrom::dma_triggered`
       field (`cdrom.rs:9`, set at `:58`, read by nothing).
-- [ ] Remove `WorkRam::cs2_regs` (`shared_buffers.rs:51`, `:81`) once nothing reads it — `Cs2`
+- [x] Remove `WorkRam::cs2_regs` (`shared_buffers.rs:51`, `:81`) once nothing reads it — `Cs2`
       owns its own registers behind its own `Mutex`, and a byte array can't express any of the
       side effects. Its doc comment (`shared_buffers.rs:48-50`) goes with it.
-- [ ] Re-add `log_reg_access_once`-equivalent logging at the new interception point (see §0.5).
+- [x] Re-add `log_reg_access_once`-equivalent logging at the new interception point (see §0.5).
 
 ### 1.4 Interception hooks (see architectural call-out E)
 
-- [ ] `sh2.rs` has a long interception hook (`read_long`'s `MemRegion::ScuRegs` arm at
+- [x] `sh2.rs` has a long interception hook (`read_long`'s `MemRegion::ScuRegs` arm at
       `sh2.rs:645-649`, `write_long`'s at `:670-698`, feeding `read_scu_dsp_port`/
       `write_scu_dsp_port` at `:718-744`) but **no word-level hook at all** — `read_word`
       (`sh2.rs:613-622`) and `write_word` (`:625-636`) go straight to per-byte decomposition.
       Add `read_cs2_word`/`write_cs2_word` hooks in the same shape, called before decomposition.
-- [ ] Add `read_cs2_long`/`write_cs2_long` alongside the existing SCU-DSP long hooks.
-- [ ] All four take `&mut self` (or `&self` plus the `Mutex`) because reads mutate state:
+- [x] Add `read_cs2_long`/`write_cs2_long` alongside the existing SCU-DSP long hooks.
+- [x] All four take `&mut self` (or `&self` plus the `Mutex`) because reads mutate state:
       reading CR4 clears `command_pending` (§1.5), reading the info port advances
       `transfercount` (§1.7), reading the data FIFO advances `datatransoffset` (§1.6).
 
@@ -240,14 +240,14 @@ through a public `Option` field after construction (`lib.rs:151`).
 `cdrom.rs`'s "mock mode" contradicts CLAUDE.md's honesty rule ("keep behavior honest … rather
 than faking output") and will actively lie to the state machine built in Phase 3.
 
-- [ ] Delete the `path.contains("bad_chd")` early-error (`cdrom.rs:15-17`), the
+- [x] Delete the `path.contains("bad_chd")` early-error (`cdrom.rs:15-17`), the
       `path.contains("dummy")` flag (`cdrom.rs:19`), the `path == "dummy.chd" || !exists ||
       len < 124` mock branch (`cdrom.rs:23-39`), and the fabricated `SEGADISCSYSTEMKR` /
       `SEGADISCSYSTEM` sector contents (`cdrom.rs:64-78`). A missing/short/corrupt file must be a
       plain `Err`.
-- [ ] Model "no disc" as `Cs2.disc == None` reporting backend status `2` (§6.2) — the honest
+- [x] Model "no disc" as `Cs2.disc == None` reporting backend status `2` (§6.2) — the honest
       equivalent of Yabause's `DummyCD`, which likewise can never contain a disc.
-- [ ] Replace the sector-size sniff (`cdrom.rs:83-91`) and the flat
+- [x] Replace the sector-size sniff (`cdrom.rs:83-91`) and the flat
       `hunk = lba / sectors_per_hunk` map (`cdrom.rs:93-95`) with a real track map read from the
       CHD's `CDROM_TRACK_METADATA2` entries, per §6.4:
       - map the MAME track-type strings to `ctl_addr`/`sector_size` using §6.4's table
@@ -261,18 +261,18 @@ than faking output") and will actively lie to the state machine built in Phase 3
       - **CHD frames are always 2448 bytes** (2352 + 96 subcode, §6.4 last line) regardless of
         the track's logical `sector_size` — so `hunkid = (chdlba * 2448) / hunkbytes`,
         `hunk_offset = (chdlba * 2448) % hunkbytes` (§6.5).
-- [ ] Change the signature to `read_sector_fad(&mut self, fad: u32, buffer: &mut [u8; 2448])`.
+- [x] Change the signature to `read_sector_fad(&mut self, fad: u32, buffer: &mut [u8; 2448])`.
       §6.5: the destination must be 2448 bytes because §4.1's `workblock.data` is 2448 and the
       subcode tail is read from `data[2352..]` by `Cs2GetSubcodeQRW` (§5.1). Today the function
       copies `buffer.len()` bytes from the frame start, so a caller asking for 2048 gets the sync
       header and header bytes, not user data — stripping is the CD block's job (§4.5), not the
       backend's.
-- [ ] Byte-swap audio-track sectors pairwise (§6.5 last paragraph, `ctl_addr == 0x01`), and
+- [x] Byte-swap audio-track sectors pairwise (§6.5 last paragraph, `ctl_addr == 0x01`), and
       prepend the 12-byte sync header `00 FF FF FF FF FF FF FF FF FF FF 00` (§9) for 2048-byte
       tracks. **Deliberately deviate from §10 [QUIRK 55]**: also synthesize bytes
       `0x0C..0x0F` (MIN/SEC/FRAME and the mode byte) instead of leaving them zero, so a genuine
       MODE2/2048 track isn't misclassified as mode 1. Record this in §"Deliberate deviations".
-- [ ] Do **not** reproduce §10 [BUG 54] (`j < track_num - 1`, which makes the last track of a CHD
+- [x] Do **not** reproduce §10 [BUG 54] (`j < track_num - 1`, which makes the last track of a CHD
       unreadable and a single-track CHD entirely unreadable) or [BUG 52]/[BUG 53] (stale
       `currentTrack`, unconditional success return). A FAD outside every track must return `Err`.
 
@@ -282,36 +282,36 @@ Conventions: `saturn-core` unit tests live in `sh2.rs`'s / the new `cs2.rs`'s `#
 tests`; cross-crate tests live in `e2e-tests/src/lib.rs`. `cargo test --workspace` must stay
 fast, deterministic and offline.
 
-- [ ] `cs2_reset_registers_spell_cdblock`: fresh `Cs2`, assert `CR1==0x0043 CR2==0x4442
+- [x] `cs2_reset_registers_spell_cdblock`: fresh `Cs2`, assert `CR1==0x0043 CR2==0x4442
       CR3==0x4C4F CR4==0x434B`. Independently derivable from ASCII: `0x43='C'`, `0x44='D'`,
       `0x42='B'`, `0x4C='L'`, `0x4F='O'`, `0x4B='K'` — §1.5.
-- [ ] `cs2_reset_hirq_is_all_flags_set`: `HIRQ == 0xFFFF`, `HIRQMASK == 0x0000` (§1.3, §1.4).
-- [ ] `cs2_byte_access_returns_ff_and_drops_writes`: `cpu.read_byte(0x2589_0018) == 0xFF`;
+- [x] `cs2_reset_hirq_is_all_flags_set`: `HIRQ == 0xFFFF`, `HIRQMASK == 0x0000` (§1.3, §1.4).
+- [x] `cs2_byte_access_returns_ff_and_drops_writes`: `cpu.read_byte(0x2589_0018) == 0xFF`;
       `cpu.write_byte(0x2589_0018, 0x00)` then `cpu.read_word(0x2589_0018) == 0x0043` (unchanged)
       — §1.1, §10 [QUIRK 1].
-- [ ] `cs2_register_aliases_are_the_same_register`: write `0x1234` to `0x2589_0018`, read
+- [x] `cs2_register_aliases_are_the_same_register`: write `0x1234` to `0x2589_0018`, read
       `0x2589_001A`, expect `0x1234`; and vice-versa for all four CR pairs plus HIRQ/HIRQMASK/
       MPEGRGB (§1.2).
-- [ ] `cs2_long_read_duplicates_the_word`: `read_long(0x2589_0018) == 0x0043_0043` (§1.2).
-- [ ] `cs2_window_does_not_mirror_every_4kb`: `read_word(0x2589_1018)` must **not** return CR1;
+- [x] `cs2_long_read_duplicates_the_word`: `read_long(0x2589_0018) == 0x0043_0043` (§1.2).
+- [x] `cs2_window_does_not_mirror_every_4kb`: `read_word(0x2589_1018)` must **not** return CR1;
       it is an undocumented offset returning 0. This is the direct regression test for the
       `& 0xFFF` bug (§0.4).
-- [ ] `cs2_data_fifo_is_32bit_only` / `cs2_info_port_is_16bit_read_only`: word access to
+- [x] `cs2_data_fifo_is_32bit_only` / `cs2_info_port_is_16bit_read_only`: word access to
       `0x2581_8000` and long access to `0x2589_8000` return 0 without side effects
       (§10 [QUIRK 2]).
-- [ ] **Delete and replace**: `sh2.rs:2362-2376` `test_cdrom_handshake` asserts CR1 at
+- [x] **Delete and replace**: `sh2.rs:2362-2376` `test_cdrom_handshake` asserts CR1 at
       `0x05800000` and HIRQ at `0x05800008` — offsets that are `Undocumented` on real hardware
       (§1.2). It is a self-consistent-but-wrong test, exactly what CLAUDE.md warns about.
-- [ ] **Update**: `sh2.rs:2281-2303` `peripheral_regions_are_real_readwrite_memory` probes
+- [x] **Update**: `sh2.rs:2281-2303` `peripheral_regions_are_real_readwrite_memory` probes
       `(0x0580_0000, "CS2/CD-ROM regs")` at `sh2.rs:2288` and asserts long round-trip. CS2 is
       *not* read/write memory; drop that row from the probe list and cover CS2 with the
       port-specific tests above.
-- [ ] **Delete**: `e2e-tests/src/lib.rs:292-299` (`…_cdrom_send_command`), `:310-317`
+- [x] **Delete**: `e2e-tests/src/lib.rs:292-299` (`…_cdrom_send_command`), `:310-317`
       (`…_cdrom_chd_header`), `:626-632` (`…_cdrom_invalid_command`) — all three assert the
       `send_command` toy; and `:777-787`
       (`test_tier3_combination_f3_f5_sh2_cdrom_command_execution`), which writes to High Work RAM
       `0x06001000` and calls it a CD-ROM command.
-- [ ] **Rewrite**: `e2e-tests/src/lib.rs:275-281`, `:283-290`, `:301-308`, `:618-624`, `:634-641`
+- [x] **Rewrite**: `e2e-tests/src/lib.rs:275-281`, `:283-290`, `:301-308`, `:618-624`, `:634-641`
       and the zero-buffer test — all depend on `open_chd`'s deleted mock mode (an empty temp file
       currently "opens successfully"). Re-point them at the real fixture from §"Test fixtures".
 
@@ -327,68 +327,68 @@ commands a booting BIOS asks before it ever wants sector data.
 
 ### 2.1 The handshake (§2)
 
-- [ ] Write `CR1` → `status &= ~PERI` (clear `0x20`) **and** `command_pending = true`
+- [x] Write `CR1` → `status &= ~PERI` (clear `0x20`) **and** `command_pending = true`
       (§1.5, `cs2.c:313-314`). This suppresses the periodic report so it can't clobber a
       response mid-read.
-- [ ] Write `CR2`, `CR3` → store verbatim, no side effects.
-- [ ] Write `CR4` → `set_command_timing(cr1 >> 8)`: `250 µs` for opcode `0x02`, `50 µs` for
+- [x] Write `CR2`, `CR3` → store verbatim, no side effects.
+- [x] Write `CR4` → `set_command_timing(cr1 >> 8)`: `250 µs` for opcode `0x02`, `50 µs` for
       everything else (§2 step 3, §7).
-- [ ] Read `CR4` (either alias, 16-bit or 32-bit) → `command_pending = false` (§1.5,
+- [x] Read `CR4` (either alias, 16-bit or 32-bit) → `command_pending = false` (§1.5,
       `cs2.c:194, 372`). Note §2's warning: nothing prevents the periodic report from clobbering
       a response if software reads CR4 *before* CR1-CR3. Reproduce that ordering faithfully.
-- [ ] `Cs2::exec(elapsed_us)` — the `Cs2Exec` equivalent (§7): while `command_execlock_us > 0`,
+- [x] `Cs2::exec(elapsed_us)` — the `Cs2Exec` equivalent (§7): while `command_execlock_us > 0`,
       **do not** decrement `command_timing_us` (§2's last bullet). When `command_timing_us`
       expires, dispatch on `cr1 >> 8` — re-reading CR1 *at execution time*, not latching it at
       the CR4 write (§2's first bullet; a CR1 written between CR4 and expiry changes the opcode).
-- [ ] `set_irq(bits)`: `hirq |= bits`; if `hirq & hirqmask != 0`, raise the A-bus interrupt
+- [x] `set_irq(bits)`: `hirq |= bits`; if `hirq & hirqmask != 0`, raise the A-bus interrupt
       (call-out D). §1.3.
-- [ ] HIRQ **write** is an AND-mask: `hirq &= val`. Writing `0xFFFF` is a no-op, `0x0000` clears
+- [x] HIRQ **write** is an AND-mask: `hirq &= val`. Writing `0xFFFF` is a no-op, `0x0000` clears
       all. After the AND, if `hirq & hirqmask` is still non-zero, **re-assert** the interrupt —
       the line is level-like (§1.3).
-- [ ] HIRQ **read** returns `hirq` verbatim. Do **not** derive `BFUL`/`DCHG`/`CSCT` from the
+- [x] HIRQ **read** returns `hirq` verbatim. Do **not** derive `BFUL`/`DCHG`/`CSCT` from the
       internal `isbufferfull`/`isdiskchanged`/`isonesectorstored` booleans at read time —
       §10 [DEAD 3] documents that as commented-out dead code; those flags only surface when a
       command sets them explicitly.
-- [ ] `CMOK` is never auto-cleared (§10 [QUIRK 4], `cs2.c:1185` commented out). Software must
+- [x] `CMOK` is never auto-cleared (§10 [QUIRK 4], `cs2.c:1185` commented out). Software must
       clear it itself before polling for an edge. **Do not "improve" this** without evidence —
       real BIOS code was written against this behavior; if a boot trace shows the BIOS waiting
       for a `0→1` edge it never gets, revisit and record the finding.
-- [ ] Deferred second interrupts (§2, last bullet): `command_execlock_us` + `delay_irq`, fired by
+- [x] Deferred second interrupts (§2, last bullet): `command_execlock_us` + `delay_irq`, fired by
       `exec` when the lock counts down. Used by `0x48` ResetSelector (450 µs → `ESEL`),
       `0x52` CalculateActualSize (30 µs × count → `ESEL`), `0x62` DeleteSectorData
       (30 µs × count → `EHST`). Implement the mechanism now; the three users land in Phase 4.
-- [ ] Unimplemented opcodes hit `default:` and **never complete** — no CR update, no `CMOK`, no
+- [x] Unimplemented opcodes hit `default:` and **never complete** — no CR update, no `CMOK`, no
       interrupt (§10 [QUIRK 6]). Log the opcode once and hang, matching the reference. A silent
       fake `CMOK` here would mask exactly the diagnostic signal needed later.
 
 ### 2.2 `doCDReport` (§2.1)
 
-- [ ] `CR1 = (status << 8) | ((options & 0xF) << 4) | (repcnt & 0xF)`
-- [ ] `CR2 = (ctrladdr << 8) | track`
-- [ ] `CR3 = (index << 8) | ((fad >> 16) & 0xFF)`
-- [ ] `CR4 = fad & 0xFFFF`
-- [ ] Note §2.1: `REJECT (0xFF)` is passed *to* `do_cd_report`, not assigned to `self.status` —
+- [x] `CR1 = (status << 8) | ((options & 0xF) << 4) | (repcnt & 0xF)`
+- [x] `CR2 = (ctrladdr << 8) | track`
+- [x] `CR3 = (index << 8) | ((fad >> 16) & 0xFF)`
+- [x] `CR4 = fad & 0xFFFF`
+- [x] Note §2.1: `REJECT (0xFF)` is passed *to* `do_cd_report`, not assigned to `self.status` —
       internal state is unchanged and only the reported CR1 shows the rejection.
 
 ### 2.3 TOC construction (§6.3) — needed before `0x02` Get TOC can answer
 
-- [ ] 102 × `u32`, pre-filled `0xFFFFFFFF`.
-- [ ] `TOC[0..=98]` = tracks 1-99: bits 0-23 = track start FAD, bits 24-27 = ADR, bits 28-31 =
+- [x] 102 × `u32`, pre-filled `0xFFFFFFFF`.
+- [x] `TOC[0..=98]` = tracks 1-99: bits 0-23 = track start FAD, bits 24-27 = ADR, bits 28-31 =
       CTL. Built from the CHD track map as `(ctl_addr << 24) | fad_start` (§6.3's `BuildTOC`).
-- [ ] `TOC[99]` = point A0 = `(TOC[0] & 0xFF000000) | 0x010000` (first track = 1).
-- [ ] `TOC[100]` = point A1 = `(TOC[last] & 0xFF000000) | (track_num << 16)`.
-- [ ] `TOC[101]` = point A2 = `(TOC[last] & 0xFF000000) | session_fad_end` (lead-out FAD).
-- [ ] Session 0 only (§6.3; §10 [QUIRK 57] — multi-session support is nominal even in the
+- [x] `TOC[99]` = point A0 = `(TOC[0] & 0xFF000000) | 0x010000` (first track = 1).
+- [x] `TOC[100]` = point A1 = `(TOC[last] & 0xFF000000) | (track_num << 16)`.
+- [x] `TOC[101]` = point A2 = `(TOC[last] & 0xFF000000) | session_fad_end` (lead-out FAD).
+- [x] Session 0 only (§6.3; §10 [QUIRK 57] — multi-session support is nominal even in the
       reference).
 
 ### 2.4 Info transfer port, mode 0 (§1.7)
 
-- [ ] `infotranstype == 0`: return `TOC[transfercount >> 2]`, high word when
+- [x] `infotranstype == 0`: return `TOC[transfercount >> 2]`, high word when
       `transfercount % 4 == 0`, low word otherwise. `transfercount += 2` and `cdwnum += 2` per
       read.
-- [ ] Terminate (reset `transfercount = 0`, `infotranstype = -1`) at the declared length
+- [x] Terminate (reset `transfercount = 0`, `infotranstype = -1`) at the declared length
       `0xCC` words = 204 words = 408 bytes.
-- [ ] **Deliberately deviate from §10 [BUG 19]**: the reference's terminator uses `>` where `>=`
+- [x] **Deliberately deviate from §10 [BUG 19]**: the reference's terminator uses `>` where `>=`
       is required, making exactly one word past the declared length readable — and in this case
       that read is `TOC[102]`, out of bounds on a 102-entry array. Use `>=`. Record in
       §"Deliberate deviations". If a real BIOS trace later shows it depends on the extra word,
@@ -408,7 +408,7 @@ commands a booting BIOS asks before it ever wants sector data.
 | `0xE0` | Authenticate Device | §5.7 `:3153` | `CR2 & 0xFF == 1` → MPEG path (`MPED`, `mpgauth = 2`); else disc path (`isonesectorstored = 1`, `satauth = 4`). Then `status = PAUSE` and `report(status)` | `CMOK\|EFLS\|CSCT` (disc) / `CMOK\|MPED` (MPEG) |
 | `0xE1` | Is Device Authenticated | §5.7 `:3204` | `CR1 = status<<8`; `CR2 = CR2!=0 ? mpgauth : satauth`; `CR3 = CR4 = 0` | `CMOK` |
 
-- [ ] `0x04` Initialize CD System init-flag decode from `CR1 & 0xFF` (§5.1's sub-table):
+- [x] `0x04` Initialize CD System init-flag decode from `CR1 & 0xFF` (§5.1's sub-table):
       bit 0 `0x01` = full software reset (clear `playFAD`/`playendFAD`/`playtype`/`maxrepeat`,
       `satauth`/`mpgauth`, all 24 filters, all 24 partitions, all 200 blocks,
       `blockfreespace = 200`, `curdir*`, `fileinfo[]`, `numfiles`, `lastbuffer = 0xFF`; **does
@@ -417,51 +417,51 @@ commands a booting BIOS asks before it ever wants sector data.
       bit 2 `0x04` = "Don't confirm Mode 2 subheader" (no-op);
       bit 3 `0x08` = "Retry reading Form 2 sectors" (no-op);
       bit 4 `0x10` = `speed1x = 1`, else `speed1x = 0`.
-- [ ] **Reproduce §10 [BUG 5] deliberately?** `0x00` Get Status sets `CMOK` with a bare
+- [x] **Reproduce §10 [BUG 5] deliberately?** `0x00` Get Status sets `CMOK` with a bare
       `HIRQ |= CMOK` rather than through `Cs2SetIRQ`, so it uniquely raises **no** SCU
       interrupt. Implement it the correct way (via `set_irq`) and note the divergence — a
       status poll that never interrupts is far more likely to be a Yabause bug than hardware
       behavior, and Get Status is the command the BIOS is most likely to poll on. Flag in
       `.development/current_bugs.md` so it can be flipped back if boot regresses.
-- [ ] **Reproduce §10 [QUIRK 30] as-is**: `0x01` returns hardcoded `CR2 = 0x0201` ("mpeg card
+- [x] **Reproduce §10 [QUIRK 30] as-is**: `0x01` returns hardcoded `CR2 = 0x0201` ("mpeg card
       exists") and `CR4 = 0x0400`. Keep the constants; add the comment that the emulated machine
       therefore always claims an MPEG card is fitted.
-- [ ] **Reproduce §10 [QUIRK 32] as-is**: `0xE0` always succeeds. Note that `status = BUSY` and
+- [x] **Reproduce §10 [QUIRK 32] as-is**: `0xE0` always succeeds. Note that `status = BUSY` and
       the `0xFF`/`0xFFFF` register stuffing are never externally observable because
       `report(status)` overwrites them before returning.
 
 ### 2.6 Core 7 gets real work (see architectural call-out B)
 
-- [ ] Replace `lib.rs:347-360`'s bare `yield_now()` loop with the Core 6 pattern
+- [x] Replace `lib.rs:347-360`'s bare `yield_now()` loop with the Core 6 pattern
       (`lib.rs:320-341`): `sync.set_thread_active(7, false)` at entry, then
       `park_while_inactive(7)` (`sync.rs:147-156`).
-- [ ] The CR4 write on Core 0 calls `sync.set_thread_active(7, true)` — exactly the SCU DSP `EX`
+- [x] The CR4 write on Core 0 calls `sync.set_thread_active(7, true)` — exactly the SCU DSP `EX`
       precedent at `sh2.rs:732-736`. Core 7 wakes, calls `Cs2::exec`, and re-parks once
       `command_timing_us` has expired, the command has run, and nothing else is pending.
-- [ ] Phase 2 can park unconditionally between commands. Phase 3 cannot — see call-out B for the
+- [x] Phase 2 can park unconditionally between commands. Phase 3 cannot — see call-out B for the
       `park_until(deadline)` addition that the 3 Hz backend poll and 60 Hz periodic report force.
 
 ### 2.7 Tests for Phase 2
 
-- [ ] `cs2_cr4_write_arms_command_cr1_write_sets_pending`: assert `command_pending` after the
+- [x] `cs2_cr4_write_arms_command_cr1_write_sets_pending`: assert `command_pending` after the
       CR1 write and `command_timing_us == 50` after the CR4 write (250 for opcode `0x02`) — §7.
-- [ ] `cs2_cr4_read_clears_command_pending` (both aliases, both widths) — §1.5.
-- [ ] `cs2_hirq_write_is_and_mask`: set `HIRQ = 0xFFFF`, write `0xFFFE`, read `0xFFFE`; write
+- [x] `cs2_cr4_read_clears_command_pending` (both aliases, both widths) — §1.5.
+- [x] `cs2_hirq_write_is_and_mask`: set `HIRQ = 0xFFFF`, write `0xFFFE`, read `0xFFFE`; write
       `0xFFFF`, still `0xFFFE` — §1.3.
-- [ ] `cs2_hirq_reasserts_irq_on_write_leaving_unmasked_bit`: with `HIRQMASK = CMOK`, a HIRQ
+- [x] `cs2_hirq_reasserts_irq_on_write_leaving_unmasked_bit`: with `HIRQMASK = CMOK`, a HIRQ
       write that leaves `CMOK` set must re-raise the A-bus IRQ flag — the "level-like" property
       of §1.3.
-- [ ] `cs2_get_status_reports_no_disc_state`: no disc installed → `CR1 == 0x07FF`
+- [x] `cs2_get_status_reports_no_disc_state`: no disc installed → `CR1 == 0x07FF`
       (`status=NODISC(0x07)<<8 | (options=0xF)<<4 | (repcnt=0xF)`, from §3.2's reset table where
       `options`/`repcnt` are `0xFF` and §2.1's 4-bit masks), `CR2 == 0xFFFF`
       (`ctrladdr=0xFF, track=0xFF`), `CR3 == 0xFFFF` (`index=0xFF`, `FAD>>16 = 0xFF`),
       `CR4 == 0xFFFF` (`FAD & 0xFFFF` of `0xFFFFFFFF`). Derive each field by hand from §2.1 +
       §3.2 before writing the assertion.
-- [ ] `cs2_get_status_reports_pause_with_disc`: disc fixture installed → `CR1 == 0x0100`
+- [x] `cs2_get_status_reports_pause_with_disc`: disc fixture installed → `CR1 == 0x0100`
       (`PAUSE(0x01)<<8 | options 0 | repcnt 0`), `CR2 == 0x4101` (`ctrladdr 0x41`, `track 1`),
       `CR3 == 0x0100` (`index 1`, `FAD>>16 == 0`), `CR4 == 0x0096` (FAD 150 = `0x96`).
-- [ ] `cs2_get_hardware_info_constants`: `CR2 == 0x0201`, `CR4 == 0x0400` — §5.1.
-- [ ] **`cs2_get_toc_against_a_hand_built_fixture`** — the headline test of this phase.
+- [x] `cs2_get_hardware_info_constants`: `CR2 == 0x0201`, `CR4 == 0x0400` — §5.1.
+- [x] **`cs2_get_toc_against_a_hand_built_fixture`** — the headline test of this phase.
       Against the single-data-track fixture (see §"Test fixtures"): issue `0x02`, assert
       `CR2 == 0xCC` and `HIRQ & (CMOK|DRDY) != 0`, then read `0x2589_8000` repeatedly:
       | Read # | `transfercount` before | Expected | Derivation |
@@ -477,9 +477,9 @@ commands a booting BIOS asks before it ever wants sector data.
       | 204 | 408 | — | terminator: `infotranstype` back to −1, `transfercount` back to 0 |
       Compute the whole 102-entry array in a throwaway Python script from §6.3's formulas and
       paste the derived values — do not read them out of the emulator.
-- [ ] `cs2_unimplemented_opcode_never_completes`: issue `0x07`, run `exec` well past the timing
+- [x] `cs2_unimplemented_opcode_never_completes`: issue `0x07`, run `exec` well past the timing
       window, assert CR1-CR4 unchanged and `CMOK` not newly set — §10 [QUIRK 6].
-- [ ] `cs2_core7_parks_between_commands`: with the system started and no disc activity, Core 7's
+- [x] `cs2_core7_parks_between_commands`: with the system started and no disc activity, Core 7's
       `LockStepSync` active flag is false. Mirrors the existing Core 6 parking coverage.
 
 **Exit criterion**: a real-BIOS boot run shows the BIOS issuing at least one CD command,
@@ -494,7 +494,7 @@ receiving `CMOK`, and reading back a response — and Core 0's PC advances past 
 
 ### 3.1 The status byte (§3.1)
 
-- [ ] Implement every transition in §3.1's table. Reachable states and their writers:
+- [x] Implement every transition in §3.1's table. Reachable states and their writers:
       `PAUSE(0x01)` — reset-with-disc, backend poll on insert, `0x02` GetToc, `0x03`
       GetSessionInfo, `0x04` InitializeCDSystem, `0x11` SeekDisc (pause/FAD/index forms), end of
       play, `0x75` AbortFile, end of `0xE0` AuthenticateDevice;
@@ -505,22 +505,22 @@ receiving `CMOK`, and reading back a response — and Core 0's PC advances past 
       `OPEN(0x06)` — reset with tray open, backend poll, `0x05` OpenTray;
       `NODISC(0x07)` — reset with no disc, backend poll;
       `ERROR(0x09)` — `0x65`/`0x66` on a bad partition index.
-- [ ] Never set: `BUSY(0x00)` outside `0xE0`'s internals, `RETRY(0x08)`, `FATAL(0x0A)`,
+- [x] Never set: `BUSY(0x00)` outside `0xE0`'s internals, `RETRY(0x08)`, `FATAL(0x0A)`,
       `TRNS(0x40)`, `WAIT(0x80)`. Define the constants; leave them unreachable and say so.
-- [ ] `PERI(0x20)` is OR-ed in by the periodic report and cleared by a CR1 write (§1.5, §3.3).
+- [x] `PERI(0x20)` is OR-ed in by the periodic report and cleared by a CR1 write (§1.5, §3.3).
 
 ### 3.2 Backend status poll — 3 Hz (§3.2)
 
-- [ ] `status_cycles += elapsed_us * 3`; fire when `>= 1_000_000`. Units are 1/3 µs, so the real
+- [x] `status_cycles += elapsed_us * 3`; fire when `>= 1_000_000`. Units are 1/3 µs, so the real
       period is 333 333 µs ≈ 3 Hz (§7).
-- [ ] Backend code 0 or 1 (disc present) → if state is `NODISC` or `OPEN`, go `PAUSE` and set
+- [x] Backend code 0 or 1 (disc present) → if state is `NODISC` or `OPEN`, go `PAUSE` and set
       `isdiskchanged = 1`. Code 2 → `NODISC`. Code 3 → `OPEN`.
-- [ ] `isdiskchanged` is set by disc-change/reset/poll and cleared **only** by `0x01`
+- [x] `isdiskchanged` is set by disc-change/reset/poll and cleared **only** by `0x01`
       GetHardwareInfo when the drive is neither `OPEN` nor `NODISC`; it is consumed **only** by
       `0x04` InitializeCDSystem to decide whether to raise `DCHG` (§3.2).
-- [ ] Reset field table (§3.2) — the exact `status`/`FAD`/`options`/`repcnt`/`ctrladdr`/`track`/
+- [x] Reset field table (§3.2) — the exact `status`/`FAD`/`options`/`repcnt`/`ctrladdr`/`track`/
       `index` values per backend code, already listed in §1.1's checklist.
-- [ ] `SaturnSystem::load_disc` / an eventual `open_tray`/`close_tray` frontend hook is the
+- [x] `SaturnSystem::load_disc` / an eventual `open_tray`/`close_tray` frontend hook is the
       `Cs2ForceOpenTray`/`Cs2ForceCloseTray` equivalent (§3.4) — front-end only, not reachable
       from the guest. Note §10 [QUIRK 23]: the `0x05` OpenTray *command* only assigns
       `status = OPEN` and never touches the backend, so within one 333 ms poll period the poll
@@ -528,33 +528,33 @@ receiving `CMOK`, and reading back a response — and Core 0's PC advances past 
 
 ### 3.3 Periodic engine (§3.3)
 
-- [ ] `periodic_cycles += elapsed_us * 3`; fire when `>= periodic_timing`. `set_timing(playing)`
+- [x] `periodic_cycles += elapsed_us * 3`; fire when `>= periodic_timing`. `set_timing(playing)`
       (§3.3's table): playing and (`isaudio` or `speed1x`) → `40000` (13 333 µs, 75 sectors/s);
       playing and 2× → `20000` (6 667 µs, 150/s); not playing → `50000` (16 667 µs, 60 Hz).
-- [ ] Per tick: `PAUSE`/`SCAN`/`RETRY` do nothing; `SEEK` → if `!isbufferfull` go `PLAY` with
+- [x] Per tick: `PAUSE`/`SCAN`/`RETRY` do nothing; `SEEK` → if `!isbufferfull` go `PLAY` with
       `options = 0x8`; `PLAY` runs the sector read (Phase 4).
-- [ ] Then, **unless `command_pending`**, `status |= PERI`, `do_cd_report(status)` and raise
+- [x] Then, **unless `command_pending`**, `status |= PERI`, `do_cd_report(status)` and raise
       `SCDQ` (§3.3 last bullet). This is the "periodic response".
-- [ ] `Cs2Exec` returns early while `command_pending` is set, *before* the periodic report
+- [x] `Cs2Exec` returns early while `command_pending` is set, *before* the periodic report
       (§2's second bullet) — that early return is the entire response-protection mechanism.
-- [ ] Skip `Cs2GetTimeToNextSector` (§10 [DEAD 45], no callers anywhere).
+- [x] Skip `Cs2GetTimeToNextSector` (§10 [DEAD 45], no callers anywhere).
 
 ### 3.4 Tests for Phase 3
 
-- [ ] `cs2_poll_transitions_nodisc_to_pause_on_insert`: start with no disc, drive `exec` with
+- [x] `cs2_poll_transitions_nodisc_to_pause_on_insert`: start with no disc, drive `exec` with
       333 334 µs of elapsed time after installing the fixture, assert `status == PAUSE`,
       `isdiskchanged == true`.
-- [ ] `cs2_poll_period_is_exactly_333333us`: assert no transition at 333 332 µs and a transition
+- [x] `cs2_poll_period_is_exactly_333333us`: assert no transition at 333 332 µs and a transition
       at 333 334 µs — derived from §7's `_statustiming = 1000000` at 1/3 µs, not from observing
       the implementation.
-- [ ] `cs2_get_hardware_info_clears_isdiskchanged_only_when_ready`: with `status == OPEN`, `0x01`
+- [x] `cs2_get_hardware_info_clears_isdiskchanged_only_when_ready`: with `status == OPEN`, `0x01`
       leaves `isdiskchanged` set; with `status == PAUSE`, it clears it (§3.2).
-- [ ] `cs2_initialize_raises_dchg_only_when_disk_changed` (§5.1 `0x04`).
-- [ ] `cs2_periodic_report_sets_peri_and_scdq`: with `command_pending == false` and 16 667 µs
+- [x] `cs2_initialize_raises_dchg_only_when_disk_changed` (§5.1 `0x04`).
+- [x] `cs2_periodic_report_sets_peri_and_scdq`: with `command_pending == false` and 16 667 µs
       elapsed at idle timing, assert `CR1 >> 8 == status | 0x20` and `HIRQ & SCDQ != 0`.
-- [ ] `cs2_periodic_report_suppressed_while_command_pending`: write CR1, advance 100 ms, assert
+- [x] `cs2_periodic_report_suppressed_while_command_pending`: write CR1, advance 100 ms, assert
       CR1-CR4 untouched by the periodic report (§2 second bullet).
-- [ ] `cs2_open_tray_command_is_undone_by_backend_poll`: issue `0x05` with a disc present, assert
+- [x] `cs2_open_tray_command_is_undone_by_backend_poll`: issue `0x05` with a disc present, assert
       `status == OPEN`; advance 333 334 µs, assert `status == PAUSE` — the faithful reproduction
       of §10 [QUIRK 23].
 
@@ -566,55 +566,55 @@ receiving `CMOK`, and reading back a response — and Core 0's PC advances past 
 
 ### 4.1 Blocks (§4.1)
 
-- [ ] `Block { size: i32 /* -1 == free */, fad: u32, cn: u8, fn_: u8, sm: u8, ci: u8,
+- [x] `Block { size: i32 /* -1 == free */, fad: u32, cn: u8, fn_: u8, sm: u8, ci: u8,
       data: [u8; 2352] }`, a flat `blocks: Box<[Block; 200]>` (`MAX_BLOCKS`, §9), plus one
       oversized `workblock` whose `data` is **2448** bytes (raw sector + 96 subcode).
-- [ ] `allocate_block(sectsize) -> Option<u8>`: linear scan for `size == -1`; on success
+- [x] `allocate_block(sectsize) -> Option<u8>`: linear scan for `size == -1`; on success
       `blockfreespace -= 1` and `block.size = sectsize`. If `blockfreespace <= 0` after the
       decrement → `isbufferfull = true` and raise `BFUL`. If no free block → `isbufferfull`,
       `BFUL`, return `None`.
-- [ ] `free_block`: `size = -1`, `blockfreespace += 1`, `isbufferfull = false` unconditionally
+- [x] `free_block`: `size = -1`, `blockfreespace += 1`, `isbufferfull = false` unconditionally
       (§10 [QUIRK 46] — the transitions are exact-zero-equality driven, not threshold driven;
       reproduce, and comment why).
-- [ ] `sort_blocks(partition)`: compact the partition's block list. §10 [BUG 39] notes the
+- [x] `sort_blocks(partition)`: compact the partition's block list. §10 [BUG 39] notes the
       reference leaves the parallel `blocknum[]` untouched, which is only invisible because
       nothing in the live path reads it. In Rust, model a partition's contents as a single
       `Vec<u8>` of block indices, which makes that class of desync unrepresentable.
 
 ### 4.2 Partitions (§4.2)
 
-- [ ] 24 partitions (`MAX_SELECTORS`, §9), each `{ size: i32 /* -1 == never used */,
+- [x] 24 partitions (`MAX_SELECTORS`, §9), each `{ size: i32 /* -1 == never used */,
       blocks: Vec<u8> }`. §10 [QUIRK 45]: the reference gives every partition a 200-entry array,
       so one partition can hold every buffer in the machine; a `Vec` capped at 200 models the
       same thing without the 24 × 200 pointer table.
-- [ ] Reset state: `size = -1`, empty block list.
-- [ ] **Bound-check the partition index everywhere.** §10 [BUG 12] documents `Cs2GetSectorNumber`
+- [x] Reset state: `size = -1`, empty block list.
+- [x] **Bound-check the partition index everywhere.** §10 [BUG 12] documents `Cs2GetSectorNumber`
       and `Cs2CalculateActualSize` indexing `partition[CR3>>8]` (0-255) into a 24-element array
       with no check. Do not port that; reject with `report(REJECT)`.
 
 ### 4.3 Filters (§4.3)
 
-- [ ] 24 filters: `{ fad: u32, range: u32, mode: u8, chan: u8, smmask: u8, smval: u8,
+- [x] 24 filters: `{ fad: u32, range: u32, mode: u8, chan: u8, smmask: u8, smval: u8,
       cimask: u8, cival: u8, fid: u8, condtrue: u8, condfalse: u8 }`.
-- [ ] Reset: `fad = 0`, `range = 0xFFFFFFFF`, everything else 0, `condtrue = i` (identity
+- [x] Reset: `fad = 0`, `range = 0xFFFFFFFF`, everything else 0, `condtrue = i` (identity
       filter *i* → partition *i*), `condfalse = 0xFF`.
-- [ ] `mode` bit decode (§4.3's table): bit 0 `0x01` file number vs `fid`; bit 1 `0x02` channel
+- [x] `mode` bit decode (§4.3's table): bit 0 `0x01` file number vs `fid`; bit 1 `0x02` channel
       vs `chan`; bit 2 `0x04` `(sm & smmask) != smval`; bit 3 `0x08` `(ci & cimask) != cival`;
       bit 4 `0x10` reverse the subheader result; bit 5 `0x20` **not decoded** (§10 [QUIRK 41]);
       bit 6 `0x40` FAD range `fad <= block.fad < fad + range`; bit 7 `0x80` is not a runtime
       condition — in `SetFilterMode` it means "initialize this filter".
-- [ ] Bits 0-4 apply **only** to mode 2 data sectors (`data[0xF] == 0x02 && !isaudio`); for mode
+- [x] Bits 0-4 apply **only** to mode 2 data sectors (`data[0xF] == 0x02 && !isaudio`); for mode
       1 or audio only the FAD-range test runs (§4.3).
-- [ ] Five output connectors (§4.4): `outconcddev`, `outconmpegrom`, `outconmpegfb`,
+- [x] Five output connectors (§4.4): `outconcddev`, `outconmpegrom`, `outconmpegfb`,
       `outconmpegbuf`, `outconhost`. Only `outconcddev` participates in the live data path;
       `outconmpegrom` is written only by `0xE2`; the other three are never written.
-- [ ] **Bound-check filter indices.** §10 [BUG 10] (`< 0x24` where `MAX_SELECTORS` is 24 — a
+- [x] **Bound-check filter indices.** §10 [BUG 10] (`< 0x24` where `MAX_SELECTORS` is 24 — a
       decimal/hex confusion allowing indices 24-35 to run off the array) and §10 [BUG 11] (eight
       filter commands with no check at all). Use `< 24` and reject otherwise.
 
 ### 4.4 Sector flow (§4.5)
 
-- [ ] `read_filtered_sector(fad) -> (Result, Option<partition_idx>)`:
+- [x] `read_filtered_sector(fad) -> (Result, Option<partition_idx>)`:
       1. `disc.read_sector_fad(fad, &mut workblock.data)` (2448 bytes).
       2. Compare the 12-byte sync header (§9) → `isaudio`. If audio: forward the raw 2352 bytes
          to the SCSP's CDDA input, set `isaudio`, force `set_timing(1)`, and return with no
@@ -622,44 +622,44 @@ receiving `CMOK`, and reading back a response — and Core 0's PC advances past 
       3. `workblock.size = getsectsize`; if mode 2 form 2 → 2324.
       4. Mode 2 → `fn/cn/sm/ci = data[0x10..=0x13]`.
       5. `filter_data(outconcddev, isaudio)`.
-- [ ] `filter_data`: walk the filter chain via `condfalse` until a condition passes;
+- [x] `filter_data`: walk the filter chain via `condfalse` until a condition passes;
       `lastbuffer := condtrue` on pass, `condfalse` on fail; `condfalse == 0xFF` → drop the
       sector (return `None`). Then allocate a block of `getsectsize`, copy
       `fn/cn/sm/ci/fad/size` from the workblock, strip, and
       `partition.size += block.size; partition.blocks.push(idx)`.
-- [ ] Stripping table keyed on `workblock.size` (§4.5): 2048 → `+24` if `data[0xF] == 0x02` else
+- [x] Stripping table keyed on `workblock.size` (§4.5): 2048 → `+24` if `data[0xF] == 0x02` else
       `+16`; 2324 → `+24`; 2336 → `+16`; 2340 → `+12`; 2352 → `+0`.
-- [ ] `read_unfiltered_sector` (the filesystem/IP.BIN bypass, §4.5): a *different* stripping
+- [x] `read_unfiltered_sector` (the filesystem/IP.BIN bypass, §4.5): a *different* stripping
       table keyed on `getsectsize` that additionally distinguishes mode 2 form 1 from form 2 via
       `data[0x12] & 0x20` and sets `size = 2324` for form 2; copies the subheader into the
       destination only when the sync pattern matches **and** `data[0xF] == 0x02`.
       Do **not** port §10 [BUG 40] (allocating the destination block before the read and leaking
       it on failure).
-- [ ] `get_partition(filter)` — §10 [QUIRK 38] says the reference evaluates no filter conditions
+- [x] `get_partition(filter)` — §10 [QUIRK 38] says the reference evaluates no filter conditions
       at all and just returns `partition[filter.condtrue]`. Match it for now (every unfiltered
       path depends on it), with the deviation recorded.
 
 ### 4.5 The data transfer FIFO (§1.6)
 
-- [ ] Read (32-bit) active only when `datatranstype != INVALID`. Source is
+- [x] Read (32-bit) active only when `datatranstype != INVALID`. Source is
       `partition.blocks[datatranssectpos + datanumsecttrans].data[datatransoffset]`; value is
       **big-endian on the wire** (the reference byte-swaps on little-endian hosts — in Rust,
       `u32::from_be_bytes` over the four block bytes, no host-endianness branch);
       `cdwnum += 4`, `datatransoffset += 4`; on crossing `block.size`, offset resets to 0 and
       `datanumsecttrans += 1`.
-- [ ] Once `datanumsecttrans >= datasectstotrans`, further reads return 0 — and if
+- [x] Once `datanumsecttrans >= datasectstotrans`, further reads return 0 — and if
       `datatranstype == GETDELSECTOR (2)`, the deferred deletion fires: free blocks
       `[datatranssectpos, datatranssectpos + datasectstotrans)`, compact, `partition.size -=
       cdwnum`, `partition.numblocks -= datasectstotrans`, `datatranstype = INVALID`. No HIRQ bit
       on this path.
-- [ ] Write (32-bit) active only when `datatranstype == PUTSECTOR (3)`; raises `EHST` when
+- [x] Write (32-bit) active only when `datatranstype == PUTSECTOR (3)`; raises `EHST` when
       `datanumsecttrans >= datasectstotrans` — the only place the transfer port itself raises
       `EHST`. **Do not** port §10 [QUIRK 16]'s unmotivated
       `size = (putsectsize - getsectsize) / 24; offset = datatransoffset - size` discard;
       implement a plain offset and record the deviation.
-- [ ] `datatranstype` values (§1.6): `INVALID = -1`, `GETSECTOR = 0`, `GETDELSECTOR = 2`,
+- [x] `datatranstype` values (§1.6): `INVALID = -1`, `GETSECTOR = 0`, `GETDELSECTOR = 2`,
       `PUTSECTOR = 3`. Value 1 is unused.
-- [ ] Skip `Cs2RapidCopyT1`/`T2` entirely — §10 [DEAD 48]: no callers, `T2` uses `BSWAP16` on
+- [x] Skip `Cs2RapidCopyT1`/`T2` entirely — §10 [DEAD 48]: no callers, `T2` uses `BSWAP16` on
       32-bit values, and both index `block[datanumsecttrans]` instead of
       `block[datatranssectpos + datanumsecttrans]`. The SCU-DMA fast path they were meant for is
       handled by call-out A instead.
@@ -694,69 +694,69 @@ receiving `CMOK`, and reading back a response — and Core 0's PC advances past 
 | `0x66` | Move Sector Data | §5.4 `:2695` | as `0x65` |
 | `0x67` | Get Copy Error | §5.4 `:2735` | always "no error" (§10 [QUIRK 22]) |
 
-- [ ] `0x48` Reset Selector flag decode (§5.3's sub-table): `CR1&0xFF == 0` resets **only**
+- [x] `0x48` Reset Selector flag decode (§5.3's sub-table): `CR1&0xFF == 0` resets **only**
       partition `CR3>>8` and raises `CMOK|ESEL` immediately with no deferred IRQ; bit 7 `0x80`
       all filters `condfalse = 0xFF`; bit 6 `0x40` all filters `condtrue = i`; bit 4 `0x10` all
       filter conditions reset; bit 3 `0x08` empty ("reset partition output connectors");
       bit 2 `0x04` clears every partition and block; bits 5/1/0 not decoded.
       §10 [QUIRK 43]: bit 2 does **not** restore `blockfreespace` to 200 — that is a real
       accounting bug; restore it and record the deviation.
-- [ ] `CalcSectorOffsetNumber` shorthand for `0x61`/`0x62`/`0x63` (§5.4): `sectoffset == 0xFFFF`
+- [x] `CalcSectorOffsetNumber` shorthand for `0x61`/`0x62`/`0x63` (§5.4): `sectoffset == 0xFFFF`
       → `sectoffset = numblocks - 1` (count left as given); **else if** `sectnum == 0xFFFF` →
       `sectnum = numblocks - sectoffset`. The `else if` chain means `0xFFFF/0xFFFF` resolves only
       the offset — reproduce the chaining exactly.
-- [ ] Do **not** port §10 [BUG 13] (`Cs2CalculateActualSize` never advancing its loop index, so
+- [x] Do **not** port §10 [BUG 13] (`Cs2CalculateActualSize` never advancing its loop index, so
       the result is count × one sector's size instead of the sum; plus testing
       `partition.size != 0` where unused is `-1`). Compute the real sum.
-- [ ] Do **not** port §10 [BUG 14] (`0x65`/`0x66` masking count with `0xFF` then testing
+- [x] Do **not** port §10 [BUG 14] (`0x65`/`0x66` masking count with `0xFF` then testing
       `== 0xFFFF`, hardcoding 2352-byte blocks, unchecked `AllocateBlock`, and `MoveSectorData`
       mutating the source partition inside the copy loop).
-- [ ] Do **not** port §10 [BUG 15] (`0x64` zeroing `putpartition.size` before appending) or
+- [x] Do **not** port §10 [BUG 15] (`0x64` zeroing `putpartition.size` before appending) or
       §10 [BUG 17] (get/put using inconsistent block indexing; `0x63` never setting
       `datatranspartitionnum`).
 
 ### 4.7 Getting the bytes into Work RAM — see architectural call-out A
 
-- [ ] Verify the **CPU polling path** first: guest polls `DRDY`, then reads `0x2581_8000` with
+- [x] Verify the **CPU polling path** first: guest polls `DRDY`, then reads `0x2581_8000` with
       `MOV.L` in a loop. This must work with no SCU involvement at all.
-- [ ] Then the **SCU DMA path**, which is what real BIOS and games actually use. This requires
+- [x] Then the **SCU DMA path**, which is what real BIOS and games actually use. This requires
       changes in `sh2.rs`'s `execute_scu_dma` (`sh2.rs:1536-1639`) that belong to
       `docs/implementation-plans/scu.md`; enumerate them there and cross-link. See call-out A.
 
 ### 4.8 Tests for Phase 4
 
-- [ ] `cs2_allocate_block_sets_bful_at_exhaustion`: allocate 200 blocks, assert `BFUL` raised on
+- [x] `cs2_allocate_block_sets_bful_at_exhaustion`: allocate 200 blocks, assert `BFUL` raised on
       the 200th and `blockfreespace == 0`; free one, assert `isbufferfull` clears (§4.1,
       §10 [QUIRK 46]).
-- [ ] `cs2_get_buffer_size_reports_constants`: `CR3 == 0x1800`, `CR4 == 0x00C8` — derived from
+- [x] `cs2_get_buffer_size_reports_constants`: `CR3 == 0x1800`, `CR4 == 0x00C8` — derived from
       `MAX_SELECTORS = 24` and `MAX_BLOCKS = 200` in §9, i.e. `24 << 8` and `200 = 0xC8`.
-- [ ] `cs2_set_sector_length_code_table`: all four codes plus an out-of-range code leaving the
+- [x] `cs2_set_sector_length_code_table`: all four codes plus an out-of-range code leaving the
       value unchanged (§5.4).
-- [ ] `cs2_filter_fad_range_accepts_and_rejects`: filter with `mode = 0x40`, `fad = 200`,
+- [x] `cs2_filter_fad_range_accepts_and_rejects`: filter with `mode = 0x40`, `fad = 200`,
       `range = 10`; feed synthetic workblocks at FAD 199 / 200 / 209 / 210 and assert
       accept/reject per `fad <= block.fad < fad + range` (§4.3). Values derived from the
       inequality, not from running the filter.
-- [ ] `cs2_filter_chain_falls_through_condfalse_then_drops`: filter 0 fails → `condfalse = 1`;
+- [x] `cs2_filter_chain_falls_through_condfalse_then_drops`: filter 0 fails → `condfalse = 1`;
       filter 1 fails → `condfalse = 0xFF` → sector dropped, `lastbuffer == 0xFF` (§4.5).
-- [ ] `cs2_stripping_table`: for each of `workblock.size` ∈ {2048 mode 1, 2048 mode 2, 2324,
+- [x] `cs2_stripping_table`: for each of `workblock.size` ∈ {2048 mode 1, 2048 mode 2, 2324,
       2336, 2340, 2352}, build a synthetic 2352-byte sector with a known byte pattern and assert
       the stripped block starts at offset {16, 24, 24, 16, 12, 0} respectively (§4.5).
-- [ ] **`cs2_get_sector_data_round_trip_against_the_fixture`** — the headline test of this phase.
+- [x] **`cs2_get_sector_data_round_trip_against_the_fixture`** — the headline test of this phase.
       Against the fixture CHD whose LBA 0 contains a known 2048-byte payload: force one sector
       into partition 0 via the periodic engine, issue `0x60` (code 0 → 2048), `0x61` with
       offset 0 / partition 0 / count 1, assert `DRDY`, then read `0x2581_8000` 512 times and
       compare against the fixture bytes *as written by the fixture generator*, big-endian per
       32-bit word. Assert the 513th read returns 0.
-- [ ] `cs2_get_then_delete_frees_on_readout`: same, with `0x63`; assert `blockfreespace` returns
+- [x] `cs2_get_then_delete_frees_on_readout`: same, with `0x63`; assert `blockfreespace` returns
       to 200 and `partition.size` drops only after the final FIFO read (§1.6).
-- [ ] `cs2_end_data_transfer_reports_word_count`: after transferring N 32-bit words, `0x06`
+- [x] `cs2_end_data_transfer_reports_word_count`: after transferring N 32-bit words, `0x06`
       reports `CR2 == cdwnum >> 1` and `CR1 low byte == (cdwnum >> 17) & 0xFF`; with no transfer,
       `CR1 low byte == 0xFF` and `CR2 == 0xFFFF` (§5.1).
-- [ ] `cs2_reset_selector_defers_esel_by_450us`: assert `CMOK` immediately, `ESEL` not set at
+- [x] `cs2_reset_selector_defers_esel_by_450us`: assert `CMOK` immediately, `ESEL` not set at
       449 µs, set at 451 µs (§2, §7).
-- [ ] `cs2_filter_index_out_of_range_is_rejected`: filter 24 and filter 35 both rejected — the
+- [x] `cs2_filter_index_out_of_range_is_rejected`: filter 24 and filter 35 both rejected — the
       regression test for §10 [BUG 10].
-- [ ] `scu_dma_from_cs2_fifo_lands_in_work_ram` (in `e2e-tests`): configure a level-0 SCU DMA
+- [x] `scu_dma_from_cs2_fifo_lands_in_work_ram` (in `e2e-tests`): configure a level-0 SCU DMA
       with read address `0x2581_8000`, read-add = hold, write address in High Work RAM, count =
       2048; trigger; assert Work RAM matches the fixture payload byte-for-byte. This is the
       end-to-end proof that call-out A actually works.
@@ -774,7 +774,7 @@ receiving `CMOK`, and reading back a response — and Core 0's PC advances past 
 | `0x12` | Scan Disc | §5.1 `:1914` | sets `SCAN` and nothing else; §10 [QUIRK 21] — one-way door |
 | `0x20` | Get Subcode Q/RW | §5.1 `:1923` | `CR1&0xFF`: 0 = Q (`CR2 = 5`, `infotranstype = 3`), 1 = RW (`CR2 = 12`, `CR4 = group`, `infotranstype = 4`); `CMOK\|DRDY` |
 
-- [ ] `0x10` arguments (§5.2): `pdspos = ((CR1&0xFF)<<16)|CR2`, `pdepos = ((CR3&0xFF)<<16)|CR4`,
+- [x] `0x10` arguments (§5.2): `pdspos = ((CR1&0xFF)<<16)|CR2`, `pdepos = ((CR3&0xFF)<<16)|CR4`,
       `pdpmode = CR3>>8`.
       Start decode: `pdspos == 0xFFFFFF || pdpmode == 0xFF` → no change;
       `pdspos & 0x800000` → FAD mode, `playFAD = pdspos & 0xFFFFF`;
@@ -783,82 +783,82 @@ receiving `CMOK`, and reading back a response — and Core 0's PC advances past 
       End decode: `0xFFFFFF` → unchanged; `& 0x800000` → `playFAD + (pdepos & 0xFFFFF)` (a
       *length*); non-zero → `TrackToFAD(pdepos | 0x0063)`; zero → `TrackToFAD(0xFFFF)`
       (lead-out).
-- [ ] `0x11` forms (§5.2): `(CR1&0xFF)==0 && CR2==0` → **Stop**
+- [x] `0x11` forms (§5.2): `(CR1&0xFF)==0 && CR2==0` → **Stop**
       (`STANDBY`, all report fields `0xFF`, `FAD = 0xFFFFFFFF`);
       `(CR1&0xFF)==0xFF && CR2==0xFFFF` → **Pause**;
       `CR1 & 0x80` → **Seek by FAD** (`sdFAD = ((CR1&0x0F)<<16)|CR2`);
       `CR2>>8 != 0` → **Seek by track/index**; else **Error** (same wipe as Stop).
       All forms end with `set_timing(0)`, `report(status)`, `CMOK`.
-- [ ] Helpers (§5.2): `fad_to_track` (scan `TOC[0..98]`, `0xFF` on the first `0xFFFFFFFF`,
+- [x] Helpers (§5.2): `fad_to_track` (scan `TOC[0..98]`, `0xFF` on the first `0xFFFFFFFF`,
       `i+1` when `TOC[i] <= v < TOC[i+1]` masked to 24 bits, `0` off the end);
       `track_to_fad` (`0xFFFF` → `TOC[101] & 0xFFFFFF`; index byte `0x01` → `TOC[track-1] &
       0xFFFFFF`; index byte `0x63` → `(TOC[track] & 0xFFFFFF) - 1`; else `0`);
       `setup_default_play_stats(track, write_fad)` (no-op for `0xFF`; else `options = 8`,
       `repcnt = 0`, `ctrladdr = TOC[track-1] >> 24`, `index = 1`, `track = track`, and if
       `write_fad` also `FAD = TOC[track-1] & 0xFFFFFF`).
-- [ ] `0x20` Q-channel payload (§5.1): `[0] ctrladdr, [1] BCD(track), [2] BCD(index),
+- [x] `0x20` Q-channel payload (§5.1): `[0] ctrladdr, [1] BCD(track), [2] BCD(index),
       [3..5] BCD(relative M,S,F), [6] 0, [7..9] BCD(absolute M,S,F)`.
       `ToBCD(v) = (v % 10) | ((v / 10) << 4)` (§9); `fad_to_msf`: `m = v/4500, s = (v%4500)/75,
       f = v%75`. Relative position is `FAD - (TOC[track-1] & 0xFFFFFF)`.
-- [ ] Do **not** port §10 [BUG 20] (`TOC[track-1]` with no validity check — `track == 0xFF` after
+- [x] Do **not** port §10 [BUG 20] (`TOC[track-1]` with no validity check — `track == 0xFF` after
       a Stop gives `TOC[254]`; and the RW channel's unbounded `static group` counter reading past
       `workblock.data`'s 2448 bytes from `group == 4` on).
-- [ ] Do **not** port §10 [BUG 24] (`0x11`'s seek-by-FAD scanning only `TOC[0..15]` and passing
+- [x] Do **not** port §10 [BUG 24] (`0x11`'s seek-by-FAD scanning only `TOC[0..15]` and passing
       the loop index `i` rather than `i+1` to `setup_default_play_stats`, which indexes
       `TOC[track-1]` → `TOC[-1]` for `i == 0`; and selecting the track *after* the one containing
       the target FAD).
-- [ ] Do **not** port §10 [BUG 26] (`0x10`'s track-mode end position truncating a 24-bit argument
+- [x] Do **not** port §10 [BUG 26] (`0x10`'s track-mode end position truncating a 24-bit argument
       to 16 bits and OR-ing `0x63` into the index byte instead of replacing it).
-- [ ] Faithfully reproduce, with comments: §10 [QUIRK 25] (the fake seek delay assigns a FAD
+- [x] Faithfully reproduce, with comments: §10 [QUIRK 25] (the fake seek delay assigns a FAD
       *difference* to `periodic_timing`, whose units are 1/3 µs, clamped to
       `[40000, SEEK_TIME=300000]` — unrelated units, but the resulting delay is what real
       software was tuned against), §10 [QUIRK 27] (play modes parsed but unimplemented; only the
       repeat count survives), §10 [QUIRK 44] (buffer-full back-pressure pushing the drive to
       `SEEK` with `options = 0` and back to `PLAY` when space frees).
-- [ ] Do **not** port §10 [QUIRK 47] (read errors silently swallowed: `-1`/`-2` returns handled
+- [x] Do **not** port §10 [QUIRK 47] (read errors silently swallowed: `-1`/`-2` returns handled
       by empty cases, so playback stalls at the same FAD forever with no status change and no
       HIRQ). Set `CDB_STAT_ERROR` and log; record the deviation.
 
 ### 5.2 End-of-play (§3.3)
 
-- [ ] On `FAD >= playendFAD`: either finish (`status = PAUSE`, `options = 0x8`, `set_timing(0)`,
+- [x] On `FAD >= playendFAD`: either finish (`status = PAUSE`, `options = 0x8`, `set_timing(0)`,
       raise `PEND`, and if `playtype == FILE` also raise `EFLS` **and** `EHST`) or repeat
       (`FAD = playFAD`, `repcnt += 1` up to `0xE`).
-- [ ] §10 [HACK 35]: the `EHST` on the file path carries the inline comment *"Need for Assault
+- [x] §10 [HACK 35]: the `EHST` on the file path carries the inline comment *"Need for Assault
       Leynos 2"*, and the same block on the "sector filtered out" path raises neither `EHST` nor
       `options = 0x8`. Reproduce both branches exactly as written and comment the asymmetry — do
       not "clean it up" into one path.
 
 ### 5.3 CDDA → SCSP (§6.6)
 
-- [ ] Audio sectors never enter a partition. On sync-header mismatch, forward the raw 2352 bytes
+- [x] Audio sectors never enter a partition. On sync-header mismatch, forward the raw 2352 bytes
       to the SCSP and return with no partition.
-- [ ] Mimas has no `ScspReceiveCDDA` equivalent. `Scsp` lives behind `Arc<Mutex<Scsp>>` on
+- [x] Mimas has no `ScspReceiveCDDA` equivalent. `Scsp` lives behind `Arc<Mutex<Scsp>>` on
       `SaturnSystem` (`lib.rs:74`) and is stepped by Core 5 (`lib.rs:298-313`). Add an
       `Scsp::receive_cdda(&mut self, &[u8; 2352])` feeding a ring buffer; give `Cs2` an
       `Option<Arc<Mutex<Scsp>>>` handle wired in `SaturnSystem::start`. **Cross-plan
       dependency** — coordinate the mixing side with `docs/implementation-plans/scsp.md`.
-- [ ] Note that `isaudio` forces `set_timing(1)`, which selects the 1× (75 sectors/s) rate — the
+- [x] Note that `isaudio` forces `set_timing(1)`, which selects the 1× (75 sectors/s) rate — the
       correct real-time rate for audio playback (§3.3).
 
 ### 5.4 Tests for Phase 5
 
-- [ ] `cs2_fad_to_msf`: FAD 150 → `(0, 2, 0)` (150/4500 = 0, (150%4500)/75 = 2, 150%75 = 0);
+- [x] `cs2_fad_to_msf`: FAD 150 → `(0, 2, 0)` (150/4500 = 0, (150%4500)/75 = 2, 150%75 = 0);
       FAD 4650 → `(1, 2, 0)`; FAD 4649 → `(1, 1, 74)`. Derived arithmetically from §5.1's
       formula.
-- [ ] `cs2_to_bcd`: 0→0x00, 9→0x09, 10→0x10, 59→0x59, 99→0x99 — from §9's
+- [x] `cs2_to_bcd`: 0→0x00, 9→0x09, 10→0x10, 59→0x59, 99→0x99 — from §9's
       `ToBCD(v) = (v%10) + ((v/10)<<4)`.
-- [ ] `cs2_track_to_fad_lead_out_and_track_start`: against the 2-track fixture, `0xFFFF` returns
+- [x] `cs2_track_to_fad_lead_out_and_track_start`: against the 2-track fixture, `0xFFFF` returns
       the lead-out FAD and `(track<<8)|0x01` returns that track's start — values taken from the
       fixture generator's own track table.
-- [ ] `cs2_fad_to_track_boundaries`: FAD exactly at track 2's start returns 2, one below returns
+- [x] `cs2_fad_to_track_boundaries`: FAD exactly at track 2's start returns 2, one below returns
       1, above the lead-out returns 0.
-- [ ] `cs2_seek_stop_form_wipes_report_fields`: `0x11` with `CR1&0xFF == 0, CR2 == 0` →
+- [x] `cs2_seek_stop_form_wipes_report_fields`: `0x11` with `CR1&0xFF == 0, CR2 == 0` →
       `status == STANDBY`, `CR2 == 0xFFFF`, `CR4 == 0xFFFF`.
-- [ ] `cs2_play_reaches_end_and_raises_pend`: short playFAD..playendFAD range; drive `exec`
+- [x] `cs2_play_reaches_end_and_raises_pend`: short playFAD..playendFAD range; drive `exec`
       enough 13 333 µs ticks; assert `PEND` raised, `status == PAUSE`, `options == 0x8`.
-- [ ] `cs2_play_repeats_and_increments_repcnt_up_to_0xE`.
-- [ ] `cs2_audio_track_bypasses_partitions`: playing over the fixture's AUDIO track produces no
+- [x] `cs2_play_repeats_and_increments_repcnt_up_to_0xE`.
+- [x] `cs2_audio_track_bypasses_partitions`: playing over the fixture's AUDIO track produces no
       allocated blocks and `blockfreespace` stays 200, while the CDDA sink receives 2352 bytes
       per tick.
 
@@ -868,11 +868,11 @@ receiving `CMOK`, and reading back a response — and Core 0's PC advances past 
 
 ### 6.1 ISO-9660 directory parsing (§5.5)
 
-- [ ] `DirRec` filled from a directory record: walk the *little-endian half* of each both-endian
+- [x] `DirRec` filled from a directory record: walk the *little-endian half* of each both-endian
       ISO field, handle the name-length padding byte, and detect an XA record by a trailing 14
       bytes (§5.5 — the reference calls this *"the best way I can think of"*; keep the same
       heuristic and the same honest comment).
-- [ ] `read_file_system`:
+- [x] `read_file_system`:
       - change-directory with `fid == 0xFFFFFF`: read **FAD 166** (= LBA 16, the PVD) via
         `read_unfiltered_sector`, parse the root directory record at offset `0x9C`, set
         `curdirsect = dirrec.lba`, `curdirsize = (dirrec.size / blocksectsize) - 1`,
@@ -884,7 +884,7 @@ receiving `CMOK`, and reading back a response — and Core 0's PC advances past 
         when a record length of 0 is hit and sectors remain;
       - free every intermediate sector and re-sort, so the walk leaves the partition as it found
         it.
-- [ ] `MAX_FILES = 256` (§9).
+- [x] `MAX_FILES = 256` (§9).
 
 ### 6.2 Commands
 
@@ -897,14 +897,14 @@ receiving `CMOK`, and reading back a response — and Core 0's PC advances past 
 | `0x74` | Read File | §5.5 `:2846` | sets `playFAD = FAD = fileinfo[fid].lba + offset`, `playendFAD = playFAD + ceil(size/getsectsize) - offset`, `maxrepeat = 0`, `options = 0x8`, `status = PLAY`, `playtype = FILE`, `set_timing(1)` |
 | `0x75` | Abort File | §5.5 `:2877` | `status = PAUSE` unless `OPEN`/`NODISC`; `isonesectorstored = 0`; `datatranstype = INVALID`; `cdwnum = 0`; `CMOK\|EFLS` |
 
-- [ ] `setup_file_info_transfer(fid)` builds the 12-byte record read through the info port
+- [x] `setup_file_info_transfer(fid)` builds the 12-byte record read through the info port
       (§5.5): `[0..3]` lba BE, `[4..7]` size BE, `[8]` interleavegapsize, `[9]` fileunitsize,
       `[10]` fid truncated to 8 bits, `[11]` flags.
-- [ ] Info port modes 1 and 2 (§1.7): mode 1 = single record, declared length `0x06` words
+- [x] Info port modes 1 and 2 (§1.7): mode 1 = single record, declared length `0x06` words
       = 12 bytes; mode 2 = all records, declared length `0x05F4` words = 1524, refilled from
       `fileinfo[2 + transfercount/12]` every 12 bytes. Both use `>=` terminators, not the
       reference's `>` (§10 [BUG 19]).
-- [ ] **Resolve §10 [BUG 37] with evidence, don't guess.** `0x71`/`0x74` build the file ID as
+- [x] **Resolve §10 [BUG 37] with evidence, don't guess.** `0x71`/`0x74` build the file ID as
       `((CR3&0xFF)<<8)|CR4` while `0x70`/`0x73` use `((CR3&0xFF)<<16)|CR4`. At most one matches
       hardware. Pick `<<16` (consistent with the majority and with a 24-bit fid field), record
       the choice as a deviation, and re-verify against a boot/game trace before trusting it.
@@ -913,36 +913,36 @@ receiving `CMOK`, and reading back a response — and Core 0's PC advances past 
 
 ### 6.3 IP.BIN (§6.7)
 
-- [ ] `get_ip(autoregion)`: force `outconcddev = filter[0]`, read **FAD 150** (LBA 0)
+- [x] `get_ip(autoregion)`: force `outconcddev = filter[0]`, read **FAD 150** (LBA 0)
       unfiltered, and if the sector begins with `"SEGA SEGASATURN"` fill the header struct from
       §6.7's offset table: `system @0x00 (16)`, `company @0x10 (16)`, `itemnum @0x20 (10)`,
       `version @0x2A (6)`, `date @0x30..0x37` (reformatted `DD/MM/YYYY` from `buf[0x34..0x37]` +
       `buf[0x30..0x33]`), `cdinfo @0x38 (8)`, `region @0x40 (10)`,
       `peripheral @0x50 (16)`, `gamename @0x60 (112)`, `ipsize @0xE0 u32 BE`,
       `msh2stack @0xE8`, `ssh2stack @0xEC`, `firstprogaddr @0xF0`, `firstprogsize @0xF4`.
-- [ ] Region autodetect from `region[0]`: `J`→1, `T`→2, `U`→4, `B`→5, `K`→6, `A`→0xA, `E`→0xC,
+- [x] Region autodetect from `region[0]`: `J`→1, `T`→2, `U`→4, `B`→5, `K`→6, `A`→0xA, `E`→0xC,
       `L`→0xD, else 0. **Cross-plan dependency**: the reference calls `SmpcRecheckRegion()` on a
       disc change; coordinate with `docs/implementation-plans/smpc-peripheral.md`, since Mimas's
       SMPC logic currently lives inline in `sh2.rs`.
-- [ ] Free the sector's block and re-sort the partition before returning.
-- [ ] Do **not** port §10 [HACK 36] (the Panzer Dragoon Zwei stack-pointer rewrites, applied only
+- [x] Free the sector's block and re-sort the partition before returning.
+- [x] Do **not** port §10 [HACK 36] (the Panzer Dragoon Zwei stack-pointer rewrites, applied only
       in the little-endian branch) without a specific reproducible failure justifying it.
 
 ### 6.4 Tests for Phase 6
 
-- [ ] `cs2_ip_bin_parse_against_fixture`: the fixture's LBA 0 carries a hand-written
+- [x] `cs2_ip_bin_parse_against_fixture`: the fixture's LBA 0 carries a hand-written
       `"SEGA SEGASATURN"` header with known company/itemnum/date/region/gamename and known
       `firstprogaddr`/`firstprogsize`. Assert every field against the generator's own inputs.
-- [ ] `cs2_region_autodetect_table`: all eight letters plus one unknown → 0.
-- [ ] `cs2_change_directory_root_reads_fad_166`: assert the backend was asked for FAD 166
+- [x] `cs2_region_autodetect_table`: all eight letters plus one unknown → 0.
+- [x] `cs2_change_directory_root_reads_fad_166`: assert the backend was asked for FAD 166
       exactly, and that `curdirsect` matches the fixture's root-directory LBA.
-- [ ] `cs2_read_directory_converts_lba_to_fad`: every `fileinfo[i].lba` is the ISO record's LBA
+- [x] `cs2_read_directory_converts_lba_to_fad`: every `fileinfo[i].lba` is the ISO record's LBA
       **plus 150** (§5.5, §9).
-- [ ] `cs2_get_file_info_single_record_layout`: read 6 words from the info port and reassemble
+- [x] `cs2_get_file_info_single_record_layout`: read 6 words from the info port and reassemble
       the 12 bytes; assert lba/size big-endian against the fixture, and that the 7th read
       terminates (`infotranstype == -1`) rather than returning `transfileinfo[12..13]` — the
       regression test for §10 [BUG 19].
-- [ ] `cs2_filesystem_walk_leaves_partition_unchanged`: `blockfreespace == 200` before and after
+- [x] `cs2_filesystem_walk_leaves_partition_unchanged`: `blockfreespace == 200` before and after
       a `0x70` + `0x71` sequence (§5.5).
 
 ---
@@ -953,50 +953,50 @@ Low priority — none of this is on the BIOS boot path, and §10 [QUIRK 34] note
 is written and never read. Implement so unimplemented opcodes stop hanging the guest (§10
 [QUIRK 6]), not because the functionality matters.
 
-- [ ] `doMPEGReport` (§2.2): `CR1 = (status<<8)|actionstatus`, `CR2 = vcounter`,
+- [x] `doMPEGReport` (§2.2): `CR1 = (status<<8)|actionstatus`, `CR2 = vcounter`,
       `CR3 = (pictureinfo<<8)|mpegaudiostatus`, `CR4 = mpegvideostatus`. All four MPEG state
       variables are zero-initialised and never written, so the report is always
       `status<<8 / 0 / 0 / 0`.
-- [ ] `0x90` MPEG Get Status — `mpeg`; `CMOK|MPCM` (§5.6 `:2890`)
-- [ ] `0x91` MPEG Get Interrupt — `CR1 = (status<<8)|((int>>16)&0xFF)`, `CR2 = int & 0xFFFF`;
+- [x] `0x90` MPEG Get Status — `mpeg`; `CMOK|MPCM` (§5.6 `:2890`)
+- [x] `0x91` MPEG Get Interrupt — `CR1 = (status<<8)|((int>>16)&0xFF)`, `CR2 = int & 0xFFFF`;
       `int` hardcoded 0 then ANDed with `mpegintmask`; `CMOK|MPCM` (`:2897`)
-- [ ] `0x92` MPEG Set Interrupt Mask — `((CR1&0xFF)<<16)|CR2`; `CMOK|MPCM` (`:2916`)
-- [ ] `0x93` MPEG Init — `CR1 = mpgauth ? status<<8 : 0xFF00`; `CR2==1` →
+- [x] `0x92` MPEG Set Interrupt Mask — `((CR1&0xFF)<<16)|CR2`; `CMOK|MPCM` (`:2916`)
+- [x] `0x93` MPEG Init — `CR1 = mpgauth ? status<<8 : 0xFF00`; `CR2==1` →
       `CMOK|MPCM|MPED|MPST`, else `CMOK|MPED|MPST` (`:2926`)
-- [ ] `0x94` MPEG Set Mode — `CR1&0xFF` vidplaymode, `CR2>>8` dectimingmode, `CR2&0xFF` outmode,
+- [x] `0x94` MPEG Set Mode — `CR1&0xFF` vidplaymode, `CR2>>8` dectimingmode, `CR2&0xFF` outmode,
       `CR3>>8` slmode; `0xFF` means "leave alone" (`:2948`)
-- [ ] `0x95` MPEG Play (`:2972`), `0x96` MPEG Set Decoding Method (`:2981`) — report-only stubs
-- [ ] `0x9A` MPEG Set Connection / `0x9B` Get Connection — `CR3>>8` selects current/next;
+- [x] `0x95` MPEG Play (`:2972`), `0x96` MPEG Set Decoding Method (`:2981`) — report-only stubs
+- [x] `0x9A` MPEG Set Connection / `0x9B` Get Connection — `CR3>>8` selects current/next;
       `CR1&0xFF` audcon, `CR2>>8` audlay, `CR2&0xFF` audbufnum, `CR3&0xFF` vidcon, `CR4>>8`
       vidlay, `CR4&0xFF` vidbufnum (`:2990`, `:3020`)
-- [ ] `0x9D` MPEG Set Stream / `0x9E` Get Stream — same shape with
+- [x] `0x9D` MPEG Set Stream / `0x9E` Get Stream — same shape with
       `audstm/audstmid/audchannum/vidstm/vidstmid/vidchannum` (`:3045`, `:3075`)
-- [ ] `0xA0`-`0xA4` MPEG Display / Set Window / Set Border Color / Set Fade / Set Video Effects —
+- [x] `0xA0`-`0xA4` MPEG Display / Set Window / Set Border Color / Set Fade / Set Video Effects —
       report-only stubs (`:3100`-`:3137`)
-- [ ] `0xAF` MPEG Set LSI — no CR update, `CMOK|MPCM` (`:3146`)
-- [ ] `0x55` Exec FAD Search / `0x56` Get FAD Search Results — §10 [QUIRK 22], pure stubs marked
+- [x] `0xAF` MPEG Set LSI — no CR update, `CMOK|MPCM` (`:3146`)
+- [x] `0x55` Exec FAD Search / `0x56` Get FAD Search Results — §10 [QUIRK 22], pure stubs marked
       *"finish me"*; implement as stubs that at least raise `CMOK` so the guest doesn't hang
       (§5.4 `:2390`, `:2398`)
-- [ ] `0xE2` Get MPEG ROM (§5.7 `:3217`) — **do not port as written**. §10 [QUIRK 33]: the
+- [x] `0xE2` Get MPEG ROM (§5.7 `:3217`) — **do not port as written**. §10 [QUIRK 33]: the
       reference opens an arbitrary **host file** at `Cs2Area->mpegpath` and streams it into
       partition buffers. Reject the command (`report(REJECT)`, `CMOK|MPED`) unless and until a
       real MPEG cart is modelled.
-- [ ] Opcodes named only in `cs2.h` and absent from the dispatch switch (§5.6 last paragraph):
+- [x] Opcodes named only in `cs2.h` and absent from the dispatch switch (§5.6 last paragraph):
       `0x97` Out Decoding Sync, `0x98` Get Timecode, `0x99` Get Pts, `0x9C` Change Connection,
       `0x9F` Get Picture Size, `0xA5`-`0xAA` Get/Set/Read/Write Image and Read/Write Sector,
       `0xAE` Get LSI. Leave unimplemented (they hang, matching §10 [QUIRK 6]), but log the opcode
       by name so a trace identifies them instantly.
-- [ ] Info port modes 3 and 4 (§1.7) if not already done in Phase 5: Q = 5 words / 10 bytes,
+- [x] Info port modes 3 and 4 (§1.7) if not already done in Phase 5: Q = 5 words / 10 bytes,
       RW = 12 words / 24 bytes, both with `>=` terminators.
 
 ### Tests for Phase 7
 
-- [ ] `cs2_mpeg_commands_all_complete_with_cmok`: loop over every opcode in the table above,
+- [x] `cs2_mpeg_commands_all_complete_with_cmok`: loop over every opcode in the table above,
       issue it, assert `CMOK` is raised and `CR1 >> 8 == status`. Guards against a guest hanging
       on a stub.
-- [ ] `cs2_get_mpeg_rom_is_rejected`: `CR1 >> 8 == 0xFF` — the deliberate deviation from
+- [x] `cs2_get_mpeg_rom_is_rejected`: `CR1 >> 8 == 0xFF` — the deliberate deviation from
       §10 [QUIRK 33].
-- [ ] `cs2_named_but_undispatched_opcodes_do_not_complete`: `0x97`, `0x9C`, `0xA5` leave CR1-CR4
+- [x] `cs2_named_but_undispatched_opcodes_do_not_complete`: `0x97`, `0x9C`, `0xA5` leave CR1-CR4
       untouched (§10 [QUIRK 6]).
 
 ---
@@ -1070,20 +1070,20 @@ Woken by `set_thread_active(7, true)` from Core 0's CR4-write handler — the sa
 A drive in `PAUSE` with no command outstanding still issues a `doCDReport` + `SCDQ` every
 16.7 ms, and still polls the backend every 333 ms. So:
 
-- [ ] Add `LockStepSync::park_until(core_id, deadline) -> ParkResult` — a `Condvar::wait_timeout`
+- [x] Add `LockStepSync::park_until(core_id, deadline) -> ParkResult` — a `Condvar::wait_timeout`
       sibling of `park_while_inactive` on the same `park_condvar`. It must return distinguishable
       "reactivated" / "timed out" / "shutdown" outcomes. There is no timeout variant today.
-- [ ] Core 7 computes its next deadline as `min(next_status_poll, next_periodic_tick)` and parks
+- [x] Core 7 computes its next deadline as `min(next_status_poll, next_periodic_tick)` and parks
       until then, waking early if a CR4 write reactivates it. This is a real timed wait, not a
       spin — it keeps the "park when idle" property while honoring free-running hardware timers.
-- [ ] Feed `exec` **wall-clock elapsed microseconds**, not `LockStepSync` cycles. §0.1 of the
+- [x] Feed `exec` **wall-clock elapsed microseconds**, not `LockStepSync` cycles. §0.1 of the
       reference establishes that `Cs2Exec`'s `timing` argument is elapsed µs; Mimas's cycle
       counters are per-core abstractions with no fixed µs relationship. Use `Instant` deltas,
       matching how `ClockThrottle` (`throttle.rs`) and Core 3's frame pacing
       (`lib.rs:207-208`, 16 666 µs) already work.
-- [ ] While `status` is `PLAY`/`SEEK`, Core 7 is genuinely busy at 75-150 Hz. That is real work,
+- [x] While `status` is `PLAY`/`SEEK`, Core 7 is genuinely busy at 75-150 Hz. That is real work,
       exempt from the "zero-polling" rule the same way Core 6's DSP stepping is.
-- [ ] Core 7 is named `smpc-cd-block`. This plan gives it CD-block work only; SMPC command
+- [x] Core 7 is named `smpc-cd-block`. This plan gives it CD-block work only; SMPC command
       handling stays inline in `sh2.rs` until `docs/implementation-plans/smpc-peripheral.md`
       moves it. Note that whichever plan lands second inherits a thread that is already doing
       timed work, so the deadline computation above must be written to accommodate a second
@@ -1116,22 +1116,22 @@ Mimas has no SCU interrupt controller — no `IMS`, no `IST`, no `AIACK`. Interr
 flags on `Sh2`, dispatched by `service_pending_interrupt` (`sh2.rs:908-951`) against per-source
 level/vector constants (`sh2.rs:193-222`).
 
-- [ ] Add `const ABUS_IRQ_LEVEL: u32 = 7; const ABUS_IRQ_VECTOR: u32 = 0x50;` alongside the
+- [x] Add `const ABUS_IRQ_LEVEL: u32 = 7; const ABUS_IRQ_VECTOR: u32 = 0x50;` alongside the
       existing four.
-- [ ] Add `Sh2.abus_irq_pending: Option<Arc<AtomicBool>>`, following `sound_req_irq`
+- [x] Add `Sh2.abus_irq_pending: Option<Arc<AtomicBool>>`, following `sound_req_irq`
       (`sh2.rs:139-148`) exactly, **including its Release/Acquire ordering contract**
       (`sh2.rs:96-108`): Core 7 stores with `Release` after the register writes that produced the
       response; Core 0 loads with `Acquire` before reading CR1-CR4. `Relaxed` was already
       measured as a real bug once in this codebase for the M68K handshake; do not repeat it.
-- [ ] Insert it into `service_pending_interrupt`'s priority chain at level 7 — below Sound
+- [x] Insert it into `service_pending_interrupt`'s priority chain at level 7 — below Sound
       Request (9) and SMPC (8), above nothing currently modelled.
-- [ ] **Known gap, record it**: `hardware-reference/scu.md` §4.5 / §10 item 16 — external
+- [x] **Known gap, record it**: `hardware-reference/scu.md` §4.5 / §10 item 16 — external
       interrupts are *dropped, not queued*, when `AIACK` (SCU register `0xA8`) is 0, and `AIACK`
       is a one-shot gate cleared on each delivery. Mimas models neither `AIACK` nor `IMS`, so
       Phase 2 delivers every CD interrupt unconditionally. That is more permissive than hardware
       and could plausibly cause spurious re-entry in a BIOS handler. Flag it in
       `.development/current_bugs.md` and cross-link `docs/implementation-plans/scu.md`.
-- [ ] The interrupt goes to the **master SH-2 only** (`SendInterrupt` targets `MSH2`), even
+- [x] The interrupt goes to the **master SH-2 only** (`SendInterrupt` targets `MSH2`), even
       though the slave also sees the CS2 window.
 
 ### E. Access-width decode must live above `raw_read_byte`
@@ -1171,13 +1171,13 @@ plan unlocks.
 `cargo test --workspace` must stay fast, deterministic and offline, so the CD fixtures must be
 tiny and committed.
 
-- [ ] **`tools/make_test_chd.py`** (new, alongside `tools/sh2dis.py`): generates deterministic
+- [x] **`tools/make_test_chd.py`** (new, alongside `tools/sh2dis.py`): generates deterministic
       CHD fixtures from an explicit track table. Committed so the expected values in every test
       are traceable to the generator's inputs, not to emulator output. It must emit, alongside
       each `.chd`, a `.expected.json` recording the track table, the derived 102-entry TOC, and
       the payload bytes — so a test asserts against numbers the generator computed, satisfying
       CLAUDE.md's "independently-derived values" rule.
-- [ ] **Fixture 1 — `single_data_track.chd`**: one `MODE1/2048` track, ~16 sectors.
+- [x] **Fixture 1 — `single_data_track.chd`**: one `MODE1/2048` track, ~16 sectors.
       LBA 0 (FAD 150) carries a hand-written IP.BIN header beginning `"SEGA SEGASATURN"` with
       known company/date/region/gamename. LBA 16 (FAD 166) carries a minimal ISO-9660 PVD with a
       root directory record at offset `0x9C`. Remaining sectors carry a known LCG byte pattern.
@@ -1187,19 +1187,19 @@ tiny and committed.
       `TOC[99]  = (0x41000096 & 0xFF000000) | 0x010000 = 0x41010000`;
       `TOC[100] = (0x41000096 & 0xFF000000) | (1 << 16) = 0x41010000`;
       `TOC[101] = 0x41000000 | lead_out_fad`.
-- [ ] **Fixture 2 — `data_plus_audio.chd`**: track 1 `MODE1/2048` (`ctl_addr 0x41`), track 2
+- [x] **Fixture 2 — `data_plus_audio.chd`**: track 1 `MODE1/2048` (`ctl_addr 0x41`), track 2
       `AUDIO` (`ctl_addr 0x01`) with a known sine or ramp payload. Exercises `fad_to_track`
       boundaries, `TOC[100]`'s last-track number, `ctl_addr` in `doCDReport`'s CR2, and the CDDA
       bypass. Deliberately covers §10 [BUG 54]'s "last track of a CHD" case, which the reference
       gets wrong.
-- [ ] **Fixture 3 — `mode2_form1.chd`**: a `MODE2_RAW`/2352 track with real subheaders
+- [x] **Fixture 3 — `mode2_form1.chd`**: a `MODE2_RAW`/2352 track with real subheaders
       (`data[0x10..0x13]` = fn/cn/sm/ci), so the filter subheader conditions (§4.3 mode bits 0-3)
       and the form-2 detection (`data[0x12] & 0x20`, §9) can be tested against known values.
-- [ ] Keep every fixture under ~100 KB. CHD compresses zeroed sectors extremely well; 16-32
+- [x] Keep every fixture under ~100 KB. CHD compresses zeroed sectors extremely well; 16-32
       sectors is enough for every test above.
-- [ ] Store them in `e2e-tests/fixtures/` (new directory) and reference by a path relative to
+- [x] Store them in `e2e-tests/fixtures/` (new directory) and reference by a path relative to
       `CARGO_MANIFEST_DIR`, not a `/tmp` copy.
-- [ ] Rule for every phase: **derive expected values from the reference's formulas in a
+- [x] Rule for every phase: **derive expected values from the reference's formulas in a
       throwaway script, then paste them as literals.** Never assert a value read out of the
       emulator. CLAUDE.md names two past regressions caused by breaking this rule
       (`bt_bf_no_delay_slot`, the first `DIV1` test).
@@ -1309,19 +1309,19 @@ back-pressure; [QUIRK 46] exact-zero `BFUL` transitions; [HACK 35] the "Assault 
 
 Per CLAUDE.md, these are not end-of-session chores:
 
-- [ ] `.development/current_blocker.md` — currently **0 bytes**. Populate it from §0.5's
+- [x] `.development/current_blocker.md` — currently **0 bytes**. Populate it from §0.5's
       `[REGACCESS]` sweep before starting Phase 1, and rewrite it at each phase exit.
-- [ ] `.development/current_bugs.md` — currently **0 bytes**. Add: the `0x00`-Get-Status
+- [x] `.development/current_bugs.md` — currently **0 bytes**. Add: the `0x00`-Get-Status
       interrupt divergence (call-out D / deviation #1), the missing `AIACK`/`IMS` gate
       (call-out D), and the three `execute_scu_dma` defects (call-out A) with a pointer to
       `docs/implementation-plans/scu.md`.
-- [ ] `.development/phased_development_plan.md:115-128` — flip "Phase 6 … CD Block / CS2
+- [x] `.development/phased_development_plan.md:115-128` — flip "Phase 6 … CD Block / CS2
       Subsystem" from ✅ Completed to ⬜, per §0.3.
-- [ ] `.development/ROADMAP.md` / `TASKS.md` — currently **0 bytes**; seed them with these
+- [x] `.development/ROADMAP.md` / `TASKS.md` — currently **0 bytes**; seed them with these
       phases.
-- [ ] `CLAUDE.md`'s "Known architecture debt" bullet on CD-ROM (line 66) and the Core 7 row of
+- [x] `CLAUDE.md`'s "Known architecture debt" bullet on CD-ROM (line 66) and the Core 7 row of
       the thread table (line 59) — update as each phase lands.
-- [ ] `docs/mimas_emu_engineering_draft.md` §8 (line 318-322) — update the "Current implementation
+- [x] `docs/mimas_emu_engineering_draft.md` §8 (line 318-322) — update the "Current implementation
       status" paragraph as each phase lands.
-- [ ] `history.md` — a chapter per phase explaining *why* each deliberate deviation in the table
+- [x] `history.md` — a chapter per phase explaining *why* each deliberate deviation in the table
       above was chosen, since the diff only shows what changed.
