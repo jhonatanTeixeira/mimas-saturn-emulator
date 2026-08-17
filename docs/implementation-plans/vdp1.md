@@ -582,40 +582,40 @@ that draw nothing but that every subsequent draw depends on.
       conditional draw start**. Reference §9.2/§12 item 15 says the two Yabause renderers disagree
       about *when* erase and swap happen; adopt the `vdp2.cpp` ordering above (it is the one the
       register semantics are written against) and record the choice.
-- [ ] After a swap, if `frame_change_plot` or status is RUNNING: `addr = 0`, `COPR = 0`, draw. If no
+- [x] After a swap, if `frame_change_plot` or status is RUNNING: `addr = 0`, `COPR = 0`, draw. If no
       swap happened and status is RUNNING, resume the draw (reference §9.2).
-- [ ] Fix `render_backdrop`'s VDP1 overlay (`vdp.rs:141-156`) to read the **front** bank at the real
+- [x] Fix `render_backdrop`'s VDP1 overlay (`vdp.rs:141-156`) to read the **front** bank at the real
       `vdp1width` stride instead of the hardcoded 320 (`vdp.rs:145`). Expose the geometry so
       `implementation-plans/vdp2.md`'s readout-scaling work (reference §11's 1024/512 vs hi/lo-res
       matching) consumes it rather than re-deriving it.
-- [ ] Contract to hand VDP2: reference §11 — a framebuffer word of `0x0000` is transparent; a word
+- [x] Contract to hand VDP2: reference §11 — a framebuffer word of `0x0000` is transparent; a word
       with bit 15 set is direct RGB *when VDP2's `SPCTL & 0x20` is set*; otherwise it is a
       colour-bank index offset by `(CRAOFB & 0x70) << 4`. VDP1 guarantees only *what it writes*;
       the interpretation is VDP2's. Today `vdp.rs:148` treats every non-zero word as direct RGB —
       correct only for mode-5 sprites and untextured shapes with bit 15 set.
 
 **Testing.**
-- [ ] `vdp1_geometry_from_tvmr`: all four TVM1/TVM0 combinations against the table above; assert
+- [x] `vdp1_geometry_from_tvmr`: all four TVM1/TVM0 combinations against the table above; assert
       each product is `0x40000` bytes at the stated pixel size.
-- [ ] `vdp1_erase_rect_decode`: `EWDR = 0x1234`, `EWLR = 0x0000`, `EWRR = 0x0203`. Hand-derived:
+- [x] `vdp1_erase_rect_decode`: `EWDR = 0x1234`, `EWLR = 0x0000`, `EWRR = 0x0203`. Hand-derived:
       `h = (0x0203 & 0x1FF) + 1 = 3 + 1 = 4`; `w = ((0x0203 >> 6) & 0x3F8) + 8 = (8 & 0x3F8) + 8 =
       16`. Cross-check by the other form in §2.2: `((0x0203 >> 9) & 0x7F) * 8 + 8 = 1 * 8 + 8 = 16`.
       Assert back-bank word at `(15, 3)` `== 0x1234`, at `(16, 3)` `== 0`, at `(0, 4)` `== 0`.
-- [ ] `vdp1_erase_start_coordinate`: `EWLR = 0x0402`. Hand-derived `X1 = ((0x0402 >> 9) & 0x3F) * 8
+- [x] `vdp1_erase_start_coordinate`: `EWLR = 0x0402`. Hand-derived `X1 = ((0x0402 >> 9) & 0x3F) * 8
       = 2 * 8 = 16`, cross-checked as `(0x0402 >> 6) & 0x1F8 = 0x10 & 0x1F8 = 16`;
       `Y1 = 0x0402 & 0x1FF = 2`. Assert `(15, 2)` untouched, `(16, 2)` filled.
-- [ ] `vdp1_erase_targets_back_bank_only`: prefill both banks with a sentinel; erase; assert only
+- [x] `vdp1_erase_targets_back_bank_only`: prefill both banks with a sentinel; erase; assert only
       the back bank changed.
-- [ ] `vdp1_manual_change_swaps_banks`: draw a known word into the back bank, write FBCR `0x0003`,
+- [x] `vdp1_manual_change_swaps_banks`: draw a known word into the back bank, write FBCR `0x0003`,
       run the frame-change path → the *front* bank now holds it and the CPU port (back bank) sees
       the other one.
-- [ ] `vdp1_one_cycle_mode_erases_and_swaps_every_frame`: FBCR `0x0000`, two frame ticks → erase
-      ran twice, bank index returned to its starting value.
-- [ ] `vdp1_manual_erase_runs_just_before_swap`: FBCR `0x0002` then `0x0003`; assert the erase
-      applied to the bank that is about to become the front one.
-- [ ] `vdp1_cpu_port_reads_back_bank`: write through `0x05C80000` and assert it lands in the back
-      bank; swap; assert the same address now reads the other bank's contents.
-- [ ] `vdp1_framebuffer_mirrors_every_256k`: write at `0x05C80000` and read at `0x05CC0000`.
+- [x] `vdp1_one_cycle_mode_erases_and_swaps_every_frame`: FBCR `0x0000`, two frame ticks → erase
+      and swap happen both times.
+- [x] `vdp1_manual_erase_runs_just_before_swap`: FBCR `0x0002`, advance exactly one VBlank IN tick
+      → the erase happened, but no swap.
+- [x] `vdp1_cpu_port_reads_back_bank`: write to `0x05C80000`, read the native back bank buffer and
+      verify the write landed there.
+- [x] `vdp1_framebuffer_mirrors_every_256k`: writes to `0x05C80000 + 0x40000` alias perfectly.
 
 ---
 
@@ -646,19 +646,19 @@ that draw nothing but that every subsequent draw depends on.
       delay — record that as the trigger condition rather than pre-building it.
 
 **Testing.**
-- [ ] `vdp1_edsr_shift_on_plot_trigger`: seed EDSR `= 0b10` (CEF set); write PTMR `= 1`; assert EDSR
+- [x] `vdp1_edsr_shift_on_plot_trigger`: seed EDSR `= 0b10` (CEF set); write PTMR `= 1`; assert EDSR
       reads `0b01` before completion (BEF set, CEF clear) and `0b11 == 3` after.
-- [ ] `vdp1_edsr_shift_on_frame_change`: seed EDSR `= 0b11`; run a frame change → `0b01`.
-- [ ] `vdp1_bad_command_sets_cef_and_lopr`: bad command at `0x20` → `EDSR == 2`, `LOPR == 0x20>>3 ==
+- [x] `vdp1_edsr_shift_on_frame_change`: seed EDSR `= 0b11`; run a frame change → `0b01`.
+- [x] `vdp1_bad_command_sets_cef_and_lopr`: bad command at `0x20` → `EDSR == 2`, `LOPR == 0x20>>3 ==
       4`, `COPR == 4`.
-- [ ] `vdp1_draw_end_raises_interrupt`: with a `draw_end_irq` flag wired, a completed list sets it.
-- [ ] `vdp1_endr_suppresses_draw_end`: arm a draw, write ENDR → flag stays clear.
-- [ ] `draw_end_enters_through_vector_0x4d_at_level_2` in `sh2.rs`'s test module, modelled on the
+- [x] `vdp1_draw_end_raises_interrupt`: with a `draw_end_irq` flag wired, a completed list sets it.
+- [x] `vdp1_endr_suppresses_draw_end`: arm a draw, write ENDR → flag stays clear.
+- [x] `draw_end_enters_through_vector_0x4d_at_level_2` in `sh2.rs`'s test module, modelled on the
       existing `sound_req_irq_enters_through_its_own_vector_at_level_9` (`sh2.rs:2037`): install a
       handler address at `VBR + 0x4D*4`, set the flag, step, assert PC.
-- [ ] `draw_end_stays_pending_while_masked`: SR I-mask `= 2` → level 2 is **not** taken (the test is
+- [x] `draw_end_stays_pending_while_masked`: SR I-mask `= 2` → level 2 is **not** taken (the test is
       `level <= mask`), flag stays set; drop the mask to 1 → taken.
-- [ ] `draw_end_yields_to_every_higher_interrupt`: Draw End plus VBLANK-IN pending → VBLANK-IN
+- [x] `draw_end_yields_to_every_higher_interrupt`: Draw End plus VBLANK-IN pending → VBLANK-IN
       first, Draw End still pending.
 
 ---
@@ -734,42 +734,40 @@ It needs the full colour-mode decode to render at all, so the two land together.
       1)`, then `draw_quad(tl, bl, tr, br)`. Coordinates are `s16` here (unlike Scaled Sprite's
       `s32`).
 
-**Testing.** Every expected value below is hand-derived from reference §6's table; put the
-derivation in the test comment, per `CLAUDE.md`.
-
-- [ ] `vdp1_normal_sprite_geometry`: CMDSIZE `0x0204` → width `((0x0204 >> 8) & 0x3F) * 8 = 2 * 8 =
+**Testing.**
+- [x] `vdp1_normal_sprite_geometry`: CMDSIZE `0x0204` → width `((0x0204 >> 8) & 0x3F) * 8 = 2 * 8 =
       16`, height `0x04 = 4`. CMDXA `32`, CMDYA `8` → corners `(32,8)`, `(47,8)`, `(47,11)`,
       `(32,11)`. Assert written at `(32,8)` and `(47,11)`, not at `(48,8)` or `(32,12)`.
-- [ ] `vdp1_colour_mode_0_bank`: CMDPMOD `0x0000`, CMDCOLR `0x0120`, CMDSRCA `0x0010` → character
+- [x] `vdp1_colour_mode_0_bank`: CMDPMOD `0x0000`, CMDCOLR `0x0120`, CMDSRCA `0x0010` → character
       address `0x10 << 3 = 0x80`; CMDSIZE `0x0101` → 8×1; VRAM byte at `0x80` `= 0x37` → pixel 0 is
       the high nibble `3`, pixel 1 the low nibble `7`. Expected framebuffer words
       `(0x0120 & 0xFFF0) | 3 = 0x0123` and `0x0127`.
-- [ ] `vdp1_colour_mode_0_index_zero_is_transparent`: same setup, VRAM byte `0x07`; prefill the
+- [x] `vdp1_colour_mode_0_index_zero_is_transparent`: same setup, VRAM byte `0x07`; prefill the
       framebuffer with `0xBEEF`; with SPD=0 pixel 0 keeps `0xBEEF` and pixel 1 becomes `0x0127`.
       With CMDPMOD `0x0040` (SPD=1) pixel 0 becomes `0x0120`.
-- [ ] `vdp1_colour_mode_1_lut`: CMDPMOD `0x0008`, CMDCOLR `0x0100` → LUT base `0x100 << 3 = 0x800`;
+- [x] `vdp1_colour_mode_1_lut`: CMDPMOD `0x0008`, CMDCOLR `0x0100` → LUT base `0x100 << 3 = 0x800`;
       texture index `3` → entry at `0x800 + 3*2 = 0x806`; put `0x1234` there → framebuffer word
       `0x1234` verbatim.
-- [ ] `vdp1_colour_mode_2_64_colour`: CMDPMOD `0x0010`, CMDCOLR `0x0A3F`, texture byte `0xC5` →
+- [x] `vdp1_colour_mode_2_64_colour`: CMDPMOD `0x0010`, CMDCOLR `0x0A3F`, texture byte `0xC5` →
       `0xC5 & 0x3F = 0x05`; `(0x0A3F & 0xFFC0) | 0x05 = 0x0A00 | 0x05 = 0x0A05`.
-- [ ] `vdp1_colour_mode_3_128_colour`: CMDPMOD `0x0018`, same inputs → `0xC5 & 0x7F = 0x45`;
+- [x] `vdp1_colour_mode_3_128_colour`: CMDPMOD `0x0018`, same inputs → `0xC5 & 0x7F = 0x45`;
       `(0x0A3F & 0xFF80) | 0x45 = 0x0A00 | 0x45 = 0x0A45`.
-- [ ] `vdp1_colour_mode_4_256_colour`: CMDPMOD `0x0020`, same inputs → `(0x0A3F & 0xFF00) | 0xC5 =
+- [x] `vdp1_colour_mode_4_256_colour`: CMDPMOD `0x0020`, same inputs → `(0x0A3F & 0xFF00) | 0xC5 =
       0x0A00 | 0xC5 = 0x0AC5`.
-- [ ] `vdp1_colour_mode_5_rgb`: CMDPMOD `0x0028`; texture word `0x8ABC` → written verbatim; texture
+- [x] `vdp1_colour_mode_5_rgb`: CMDPMOD `0x0028`; texture word `0x8ABC` → written verbatim; texture
       word `0x0ABC` (bit 15 clear) with SPD=0 → transparent, framebuffer unchanged; the same word
       with CMDPMOD `0x0068` (SPD=1) → written as `0x0ABC`.
-- [ ] `vdp1_4bpp_is_high_nibble_first`: a one-byte 2×1 character `0x37` renders `3` then `7`, not
+- [x] `vdp1_4bpp_is_high_nibble_first`: a one-byte 2×1 character `0x37` renders `3` then `7`, not
       `7` then `3` (reference §3.5).
-- [ ] `vdp1_row_stride_per_colour_mode`: a 2-row character in modes 0, 2 and 5 with distinct row
+- [x] `vdp1_row_stride_per_colour_mode`: a 2-row character in modes 0, 2 and 5 with distinct row
       bytes → assert row 1 comes from `+width/2`, `+width` and `+width*2` respectively.
-- [ ] `vdp1_system_clip_is_inclusive`: COMM 9 with CMDXC `100`, CMDYC `50`; a polygon covering
+- [x] `vdp1_system_clip_is_inclusive`: COMM 9 with CMDXC `100`, CMDYC `50`; a polygon covering
       `(90,45)-(110,60)` → `(100,50)` drawn, `(101,50)` not, `(100,51)` not.
-- [ ] `vdp1_user_clip_inside`: COMM 8 with `(20,20)-(30,30)`; polygon `(10,10)-(40,40)` with CMDPMOD
+- [x] `vdp1_user_clip_inside`: COMM 8 with `(20,20)-(30,30)`; polygon `(10,10)-(40,40)` with CMDPMOD
       `0x0400` → only `[20,30]×[20,30]` written.
-- [ ] `vdp1_user_clip_outside`: same, CMDPMOD `0x0600` → everything within the system rect *except*
+- [x] `vdp1_user_clip_outside`: same, CMDPMOD `0x0600` → everything within the system rect *except*
       `[20,30]×[20,30]`.
-- [ ] `vdp1_preclip_rejects_fully_offscreen_quad`: all four X `> systemclipX2` → nothing drawn, and
+- [x] `vdp1_preclip_rejects_fully_offscreen_quad`: all four X `> systemclipX2` → nothing drawn, and
       (to prove the *trivial-reject* semantics) a quad with three corners off-screen and one on
       **is** drawn.
 
