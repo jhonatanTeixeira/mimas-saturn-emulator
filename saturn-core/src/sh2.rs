@@ -1661,22 +1661,9 @@ impl Sh2 {
 
                             state.fbcr = val;
 
-                            if new_fcm == 1 && old_fct == 0 && new_fct == 1 {
-                                state.swap_frame_buffer = true;
-                            }
-                            if new_fbm == 1 && old_fbe == 0 && new_fbe == 1 {
-                                let back = self
-                                    .work_ram
-                                    .vdp1_framebuffers
-                                    .back
-                                    .load(std::sync::atomic::Ordering::Relaxed);
-                                crate::vdp::vdp1_erase_framebuffer(&state, &self.work_ram, back);
-                            }
-
                             if (val & 3) == 3 {
                                 state.manualchange = true;
-                            }
-                            if (val & 3) == 2 {
+                            } else if (val & 3) == 2 {
                                 state.manualerase = true;
                             }
                         }
@@ -2471,12 +2458,17 @@ impl Sh2 {
                 if line_event == VideoLineEvent::VBlankIn {
                     if let Some(vdp1) = &self.vdp1 {
                         let mut state = vdp1.lock().unwrap();
+                        if state.manualchange {
+                            state.swap_frame_buffer = true;
+                            state.manualchange = false;
+                        }
+
                         let fcm = (state.fbcr >> 1) & 1;
                         let fct = state.fbcr & 1;
-                        if fcm == 0 && fct == 0 {
+                        if fcm == 0 && (fct == 0 || fct == 1) { // 0x01 is Sonic R workaround
                             state.swap_frame_buffer = true;
                         }
-                        if (state.tvmr & 8) != 0 {
+                        if (state.tvmr & 8) != 0 || fcm == 0 {
                             state.vblank_erase = true;
                         }
                     }
@@ -2818,6 +2810,13 @@ impl Sh2 {
                 .swap(false, std::sync::atomic::Ordering::Acquire)
             {
                 self.scu.system_manager();
+            }
+            if self
+                .work_ram
+                .vdp1_draw_end_pending
+                .swap(false, std::sync::atomic::Ordering::Acquire)
+            {
+                self.scu.draw_end();
             }
         }
 
@@ -4932,6 +4931,88 @@ mod opcode_tests {
         assert!(
             !flag.load(std::sync::atomic::Ordering::Acquire),
             "SNDOFF must clear the flag"
+        );
+    }
+
+    const DRAW_END_IRQ_VECTOR: u32 = 0x4D;
+    const DRAW_END_IRQ_LEVEL: u8 = 2;
+
+    #[test]
+    fn draw_end_enters_through_vector_0x4d_at_level_2() {
+        let mut cpu = make_cpu();
+        cpu.scu.write_long(0xA0, 0x0000);
+        cpu.work_ram.vdp1_draw_end_pending.store(true, std::sync::atomic::Ordering::Release);
+        cpu.sr = 0; // nothing masked
+        cpu.vbr = 0x0601_0000;
+        cpu.registers[15] = 0x0601_1000;
+        cpu.pc = 0x0600_0000;
+        cpu.write_word(0x0600_0000, 0x0009); // NOP
+        cpu.write_long(cpu.vbr.wrapping_add(DRAW_END_IRQ_VECTOR * 4), 0x0600_4000);
+        cpu.write_word(0x0600_4000, 0x0009); // handler entry
+
+        cpu.step(); // This step will process the pending flag and call scu.draw_end(), and then service it!
+        // Wait, step() does: 1) service_pending_interrupt, 2) check queue, 3) execute
+        // So during 1), draw_end_pending flag is cleared, and scu.draw_end() is called, which queues it.
+        // Then 2) check queue -> takes it! So pc will be 0x0600_4002!
+        assert_eq!(
+            cpu.pc, 0x0600_4002,
+            "did not jump through the Draw End vector"
+        );
+        assert!(
+            cpu.queue_peek().is_none(),
+            "pending interrupt must clear once serviced"
+        );
+        assert_eq!(
+            (cpu.sr >> SR_IMASK_SHIFT) & 0xF,
+            DRAW_END_IRQ_LEVEL as u32,
+            "mask must raise to this interrupt's own level"
+        );
+    }
+
+    #[test]
+    fn draw_end_stays_pending_while_masked() {
+        let mut cpu = make_cpu();
+        cpu.scu.write_long(0xA0, 0x0000);
+        cpu.work_ram.vdp1_draw_end_pending.store(true, std::sync::atomic::Ordering::Release);
+        cpu.sr = 0x0000_00F0; // mask level 15: everything blocked
+        cpu.pc = 0x0600_0000;
+        cpu.write_word(0x0600_0000, 0x0009); // NOP
+
+        cpu.step();
+        assert!(
+            cpu.queue_peek()
+                .is_some_and(|p| p.vector == DRAW_END_IRQ_VECTOR as u8),
+            "a masked interrupt must stay pending, not fire"
+        );
+        assert_eq!(
+            cpu.pc, 0x0600_0002,
+            "masked interrupt must not have diverted execution"
+        );
+    }
+
+    #[test]
+    fn draw_end_yields_to_every_higher_interrupt() {
+        let mut cpu = make_cpu();
+        cpu.scu.write_long(0xA0, 0x0000);
+        cpu.work_ram.vdp1_draw_end_pending.store(true, std::sync::atomic::Ordering::Release);
+        // VBLANK OUT is level 6
+        cpu.scu.vblank_out();
+        
+        cpu.sr = 0;
+        cpu.vbr = 0x0601_0000;
+        cpu.registers[15] = 0x0601_1000;
+        cpu.pc = 0x0600_0000;
+        cpu.write_word(0x0600_0000, 0x0009);
+        
+        // Setup handler for VBlank Out (Vector 0x41)
+        cpu.write_long(cpu.vbr.wrapping_add(0x41 * 4), 0x0600_2000);
+        cpu.write_word(0x0600_2000, 0x0009);
+        
+        cpu.step();
+        assert_eq!(cpu.pc, 0x0600_2002, "must take the higher level interrupt");
+        assert!(
+            cpu.queue_peek().is_some_and(|p| p.vector == DRAW_END_IRQ_VECTOR as u8),
+            "draw end must stay queued behind the higher priority one"
         );
     }
 
@@ -7087,5 +7168,64 @@ mod opcode_tests {
             crossed,
             "the Master must cross V-Blank IN within {safety_cap_steps} steps"
         );
+    }
+
+    #[test]
+    fn test_vdp1_fbcr_vblank_behavior() {
+        let mut cpu = make_cpu();
+        write_self_loop(&mut cpu);
+        cpu.registers[15] = 0x0601_0000; // safe stack
+        cpu.sr = 0x0000_00F0; // Mask all interrupts
+        cpu.vdp1 = Some(Arc::new(Mutex::new(crate::vdp::Vdp1State::new())));
+        
+        {
+            let mut state = cpu.vdp1.as_ref().unwrap().lock().unwrap();
+            state.tvmr = 0; // Clear default VBE bit
+        }
+
+        // Test FCM=0, FCT=1 (Sonic R workaround)
+        cpu.write_word(0x25D00002, 0x0001); 
+        // Advance SCU to VBlank IN by stepping CPU
+        for _ in 0..500000 {
+            cpu.step();
+            let state = cpu.vdp1.as_ref().unwrap().lock().unwrap();
+            if state.swap_frame_buffer {
+                assert!(state.vblank_erase, "FCM=0 should auto-erase");
+                break;
+            }
+        }
+        
+        {
+            let state = cpu.vdp1.as_ref().unwrap().lock().unwrap();
+            assert!(state.swap_frame_buffer, "FCM=0, FCT=1 should auto-swap");
+        }
+
+        // Clear it
+        {
+            let mut state = cpu.vdp1.as_ref().unwrap().lock().unwrap();
+            state.swap_frame_buffer = false;
+            state.vblank_erase = false;
+        }
+
+        // Test manualchange (FCM=1, FCT=1)
+        cpu.write_word(0x25D00002, 0x0003);
+        {
+            let state = cpu.vdp1.as_ref().unwrap().lock().unwrap();
+            assert_eq!(state.fbcr, 0x0003, "FBCR should be 0x0003 immediately after write");
+        }
+        for _ in 0..500000 {
+            cpu.step();
+            let state = cpu.vdp1.as_ref().unwrap().lock().unwrap();
+            if state.swap_frame_buffer {
+                assert!(!state.manualchange, "manualchange should be consumed");
+                assert!(!state.vblank_erase, "FCM=1 should NOT auto-erase. fbcr={:04x}, tvmr={:04x}, manualchange={}, swap={}", state.fbcr, state.tvmr, state.manualchange, state.swap_frame_buffer);
+                break;
+            }
+        }
+        
+        {
+            let state = cpu.vdp1.as_ref().unwrap().lock().unwrap();
+            assert!(state.swap_frame_buffer, "manualchange should trigger swap");
+        }
     }
 }

@@ -75,6 +75,12 @@ impl Vdp2Registers {
     pub fn sfsel(&self) -> u16 {
         self.regs[0x024 / 2]
     }
+    pub fn craofb(&self) -> u16 {
+        self.regs[0x0CA / 2]
+    }
+    pub fn spctl(&self) -> u16 {
+        self.regs[0x0F0 / 2]
+    }
 
     // Decoded fields
     pub fn hreso(&self) -> u16 {
