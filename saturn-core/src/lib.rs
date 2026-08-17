@@ -14,6 +14,7 @@ pub mod sync;
 pub mod telemetry;
 pub mod throttle;
 pub mod vdp;
+pub mod vdp2_regs;
 
 pub use bus_arbiter::BusArbiter;
 pub use cdrom::Cdrom;
@@ -98,6 +99,7 @@ pub struct SaturnSystem {
     /// The slave SH-2's queue -- also `scu`'s `slave_target`, for the
     /// HBlank-IN/VBlank-IN mirrors (`docs/hardware-reference/scu.md` §4.2).
     pub irq_in_c1: Arc<Mutex<sh2::InterruptQueue>>,
+    pub vdp1: Arc<Mutex<crate::vdp::Vdp1State>>,
 }
 
 impl SaturnSystem {
@@ -138,6 +140,7 @@ impl SaturnSystem {
             scsp: Arc::new(Mutex::new(Scsp::new())),
             smpc: Arc::new(Mutex::new(Smpc::new())),
             cs2,
+            vdp1: Arc::new(Mutex::new(crate::vdp::Vdp1State::new())),
             irq_in_c0,
             irq_in_c1,
         }
@@ -216,6 +219,7 @@ impl SaturnSystem {
         let scu_c0 = self.scu.clone();
         let smpc_c0 = self.smpc.clone();
         let cs2_c0 = self.cs2.clone();
+        let vdp1_c0 = self.vdp1.clone();
         let irq_in_c0 = self.irq_in_c0.clone();
         let handle_c0 = thread::Builder::new()
             .name("sh2-master".into())
@@ -232,6 +236,7 @@ impl SaturnSystem {
                 cpu.scu = scu_c0;
                 cpu.smpc = Some(smpc_c0);
                 cpu.cs2 = Some(cs2_c0);
+                cpu.vdp1 = Some(vdp1_c0);
                 cpu.irq_in = irq_in_c0;
                 cpu.run_loop(shutdown_c0);
             })
@@ -246,6 +251,7 @@ impl SaturnSystem {
         let bios_c1 = self.bios.clone();
         let speed_c1 = self.speed.clone();
         let cs2_c1 = self.cs2.clone();
+        let vdp1_c1 = self.vdp1.clone();
         let irq_in_c1 = self.irq_in_c1.clone();
         let handle_c1 = thread::Builder::new()
             .name("sh2-slave".into())
@@ -262,6 +268,7 @@ impl SaturnSystem {
                 cpu.reset();
                 cpu.speed = Some(speed_c1);
                 cpu.cs2 = Some(cs2_c1);
+                cpu.vdp1 = Some(vdp1_c1);
                 cpu.irq_in = irq_in_c1;
                 cpu.run_loop(shutdown_c1);
             })
@@ -320,7 +327,9 @@ impl SaturnSystem {
         let sync_c3 = sync.clone();
         let arbiter_c3 = arbiter.clone();
         let work_ram_c3 = work_ram.clone();
+        let vdp1_c3 = self.vdp1.clone();
         let vdp2_frame = self.vdp2_frame.clone();
+        let scu_c3 = self.scu.clone();
         let handle_c3 = thread::Builder::new()
             .name("vdp2-composite".into())
             .spawn(move || {
@@ -332,8 +341,16 @@ impl SaturnSystem {
                     if !sync_c3.park_while_inactive(3) {
                         return;
                     }
-                    crate::vdp::execute_vdp1(&work_ram_c3);
-                    let frame = crate::vdp::render_backdrop(&work_ram_c3);
+                    {
+                        let mut state = vdp1_c3.lock().unwrap();
+                        if state.swap_frame_buffer {
+                            crate::vdp::vdp1_swap_frame_buffers(&mut state, &work_ram_c3);
+                        }
+                        if crate::vdp::execute_vdp1(&mut state, &work_ram_c3) {
+                            scu_c3.draw_end();
+                        }
+                    }
+                    let frame = crate::vdp::render_back_screen(&work_ram_c3);
                     if std::env::var("MIMAS_DEBUG_VDP2").is_ok() {
                         let regs = work_ram_c3.vdp2_regs.read().unwrap();
                         let tvmd = u16::from_be_bytes([regs[0], regs[1]]);

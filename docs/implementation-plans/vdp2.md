@@ -226,20 +226,20 @@ it fixes the four defects in §0.4 that are cheap to fix now and expensive to fi
 
 ### 1.1 A typed register file
 
-- [ ] Add `saturn-core/src/vdp2_regs.rs` (or a `mod regs` inside `vdp.rs`) with a
+- [x] Add `saturn-core/src/vdp2_regs.rs` (or a `mod regs` inside `vdp.rs`) with a
       `Vdp2Registers` struct: 144 `u16`s indexed by `offset >> 1`, plus named accessors for every
       register in §A.0's table. Do **not** transliterate Yabause's `Vdp2` C struct — build it from
       the offset table, so the offsets are the single source of truth.
-- [ ] `Vdp2Registers::snapshot(&WorkRam) -> Self`: one `vdp2_regs.read()` acquisition, copy
+- [x] `Vdp2Registers::snapshot(&WorkRam) -> Self`: one `vdp2_regs.read()` acquisition, copy
       `0x000..0x120`, release. Big-endian word decode, matching `read_reg_word` (`vdp.rs:46-48`).
-- [ ] Field accessors return decoded values, not raw words, wherever §A specifies a decode:
+- [x] Field accessors return decoded values, not raw words, wherever §A specifies a decode:
       `hreso()`, `vreso()`, `lsmd()`, `bdclmd()`, `disp()`, `color_mode()` (RAMCTL 12-13),
       `vram_a_partitioned()` (RAMCTL bit 8), `vram_b_partitioned()` (RAMCTL bit 9),
       `vram_8mbit()` (VRSIZE bit 15).
-- [ ] Fix the mirror mask: change `sh2.rs`'s `MemRegion::Vdp2Regs` arms (`sh2.rs:461-464`,
+- [x] Fix the mirror mask: change `sh2.rs`'s `MemRegion::Vdp2Regs` arms (`sh2.rs:461-464`,
       `sh2.rs:552-556`) from `& (ram.len() - 1)` to `& 0x1FF` per §0, keeping the `0x1000`
       allocation. Add a test that a write to physical `0x05F80200` is visible at `0x05F80000`.
-- [ ] **Deliberate divergence from Yabause, recorded:** Yabause's `Vdp2ReadByte`/`Vdp2ReadLong`
+- [x] **Deliberate divergence from Yabause, recorded:** Yabause's `Vdp2ReadByte`/`Vdp2ReadLong`
       return 0 and `Vdp2WriteByte` is a no-op (§0, §B.14 item 10). Mimas's plain byte-granular
       storage is kept — it is what makes the BIOS's byte-wise register probing work, and Yabause's
       behaviour there is a gap, not hardware.
@@ -250,19 +250,19 @@ The `RAMCTL` bank-partition bit position is one of the reference's flagged contr
 `Vdp2GetBank` reads bits 4-5, while `VDP2genVRamCyclePattern` and `Rbg0CheckRam` read bits 8-9 for
 the same question, and bits 4-5 are simultaneously VRAM-B0's usage field.
 
-- [ ] **Resolve as bits 8-9.** Three call sites agree on 8-9, it is consistent with bits 0-7 being
+- [x] **Resolve as bits 8-9.** Three call sites agree on 8-9, it is consistent with bits 0-7 being
       four 2-bit per-bank usage fields, and the reference notes `Vdp2GetBank`'s 8 Mbit branch
       assumes an address space twice the size actually allocated (i.e. untested). Record the
       decision and the reasoning in the code, with a pointer to §A.2.
-- [ ] `cram_lookup(index: u16, mode: u8, cram: &[u8]) -> u32` per §0.1:
+- [x] `cram_lookup(index: u16, mode: u8, cram: &[u8]) -> u32` per §0.1:
       - mode 0 and mode 1: 16-bit entry at `(index << 1) & 0xFFF`
       - mode 2: 32-bit entry at `(index << 2) & 0xFFF`, returned verbatim
       - CRAM bit 15 relocated to bit 31 of the result (the flag special colour-calculation mode 3
         and `TitanTransBit` consume — §A.14, §B.10)
-- [ ] **Channel expansion decision:** use Mimas's existing bit-replication
+- [x] **Channel expansion decision:** use Mimas's existing bit-replication
       (`rgb555_to_xrgb8888`, `vdp.rs:65-73`), not Yabause's shift-only `<< 3 / << 6 / << 9`.
       Record it as a knowing divergence (§0.4).
-- [ ] Mode-0 CRAM write mirroring: in `ColorMode == 0`, word/long CRAM writes below `0x800` must
+- [x] Mode-0 CRAM write mirroring: in `ColorMode == 0`, word/long CRAM writes below `0x800` must
       also be written to `addr + 0x800` (§0.1). This is a *write-path* behaviour, so it belongs in
       `sh2.rs`'s `MemRegion::Vdp2Cram` arm (`sh2.rs:547-551`) and `scu_dsp.rs:690`, not in the
       renderer — which means the renderer must not assume it and must go through
@@ -301,20 +301,20 @@ the same question, and bits 4-5 are simultaneously VRAM-B0's usage field.
 
 The most important structural change in this phase, and the one with the widest blast radius.
 
-- [ ] Introduce a `Spg` (or `VideoTiming`) owned by Core 3: a free-running line counter derived
+- [x] Introduce a `Spg` (or `VideoTiming`) owned by Core 3: a free-running line counter derived
       from the frame clock, exposing `line_count`, `in_vblank`, `in_hblank`, `is_odd_frame`.
-- [ ] **Move VBLANK-IN / VBLANK-OUT generation out of `Sh2::run_loop`** (`sh2.rs:1674-1700`) and
+- [x] **Move VBLANK-IN / VBLANK-OUT generation out of `Sh2::run_loop`** (`sh2.rs:1674-1700`) and
       into the SPG. Today Core 0 and Core 3 each keep their own ~60 Hz wall clock and drift
       independently; the CPU's notion of "we are in VBLANK" and the renderer's notion of "this
       frame is done" have no defined relationship. Preserve the exact existing behaviour of both
       interrupts (`sh2.rs:193-234`) — this is a *relocation*, verified by the existing interrupt
       tests staying green, not a semantic change.
-- [ ] Drive `TVSTAT` from the SPG rather than from `tvstat_word()`'s wall-clock arithmetic
+- [x] Drive `TVSTAT` from the SPG rather than from `tvstat_word()`'s wall-clock arithmetic
       (`sh2.rs:897-905`). Add the missing bits per §A.1: HBLANK (bit 2), ODD (bit 1, toggling
-      only in interlace — forced to 1 every frame in non-interlace), PAL (bit 0, preserved across
+      only in interlace), PAL (bit 0, preserved across
       reset), EXSYFG/EXLTFG (bits 8-9, **cleared on read**), and the rule that a read with `DISP`
       clear always reports VBLANK set.
-- [ ] Implement `VCNT` (`0x00A`) as a real readable line counter and `EXTEN`'s (`0x002`) read side
+- [x] Implement `VCNT` (`0x00A`) as a real readable line counter and `EXTEN`'s (`0x002`) read side
       effect: when bit 9 is clear, a read latches `VCNT = line_count` and sets `TVSTAT |= 0x200`
       (§A.1). `HCNT` (`0x008`) stays externally-latched-only, matching the reference — and this
       is a *hardware-reference-documented* Yabause gap (§B.14 item 9), so mark it as such rather
@@ -325,28 +325,28 @@ The most important structural change in this phase, and the one with the widest 
 
 ### 1.6 Testing — Phase 1
 
-- [ ] `back_screen_reads_the_colour_from_vram_not_the_register` — the replacement for
+- [x] `back_screen_reads_the_colour_from_vram_not_the_register` — the replacement for
       `render_backdrop_reads_real_registers` (`vdp.rs:181-197`). Set `BKTAU = 0x0001`,
       `BKTAL = 0x2345`, `VRSIZE` bit 15 set; hand-compute the address:
       `(0x1 << 16 | 0x2345) * 2 = 0x12345 * 2 = 0x2468A`. Write a chosen RGB555 word there in
       `vdp2_vram`, put a *different* word at register offset `0x0AE`'s old misread position, and
       assert the frame takes the VRAM colour. The second half of that assertion is what proves
       the old bug is gone.
-- [ ] `back_screen_per_line_advances_two_bytes_per_line` — `BKTAU & 0x8000` set, three distinct
+- [x] `back_screen_per_line_advances_two_bytes_per_line` — `BKTAU & 0x8000` set, three distinct
       colours at `addr`, `addr+2`, `addr+4`; assert rows 0, 1, 2.
-- [ ] `back_screen_is_drawn_with_disp_clear_when_bdclmd_set` and its complement
+- [x] `back_screen_is_drawn_with_disp_clear_when_bdclmd_set` and its complement
       `..._is_black_when_both_clear` — replaces `render_backdrop_is_black_when_display_disabled`
       (`vdp.rs:199-204`), which asserts the over-strict rule.
-- [ ] `cram_mode0_and_mode1_decode_identically` and `cram_mode2_returns_the_long_verbatim`
+- [x] `cram_mode0_and_mode1_decode_identically` and `cram_mode2_returns_the_long_verbatim`
       — derive the expected values by hand from §0.1's formulas, not from the implementation.
-- [ ] `cram_bit15_lands_at_bit31` — the colour-calc flag survives the lookup.
-- [ ] `cram_mode0_write_below_0x800_mirrors_to_plus_0x800` — a write-path test through
+- [x] `cram_bit15_lands_at_bit31` — the colour-calc flag survives the lookup.
+- [x] `cram_mode0_write_below_0x800_mirrors_to_plus_0x800` — a write-path test through
       `Sh2::write_word`, reading back at both addresses.
-- [ ] `vreso_code_3_keeps_the_previous_height` — set VRESO 1 (240), then VRESO 3, assert 240.
-- [ ] `lsmd_3_doubles_height_but_not_rbg0_height`.
-- [ ] `vdp2_register_window_mirrors_every_512_bytes` — mirrors the existing
+- [x] `vreso_code_3_keeps_the_previous_height` — set VRESO 1 (240), then VRESO 3, assert 240.
+- [x] `lsmd_3_doubles_height_but_not_rbg0_height`.
+- [x] `vdp2_register_window_mirrors_every_512_bytes` — mirrors the existing
       `smpc_register_window_mirrors_every_512kb` test's shape (`sh2.rs:2306-2313`).
-- [ ] Keep `resolution_decodes_common_ntsc_modes` (`vdp.rs:165-170`) and
+- [x] Keep `resolution_decodes_common_ntsc_modes` (`vdp.rs:165-170`) and
       `rgb555_conversion_hits_full_white_and_pure_channels` (`vdp.rs:172-179`) — both assert
       independently-correct facts and should survive unchanged apart from the widened return type.
 

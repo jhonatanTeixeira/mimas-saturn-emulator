@@ -716,8 +716,8 @@ impl Scu {
     /// handle of its own.
     pub fn advance_video_line(&self, work_ram: &WorkRam) -> VideoLineEvent {
         self.hblank_in();
-        let line = self.timers.lock().unwrap().timer0;
-        if line == 225 {
+        let mut line = self.timers.lock().unwrap().timer0;
+        let event = if line == 225 {
             self.vblank_in();
             // Release: pairs with `Sh2::tvstat_word`'s Acquire load.
             work_ram
@@ -726,6 +726,7 @@ impl Scu {
             VideoLineEvent::VBlankIn
         } else if line == 263 {
             self.vblank_out(); // resets timers.timer0 to 0 internally
+            line = 0; // update local copy so we capture at line 0
             work_ram
                 .vblank_active
                 .store(false, std::sync::atomic::Ordering::Release);
@@ -734,7 +735,15 @@ impl Scu {
             VideoLineEvent::Line207
         } else {
             VideoLineEvent::None
+        };
+
+        if line < 263 {
+            let regs = work_ram.vdp2_regs.read().unwrap();
+            let mut snapshot = work_ram.vdp2_lines.write().unwrap();
+            snapshot[line as usize].copy_from_slice(&**regs);
         }
+
+        event
     }
 
     /// Wired to `ScuDsp`'s `ENDI` (`docs/implementation-plans/scu.md` Phase

@@ -167,11 +167,11 @@ The largest milestone. VDP1's framebuffer work (Phase 2) and VDP2's own Phase 10
 coupled in both plans — do the shared thread-topology move once, at the end of this milestone,
 not twice.
 
-- [ ] `vdp1.md` Phase 0 — Fix what's already there (the confirmed command-table offset bugs,
+- [x] `vdp1.md` Phase 0 — Fix what's already there (the confirmed command-table offset bugs,
       the `PTMR`/`TVMR` confusion, the end-bit-checked-after-drawing bug — the existing test
       was built on top of these)
-- [ ] `vdp1.md` Phase 1 — Engine state, live registers, and the state-setting commands
-- [ ] `vdp2.md` Phase 1 — Foundations: register file, CRAM, the real back screen, and a line
+- [x] `vdp1.md` Phase 1 — Engine state, live registers, and the state-setting commands
+- [x] `vdp2.md` Phase 1 — Foundations: register file, CRAM, the real back screen, and a line
       counter (fixes the confirmed `BKTAL`-is-half-a-VRAM-address bug — the existing backdrop
       test asserts the bug)
 - [ ] `vdp1.md` Phase 2 — Framebuffer geometry, two banks, erase and swap

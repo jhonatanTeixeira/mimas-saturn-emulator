@@ -40,3 +40,12 @@ still open or was closed during Phase 1/2 (both marked `[x]` in the same documen
 D-1 (`OR`/`XOR` swap) was independently spot-checked as fixed while investigating D-21/22/23
 (`sh2.rs:2861/2865` map correctly today: `0xCA00`→XOR, `0xCB00`→OR); the rest (D-2 through
 D-20) are unverified here.
+
+## Known Unknowns
+
+These are VDP1 register fields that are stored but deliberately left undecoded because their effect on real hardware is not determinable from the source (see `docs/hardware-reference/vdp1.md` §12 items 1-3):
+
+- **TVM2** (TVMR bit 2)
+- **EOS** (FBCR bit 4)
+- **HSS** (CMDPMOD bit 12)
+- **PCLP** (CMDPMOD bit 11)
