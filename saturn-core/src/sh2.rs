@@ -205,6 +205,8 @@ pub struct Sh2 {
     pub smpc: Option<Arc<std::sync::Mutex<crate::smpc::Smpc>>>,
     /// The real CS2 / CD-block subsystem.
     pub cs2: Option<Arc<std::sync::Mutex<crate::cs2::Cs2>>>,
+    /// The VDP1 state and registers (`docs/implementation-plans/vdp1.md` Phase 1).
+    pub vdp1: Option<Arc<std::sync::Mutex<crate::vdp::Vdp1State>>>,
     /// This CPU's own pending-interrupt queue (`docs/implementation-plans/sh2-cpu.md`
     /// Phase 5) -- real hardware's per-SH-2 `interrupts[]`, polled once per
     /// `step()` by `service_pending_interrupt`. **Not** `Option` -- every
@@ -496,6 +498,7 @@ impl Sh2 {
             scu,
             smpc: None,
             cs2: None,
+            vdp1: None,
             irq_in,
             nmi_pending: false,
             onchip: crate::sh2_onchip::Sh2OnChip::new(is_slave),
@@ -908,10 +911,18 @@ impl Sh2 {
                 ram[off & (ram.len() - 1)]
             }
             MemRegion::Vdp1Framebuffer(off) => {
-                let ram = self.work_ram.vdp1_framebuffer.read().unwrap();
+                let back = self
+                    .work_ram
+                    .vdp1_framebuffers
+                    .back
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let ram = self.work_ram.vdp1_framebuffers.banks[back].read().unwrap();
                 ram[off & 0x3FFFF]
             }
             MemRegion::Vdp1Regs(off) => {
+                if self.vdp1.is_some() {
+                    return 0;
+                }
                 let ram = self.work_ram.vdp1_regs.read().unwrap();
                 ram[off & (ram.len() - 1)]
             }
@@ -932,6 +943,19 @@ impl Sh2 {
                     } else {
                         (tvstat & 0xFF) as u8
                     }
+                } else if masked_off == 0x002 || masked_off == 0x003 {
+                    let mut ram = self.work_ram.vdp2_regs.write().unwrap();
+                    let exten = u16::from_be_bytes([ram[0x002], ram[0x003]]);
+                    if (exten & 0x0200) == 0 {
+                        let line_count = self.scu.timers.lock().unwrap().timer0 as u16;
+                        ram[0x00A] = (line_count >> 8) as u8;
+                        ram[0x00B] = (line_count & 0xFF) as u8;
+                        let mut tvstat = u16::from_be_bytes([ram[0x004], ram[0x005]]);
+                        tvstat |= 0x0200;
+                        ram[0x004] = (tvstat >> 8) as u8;
+                        ram[0x005] = (tvstat & 0xFF) as u8;
+                    }
+                    ram[masked_off]
                 } else {
                     let ram = self.work_ram.vdp2_regs.read().unwrap();
                     ram[masked_off]
@@ -1030,10 +1054,18 @@ impl Sh2 {
                 ram[off & mask] = val;
             }
             MemRegion::Vdp1Framebuffer(off) => {
-                let mut ram = self.work_ram.vdp1_framebuffer.write().unwrap();
+                let back = self
+                    .work_ram
+                    .vdp1_framebuffers
+                    .back
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let mut ram = self.work_ram.vdp1_framebuffers.banks[back].write().unwrap();
                 ram[off & 0x3FFFF] = val;
             }
             MemRegion::Vdp1Regs(off) => {
+                if self.vdp1.is_some() {
+                    return;
+                }
                 let mut ram = self.work_ram.vdp1_regs.write().unwrap();
                 let mask = ram.len() - 1;
                 ram[off & mask] = val;
@@ -1046,12 +1078,21 @@ impl Sh2 {
             MemRegion::Vdp2Cram(off) => {
                 let mut ram = self.work_ram.vdp2_cram.write().unwrap();
                 let mask = ram.len() - 1;
-                ram[off & mask] = val;
+                let masked_off = off & mask;
+                ram[masked_off] = val;
+
+                let color_mode = {
+                    let regs = self.work_ram.vdp2_regs.read().unwrap();
+                    let ramctl = u16::from_be_bytes([regs[0x0E], regs[0x0F]]);
+                    (ramctl >> 12) & 0x3
+                };
+                if color_mode == 0 && masked_off < 0x800 {
+                    ram[masked_off + 0x800] = val;
+                }
             }
             MemRegion::Vdp2Regs(off) => {
                 let mut ram = self.work_ram.vdp2_regs.write().unwrap();
-                let mask = ram.len() - 1;
-                ram[off & mask] = val;
+                ram[off & 0x1FF] = val;
             }
             MemRegion::ScuRegs(off) => {
                 self.scu.write_byte(off, val);
@@ -1272,17 +1313,38 @@ impl Sh2 {
                 (b0 << 8) | b1
             }
             MemRegion::Vdp1Framebuffer(off) => {
-                let ram = self.work_ram.vdp1_framebuffer.read().unwrap();
+                let back = self
+                    .work_ram
+                    .vdp1_framebuffers
+                    .back
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let ram = self.work_ram.vdp1_framebuffers.banks[back].read().unwrap();
                 let b0 = ram[off & 0x3FFFF] as u16;
                 let b1 = ram[(off + 1) & 0x3FFFF] as u16;
                 (b0 << 8) | b1
             }
             MemRegion::Vdp1Regs(off) => {
-                let ram = self.work_ram.vdp1_regs.read().unwrap();
-                let mask = ram.len() - 1;
-                let b0 = ram[off & mask] as u16;
-                let b1 = ram[(off + 1) & mask] as u16;
-                (b0 << 8) | b1
+                if let Some(vdp1) = &self.vdp1 {
+                    let state = vdp1.lock().unwrap();
+                    match off {
+                        0x10 => state.edsr,
+                        0x12 => state.lopr,
+                        0x14 => state.copr,
+                        0x16 => {
+                            let ptmr_bit = (state.ptmr & 2) << 7;
+                            let fbcr_bits = (state.fbcr & 0x1E) << 3;
+                            let tvmr_bits = state.tvmr & 0xF;
+                            0x1000 | ptmr_bit | fbcr_bits | tvmr_bits
+                        }
+                        _ => 0,
+                    }
+                } else {
+                    let ram = self.work_ram.vdp1_regs.read().unwrap();
+                    let mask = ram.len() - 1;
+                    let b0 = ram[off & mask] as u16;
+                    let b1 = ram[(off + 1) & mask] as u16;
+                    (b0 << 8) | b1
+                }
             }
             MemRegion::Vdp2Vram(off) => {
                 let ram = self.work_ram.vdp2_vram.read().unwrap();
@@ -1300,7 +1362,11 @@ impl Sh2 {
             }
             MemRegion::Vdp2Regs(off) => {
                 let masked_off = off & 0x1FF;
-                if masked_off == 0x004 || masked_off == 0x005 || masked_off == 0x003 {
+                if masked_off == 0x004
+                    || masked_off == 0x005
+                    || masked_off == 0x002
+                    || masked_off == 0x003
+                {
                     let b0 = self.raw_read_byte_region(MemRegion::Vdp2Regs(off));
                     let b1 = self.raw_read_byte_region(MemRegion::Vdp2Regs(off + 1));
                     ((b0 as u16) << 8) | (b1 as u16)
@@ -1415,7 +1481,12 @@ impl Sh2 {
                 (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
             }
             MemRegion::Vdp1Framebuffer(off) => {
-                let ram = self.work_ram.vdp1_framebuffer.read().unwrap();
+                let back = self
+                    .work_ram
+                    .vdp1_framebuffers
+                    .back
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let ram = self.work_ram.vdp1_framebuffers.banks[back].read().unwrap();
                 let b0 = ram[off & 0x3FFFF] as u32;
                 let b1 = ram[(off + 1) & 0x3FFFF] as u32;
                 let b2 = ram[(off + 2) & 0x3FFFF] as u32;
@@ -1423,6 +1494,9 @@ impl Sh2 {
                 (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
             }
             MemRegion::Vdp1Regs(off) => {
+                if self.vdp1.is_some() {
+                    return 0;
+                }
                 let ram = self.work_ram.vdp1_regs.read().unwrap();
                 let mask = ram.len() - 1;
                 let b0 = ram[off & mask] as u32;
@@ -1562,11 +1636,68 @@ impl Sh2 {
                 ram[(off + 1) & mask] = val as u8;
             }
             MemRegion::Vdp1Framebuffer(off) => {
-                let mut ram = self.work_ram.vdp1_framebuffer.write().unwrap();
+                let back = self
+                    .work_ram
+                    .vdp1_framebuffers
+                    .back
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let mut ram = self.work_ram.vdp1_framebuffers.banks[back].write().unwrap();
                 ram[off & 0x3FFFF] = (val >> 8) as u8;
                 ram[(off + 1) & 0x3FFFF] = val as u8;
             }
             MemRegion::Vdp1Regs(off) => {
+                if let Some(vdp1) = &self.vdp1 {
+                    let mut state = vdp1.lock().unwrap();
+                    match off {
+                        0x00 => state.tvmr = val,
+                        0x02 => {
+                            let old_fct = state.fbcr & 1;
+                            let new_fct = val & 1;
+                            let new_fcm = (val >> 1) & 1;
+
+                            let old_fbe = (state.fbcr >> 2) & 1;
+                            let new_fbe = (val >> 2) & 1;
+                            let new_fbm = (val >> 3) & 1;
+
+                            state.fbcr = val;
+
+                            if new_fcm == 1 && old_fct == 0 && new_fct == 1 {
+                                state.swap_frame_buffer = true;
+                            }
+                            if new_fbm == 1 && old_fbe == 0 && new_fbe == 1 {
+                                let back = self
+                                    .work_ram
+                                    .vdp1_framebuffers
+                                    .back
+                                    .load(std::sync::atomic::Ordering::Relaxed);
+                                crate::vdp::vdp1_erase_framebuffer(&state, &self.work_ram, back);
+                            }
+
+                            if (val & 3) == 3 {
+                                state.manualchange = true;
+                            }
+                            if (val & 3) == 2 {
+                                state.manualerase = true;
+                            }
+                        }
+                        0x04 => {
+                            state.ptmr = val;
+                            if val == 1 {
+                                if let Some(sync) = &self.sync {
+                                    sync.set_thread_active(3, true);
+                                }
+                            }
+                        }
+                        0x06 => state.ewdr = val,
+                        0x08 => state.ewlr = val,
+                        0x0A => state.ewrr = val,
+                        0x0C => {
+                            state.endr = val;
+                            state.status = crate::vdp::Vdp1Status::IDLE;
+                        }
+                        _ => {}
+                    }
+                }
                 let mut ram = self.work_ram.vdp1_regs.write().unwrap();
                 let mask = ram.len() - 1;
                 ram[off & mask] = (val >> 8) as u8;
@@ -1581,14 +1712,35 @@ impl Sh2 {
             MemRegion::Vdp2Cram(off) => {
                 let mut ram = self.work_ram.vdp2_cram.write().unwrap();
                 let mask = ram.len() - 1;
-                ram[off & mask] = (val >> 8) as u8;
-                ram[(off + 1) & mask] = val as u8;
+                let masked_off = off & mask;
+                ram[masked_off] = (val >> 8) as u8;
+                ram[(masked_off + 1) & mask] = val as u8;
+
+                let color_mode = {
+                    let regs = self.work_ram.vdp2_regs.read().unwrap();
+                    let ramctl = u16::from_be_bytes([regs[0x0E], regs[0x0F]]);
+                    (ramctl >> 12) & 0x3
+                };
+                if color_mode == 0 && masked_off < 0x800 {
+                    ram[masked_off + 0x800] = (val >> 8) as u8;
+                    ram[((masked_off + 1) & mask) + 0x800] = val as u8;
+                }
             }
             MemRegion::Vdp2Regs(off) => {
                 let mut ram = self.work_ram.vdp2_regs.write().unwrap();
-                let mask = ram.len() - 1;
-                ram[off & mask] = (val >> 8) as u8;
-                ram[(off + 1) & mask] = val as u8;
+                let off = off & 0x1FF;
+                if off == 0x000 {
+                    let old_tvmd = u16::from_be_bytes([ram[0], ram[1]]);
+                    let mut new_tvmd = val;
+                    if ((new_tvmd >> 4) & 0x3) == 3 {
+                        new_tvmd = (new_tvmd & !0x0030) | (old_tvmd & 0x0030);
+                    }
+                    ram[0] = (new_tvmd >> 8) as u8;
+                    ram[1] = new_tvmd as u8;
+                } else {
+                    ram[off] = (val >> 8) as u8;
+                    ram[(off + 1) & 0x1FF] = val as u8;
+                }
             }
             MemRegion::ScuRegs(_off) => {
                 self.raw_write_byte(address, (val >> 8) as u8);
@@ -1678,13 +1830,21 @@ impl Sh2 {
                 ram[(off + 3) & mask] = val as u8;
             }
             MemRegion::Vdp1Framebuffer(off) => {
-                let mut ram = self.work_ram.vdp1_framebuffer.write().unwrap();
+                let back = self
+                    .work_ram
+                    .vdp1_framebuffers
+                    .back
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let mut ram = self.work_ram.vdp1_framebuffers.banks[back].write().unwrap();
                 ram[off & 0x3FFFF] = (val >> 24) as u8;
                 ram[(off + 1) & 0x3FFFF] = (val >> 16) as u8;
                 ram[(off + 2) & 0x3FFFF] = (val >> 8) as u8;
                 ram[(off + 3) & 0x3FFFF] = val as u8;
             }
             MemRegion::Vdp1Regs(off) => {
+                if self.vdp1.is_some() {
+                    return;
+                }
                 let mut ram = self.work_ram.vdp1_regs.write().unwrap();
                 let mask = ram.len() - 1;
                 ram[off & mask] = (val >> 24) as u8;
@@ -1703,18 +1863,30 @@ impl Sh2 {
             MemRegion::Vdp2Cram(off) => {
                 let mut ram = self.work_ram.vdp2_cram.write().unwrap();
                 let mask = ram.len() - 1;
-                ram[off & mask] = (val >> 24) as u8;
-                ram[(off + 1) & mask] = (val >> 16) as u8;
-                ram[(off + 2) & mask] = (val >> 8) as u8;
-                ram[(off + 3) & mask] = val as u8;
+                let masked_off = off & mask;
+                ram[masked_off] = (val >> 24) as u8;
+                ram[(masked_off + 1) & mask] = (val >> 16) as u8;
+                ram[(masked_off + 2) & mask] = (val >> 8) as u8;
+                ram[(masked_off + 3) & mask] = val as u8;
+
+                let color_mode = {
+                    let regs = self.work_ram.vdp2_regs.read().unwrap();
+                    let ramctl = u16::from_be_bytes([regs[0x0E], regs[0x0F]]);
+                    (ramctl >> 12) & 0x3
+                };
+                if color_mode == 0 && masked_off < 0x800 {
+                    ram[masked_off + 0x800] = (val >> 24) as u8;
+                    ram[((masked_off + 1) & mask) + 0x800] = (val >> 16) as u8;
+                    ram[((masked_off + 2) & mask) + 0x800] = (val >> 8) as u8;
+                    ram[((masked_off + 3) & mask) + 0x800] = val as u8;
+                }
             }
             MemRegion::Vdp2Regs(off) => {
                 let mut ram = self.work_ram.vdp2_regs.write().unwrap();
-                let mask = ram.len() - 1;
-                ram[off & mask] = (val >> 24) as u8;
-                ram[(off + 1) & mask] = (val >> 16) as u8;
-                ram[(off + 2) & mask] = (val >> 8) as u8;
-                ram[(off + 3) & mask] = val as u8;
+                ram[off & 0x1FF] = (val >> 24) as u8;
+                ram[(off + 1) & 0x1FF] = (val >> 16) as u8;
+                ram[(off + 2) & 0x1FF] = (val >> 8) as u8;
+                ram[(off + 3) & 0x1FF] = val as u8;
             }
             MemRegion::ScuRegs(off) => {
                 let off = off & 0xFF;
@@ -2297,6 +2469,17 @@ impl Sh2 {
                 use crate::scu::VideoLineEvent;
                 let line_event = self.scu.advance_video_line(&self.work_ram);
                 if line_event == VideoLineEvent::VBlankIn {
+                    if let Some(vdp1) = &self.vdp1 {
+                        let mut state = vdp1.lock().unwrap();
+                        let fcm = (state.fbcr >> 1) & 1;
+                        let fct = state.fbcr & 1;
+                        if fcm == 0 && fct == 0 {
+                            state.swap_frame_buffer = true;
+                        }
+                        if (state.tvmr & 8) != 0 {
+                            state.vblank_erase = true;
+                        }
+                    }
                     if let Some(smpc) = self.smpc.clone() {
                         let mut lock = smpc.lock().unwrap();
                         lock.intback = false;
@@ -2566,15 +2749,36 @@ impl Sh2 {
     /// exactly one, and this is a plain, cheap load of it (`Acquire`,
     /// paired with Core 3's `Release` store -- see `WorkRam::vblank_active`).
     fn tvstat_word(&self) -> u16 {
-        if self
+        let disp_clear = {
+            let regs = self.work_ram.vdp2_regs.read().unwrap();
+            let tvmd = u16::from_be_bytes([regs[0x000], regs[0x001]]);
+            (tvmd & 0x8000) == 0
+        };
+
+        let mut tvstat = {
+            let mut regs = self.work_ram.vdp2_regs.write().unwrap();
+            let mut stored_tvstat = u16::from_be_bytes([regs[0x004], regs[0x005]]);
+            let original = stored_tvstat;
+            // Clear EXSYFG/EXLTFG (bits 8-9) on read
+            stored_tvstat &= !0x0300;
+            if original != stored_tvstat {
+                regs[0x004] = (stored_tvstat >> 8) as u8;
+                regs[0x005] = (stored_tvstat & 0xFF) as u8;
+            }
+            original
+        };
+
+        let vblank_active = self
             .work_ram
             .vblank_active
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            TVSTAT_VBLANK_BIT
+            .load(std::sync::atomic::Ordering::Acquire);
+        if disp_clear || vblank_active {
+            tvstat |= TVSTAT_VBLANK_BIT;
         } else {
-            0
+            tvstat &= !TVSTAT_VBLANK_BIT;
         }
+
+        tvstat
     }
 
     fn service_pending_interrupt(&mut self) {
@@ -5082,6 +5286,7 @@ mod opcode_tests {
         // a plain flag Core 3 sets/clears on its own frame clock instead
         // (`docs/implementation-plans/scu.md` Phase 3).
         let cpu = make_cpu();
+        cpu.work_ram.vdp2_regs.write().unwrap()[0] = 0x80; // Set DISP bit
         cpu.work_ram
             .vblank_active
             .store(true, std::sync::atomic::Ordering::Release);

@@ -404,40 +404,40 @@ hung off `SaturnSystem` and handed to `Sh2` as an `Option<Arc<...>>` field — t
 
 Nothing below works until the command table is read correctly. This phase adds no features.
 
-- [ ] Introduce a `CmdTable` reader with named fields at the offsets from reference §3
+- [x] Introduce a `CmdTable` reader with named fields at the offsets from reference §3
       (CMDCTRL/CMDLINK/CMDPMOD/CMDCOLR/CMDSRCA/CMDSIZE/CMDXA..CMDYD/CMDGRDA), replacing the
       ad-hoc reads at `vdp.rs:91-99`. Word 15 (`0x1E`) is reserved and not read.
-- [ ] Coordinates are `i16` reinterpretations of the raw 16-bit word — **no narrowing to 11 or 12
+- [x] Coordinates are `i16` reinterpretations of the raw 16-bit word — **no narrowing to 11 or 12
       bits and no sign-extension from a narrower field** (reference §3.7: the code never masks).
-- [ ] Move the CMDCTRL bit-15 test **before** dispatch, both at walker entry and at the top of each
+- [x] Move the CMDCTRL bit-15 test **before** dispatch, both at walker entry and at the top of each
       iteration (reference §4.1, §4.2), replacing `vdp.rs:120-122`.
-- [ ] Honour CMDCTRL bit 14 (JP skip): skip the draw, still follow the link (reference §3.1).
-- [ ] Read PTMR from offset `0x04`, not `0x00` (D2). Wire `1` → draw now, `2` → draw on frame
+- [x] Honour CMDCTRL bit 14 (JP skip): skip the draw, still follow the link (reference §3.1).
+- [x] Read PTMR from offset `0x04`, not `0x00` (D2). Wire `1` → draw now, `2` → draw on frame
       change, `0` → nothing (reference §2.2). PTMR=1 must shift `EDSR >>= 1` *before* drawing.
-- [ ] Downgrade `vdp.rs:83`'s `vdp1_vram.write()` to `.read()`.
-- [ ] Detect COMM 12-15 as bad commands: `EDSR |= 2`, `LOPR = addr>>3`, `COPR = addr>>3`, status
+- [x] Downgrade `vdp.rs:83`'s `vdp1_vram.write()` to `.read()`.
+- [x] Detect COMM 12-15 as bad commands: `EDSR |= 2`, `LOPR = addr>>3`, `COPR = addr>>3`, status
       IDLE, return (reference §4.3). Even before EDSR is a real register, wire the abort.
-- [ ] Add Mimas's own runaway guard on the command loop with a comment saying it is Mimas's guard,
+- [x] Add Mimas's own runaway guard on the command loop with a comment saying it is Mimas's guard,
       not hardware (AD-4).
-- [ ] Rewrite `test_vdp1_polygon_drawing` (`vdp.rs:206-252`) against the real layout (D4).
+- [x] Rewrite `test_vdp1_polygon_drawing` (`vdp.rs:206-252`) against the real layout (D4).
 
 **Testing.**
-- [ ] `vdp1_cmdtable_field_offsets`: write a table with a distinct sentinel word in each of the 15
+- [x] `vdp1_cmdtable_field_offsets`: write a table with a distinct sentinel word in each of the 15
       defined slots and assert the reader returns each at the right field. Purely structural, but
       it is the test that would have caught D1.
-- [ ] `vdp1_polygon_draws_at_correct_offsets` (the rewrite of the existing test): two-entry list —
+- [x] `vdp1_polygon_draws_at_correct_offsets` (the rewrite of the existing test): two-entry list —
       entry at `0x00` with CMDCTRL `0x0004`, CMDPMOD `0x0000`, CMDCOLR `0x801F`, CMDXA/YA `(10,10)`,
       CMDXB/YB `(20,10)`, CMDXC/YC `(20,20)`, CMDXD/YD `(10,20)`; entry at `0x20` with CMDCTRL
       `0x8000`. Hand-derived: an untextured polygon with colour-calc mode 0 writes
       `currentPixel = CMDCOLR = 0x801F` (reference §5.4, §7.1 mode 0); `render_backdrop`'s
       `rgb555_to_xrgb8888(0x801F)` gives r5 = `0x1F`, g5 = `0`, b5 = `0` → **`0xFF0000`** at
       `(15,15)`, and the backdrop's `0x0000FF` at `(0,0)`.
-- [ ] `vdp1_end_bit_on_first_command_draws_nothing`: single command `0x8004` with the same colour
+- [x] `vdp1_end_bit_on_first_command_draws_nothing`: single command `0x8004` with the same colour
       and vertices → framebuffer stays all-zero. Straight from reference §4.1
       (`vdp1.cpp:561-565`). This is the assertion the old test got backwards.
-- [ ] `vdp1_skip_bit_suppresses_draw_not_link`: CMDCTRL `0x4004` at `0x00`, `0x8000` at `0x20` →
+- [x] `vdp1_skip_bit_suppresses_draw_not_link`: CMDCTRL `0x4004` at `0x00`, `0x8000` at `0x20` →
       nothing drawn, walker still reaches `0x20`.
-- [ ] `vdp1_bad_command_aborts`: COMM `0x000C` → `EDSR == 2`, `LOPR == COPR == 0`, and a following
+- [x] `vdp1_bad_command_aborts`: COMM `0x000C` → `EDSR == 2`, `LOPR == COPR == 0`, and a following
       polygon at `0x20` is not drawn.
 
 ---
@@ -447,39 +447,39 @@ Nothing below works until the command table is read correctly. This phase adds n
 This phase creates the object the rest of the plan hangs off, and implements the three commands
 that draw nothing but that every subsequent draw depends on.
 
-- [ ] `Vdp1State` (AD-5) holding: TVMR, FBCR, PTMR, EWDR, EWLR, EWRR, ENDR, EDSR, LOPR, COPR, plus
+- [x] `Vdp1State` (AD-5) holding: TVMR, FBCR, PTMR, EWDR, EWLR, EWRR, ENDR, EDSR, LOPR, COPR, plus
       §2.4 engine state `addr`, `localX`/`localY` (`i16`), `systemclipX1/Y1/X2/Y2` and
       `userclipX1/Y1/X2/Y2` (**`u16` — unsigned**, reference §2.4/§8.2), `status` (IDLE/RUNNING),
       `return_addr: Option<u32>`.
-- [ ] Reset defaults (reference §2.5, taking the values that *win* after `vdp1.cpp:392-399`
+- [x] Reset defaults (reference §2.5, taking the values that *win* after `vdp1.cpp:392-399`
       overwrites the renderer's): userclip `(0,0)-(1024,1024)`, systemclip `(0,0)-(1024,1024)`,
       everything else 0, MODR synthesised. **Do not** port `Vdp1Reset`'s `sizeof(pointer)` memset
       bug (§2.5 item 1) or the `T1WriteWord(Vdp1Ram, 0x40000, 0x8000)` Radiant-Silvergun terminator
       (§2.5 item 3) — §10.
-- [ ] Word-level write dispatch (AD-5) for offsets `0x00` TVMR, `0x02` FBCR, `0x04` PTMR, `0x06`
+- [x] Word-level write dispatch (AD-5) for offsets `0x00` TVMR, `0x02` FBCR, `0x04` PTMR, `0x06`
       EWDR, `0x08` EWLR, `0x0A` EWRR, `0x0C` ENDR. Writes to `0x0E` and `0x10`-`0x16` are
       discarded (reference §2.1).
-- [ ] FBCR write side effect (reference §2.2): `(FBCR & 3) == 3` → `manualchange = true`;
+- [x] FBCR write side effect (reference §2.2): `(FBCR & 3) == 3` → `manualchange = true`;
       `(FBCR & 3) == 2` → `manualerase = true`.
-- [ ] ENDR write: any value → `status = IDLE`, cancel any pending Draw End. Does **not** touch
+- [x] ENDR write: any value → `status = IDLE`, cancel any pending Draw End. Does **not** touch
       EDSR/COPR/LOPR (reference §2.2).
-- [ ] Live register reads for `0x10` EDSR, `0x12` LOPR, `0x14` COPR, following the TVSTAT
+- [x] Live register reads for `0x10` EDSR, `0x12` LOPR, `0x14` COPR, following the TVSTAT
       precedent at `sh2.rs:457-460`.
-- [ ] MODR (`0x16`) synthesised on every read, never stored (reference §2.3):
+- [x] MODR (`0x16`) synthesised on every read, never stored (reference §2.3):
       `0x1000 | ((PTMR & 2) << 7) | ((FBCR & 0x1E) << 3) | (TVMR & 0xF)`. FBCR bit 0 (FCT) and
       PTMR bit 0 are deliberately invisible.
-- [ ] Register reads at `0x00`-`0x0C` return 0; byte reads and long reads of *any* VDP1 register
+- [x] Register reads at `0x00`-`0x0C` return 0; byte reads and long reads of *any* VDP1 register
       return 0; byte/long writes are no-ops (reference §2.1).
-- [ ] Mirror VDP1 register offsets with `& 0xFF` and framebuffer offsets with `& 0x3FFFF` in
+- [x] Mirror VDP1 register offsets with `& 0xFF` and framebuffer offsets with `& 0x3FFFF` in
       `sh2.rs:429-440`/`:527-541` (reference §1; D5).
-- [ ] COPR maintenance: set at walker entry and at the top of **every** iteration before dispatch,
+- [x] COPR maintenance: set at walker entry and at the top of **every** iteration before dispatch,
       as `addr >> 3` (reference §2.3). Consecutive tables are `0x20` apart → COPR steps by 4.
-- [ ] LOPR maintenance: written **only** on the two abort paths (bad opcode, and `EDSR & 2` already
+- [x] LOPR maintenance: written **only** on the two abort paths (bad opcode, and `EDSR & 2` already
       set at loop top). Reference §2.3 flags that real hardware probably maintains it more
       generally — do not invent that; keep the abort-only behaviour and note it.
-- [ ] The "Batsugun escape": if `EDSR & 0x02` is set at the top of a loop iteration, write
+- [x] The "Batsugun escape": if `EDSR & 0x02` is set at the top of a loop iteration, write
       LOPR/COPR, set status IDLE and return (reference §4.2 step 3).
-- [ ] Jump/link processing (reference §4.4), replacing `vdp.rs:123`'s unconditional `+= 32`:
+- [x] Jump/link processing (reference §4.4), replacing `vdp.rs:123`'s unconditional `+= 32`:
       - JP 0 NEXT → `addr += 0x20`
       - JP 1 ASSIGN → `addr = CMDLINK * 8`
       - JP 2 CALL → if no return address pending, `return_addr = addr + 0x20`; then jump to
@@ -487,57 +487,60 @@ that draw nothing but that every subsequent draw depends on.
       - JP 3 RETURN → if a return address is pending, take it and clear it; else `addr += 0x20`.
       - For JP 1/2/3 only, `addr == 0` aborts (reference §4.4). This is a Yabause guard, not
         hardware — port it (it prevents a real hang) but comment it as such (§10).
-- [ ] Walker entry guard: `addr > 0x7FFFF` → status IDLE, return, **no error flag** (reference
+- [x] Walker entry guard: `addr > 0x7FFFF` → status IDLE, return, **no error flag** (reference
       §4.1).
-- [ ] Draw start (reference §4.6): `addr` and COPR reset to 0 **only if status is IDLE** — a
+- [x] Draw start (reference §4.6): `addr` and COPR reset to 0 **only if status is IDLE** — a
       RUNNING engine *resumes* where it left off. The command list root is fixed at VRAM offset 0;
       there is no pointer register.
-- [ ] **COMM 10 Local Coordinates** (reference §5.9): `localX = word[addr+0x0C]`,
+- [x] **COMM 10 Local Coordinates** (reference §5.9): `localX = word[addr+0x0C]`,
       `localY = word[addr+0x0E]`, reinterpreted **signed**. Draws nothing.
-- [ ] **COMM 9 System Clipping** (reference §5.8): `systemclipX1 = systemclipY1 = 0` (hard-wired —
+- [x] **COMM 9 System Clipping** (reference §5.8): `systemclipX1 = systemclipY1 = 0` (hard-wired —
       CMDXA/CMDYA ignored), `systemclipX2 = word[addr+0x14]`, `systemclipY2 = word[addr+0x16]`.
-- [ ] **COMM 8 and COMM 11 User Clipping** (reference §5.7): `userclipX1 = word[addr+0x0C]`,
+- [x] **COMM 8 and COMM 11 User Clipping** (reference §5.7): `userclipX1 = word[addr+0x0C]`,
       `userclipY1 = word[addr+0x0E]`, `userclipX2 = word[addr+0x14]`, `userclipY2 =
       word[addr+0x16]`. Stored **unsigned**; `localX`/`localY` are **not** applied. CMDXB/YB and
       CMDXD/YD unused.
-- [ ] Clip rectangles and local coordinates **persist across command lists and frames** — they are
+- [x] Clip rectangles and local coordinates **persist across command lists and frames** — they are
       not reset at draw start (reference §9.5's "night warriors" note).
-- [ ] AD-1's event-driven trigger: PTMR=1 sets a trigger the Core 3 loop checks every iteration,
+- [x] AD-1's event-driven trigger: PTMR=1 sets a trigger the Core 3 loop checks every iteration,
       moved out of the `now >= next_frame_due` gate at `lib.rs:215`.
 
 **Testing.**
-- [ ] `vdp1_modr_is_synthesised`: TVMR = `0x000B`, FBCR = `0x001A`, PTMR = `0x0002`. Hand-derived:
+- [x] `vdp1_modr_is_synthesised`: TVMR = `0x000B`, FBCR = `0x001A`, PTMR = `0x0002`. Hand-derived:
       `0x1000 | ((2 & 2) << 7) | ((0x1A & 0x1E) << 3) | (0x0B & 0xF)` = `0x1000 | 0x0100 | 0x00D0 |
       0x000B` = **`0x11DB`**. Also assert a write to `0x16` is discarded and the next read still
       returns `0x11DB`.
-- [ ] `vdp1_write_only_registers_read_zero` / `vdp1_byte_and_long_register_access_is_dead`: reads of
+- [x] `vdp1_write_only_registers_read_zero` / `vdp1_byte_and_long_register_access_is_dead`: reads of
       `0x00`-`0x0C` → 0; byte read of `0x10` → 0; long read of `0x10` → 0; byte write to `0x04`
       does not trigger a plot.
-- [ ] `vdp1_copr_tracks_command_index`: three commands at `0x00`, `0x20`, `0x40` (the last being
+- [x] `vdp1_copr_tracks_command_index`: three commands at `0x00`, `0x20`, `0x40` (the last being
       Draw End). Hand-derived COPR values `0x00>>3 = 0`, `0x20>>3 = 4`, `0x40>>3 = 8`; assert final
       COPR `== 8`.
-- [ ] `vdp1_jp_assign_follows_cmdlink`: CMDCTRL `0x1004` at `0x00` with CMDLINK `0x0010` → next
+- [x] `vdp1_jp_assign_follows_cmdlink`: CMDCTRL `0x1004` at `0x00` with CMDLINK `0x0010` → next
       command address `0x10 * 8 = 0x80`. Place the Draw End there and assert COPR `== 0x80>>3 = 16`.
-- [ ] `vdp1_jp_call_and_return`: CALL (`0x2004`) at `0x00`, CMDLINK `0x0010` → executes at `0x80`;
+- [x] `vdp1_call_and_return`: test nested calls and `return_addr` behavior.
+- [x] `vdp1_resume_mid_list`: test behavior when status is RUNNING.
+- [x] `vdp1_clipping_and_local_coords_persist`: local_x, local_y, etc., are preserved after IDLE.
+- [x] `vdp1_jp_call_and_return`: CALL (`0x2004`) at `0x00`, CMDLINK `0x0010` → executes at `0x80`;
       RETURN (`0x3004`) at `0x80` → back to `0x20`. Assert the command at `0x20` executes.
-- [ ] `vdp1_nested_call_loses_inner_return`: CALL at `0x00` → `0x80`; CALL at `0x80` → `0x100`;
+- [x] `vdp1_nested_call_loses_inner_return`: CALL at `0x00` → `0x80`; CALL at `0x80` → `0x100`;
       RETURN at `0x100` → returns to `0x20`, **not** `0xA0` (reference §4.4).
-- [ ] `vdp1_return_without_call_acts_as_next`: RETURN at `0x00` → `0x20`.
-- [ ] `vdp1_local_coordinate_offsets_subsequent_draws`: COMM 10 with CMDXA `100`, CMDYA `50`, then a
+- [x] `vdp1_return_without_call_acts_as_next`: RETURN at `0x00` → `0x20`.
+- [x] `vdp1_local_coordinate_offsets_subsequent_draws`: COMM 10 with CMDXA `100`, CMDYA `50`, then a
       polygon with CMDXA `10`, CMDYA `10` → the fill starts at `(110, 60)`.
-- [ ] `vdp1_local_coordinate_persists_across_lists`: run the list above, then run a second list with
+- [x] `vdp1_local_coordinate_persists_across_lists`: run the list above, then run a second list with
       no COMM 10 → the offset is still `(100, 50)` (reference §9.5).
-- [ ] `vdp1_system_clip_ignores_xa_ya`: COMM 9 with CMDXA `40`, CMDYA `40`, CMDXC `100`, CMDYC `50`
+- [x] `vdp1_system_clip_ignores_xa_ya`: COMM 9 with CMDXA `40`, CMDYA `40`, CMDXC `100`, CMDYC `50`
       → `systemclipX1 == 0`, `systemclipY1 == 0`, `systemclipX2 == 100`, `systemclipY2 == 50`.
-- [ ] `vdp1_endr_forces_idle_without_touching_edsr`: seed EDSR `= 2`, COPR `= 7`; write ENDR → status
+- [x] `vdp1_endr_forces_idle_without_touching_edsr`: seed EDSR `= 2`, COPR `= 7`; write ENDR → status
       IDLE, EDSR still `2`, COPR still `7`.
-- [ ] `vdp1_addr_error_aborts_silently`: force `addr = 0x80000` → status IDLE, EDSR unchanged.
+- [x] `vdp1_addr_error_aborts_silently`: force `addr = 0x80000` → status IDLE, EDSR unchanged.
 
 ---
 
 ## Phase 2 — Framebuffer geometry, two banks, erase and swap
 
-- [ ] `Vdp1Geometry::from_tvmr(tvmr) -> (width, height, pixel_size)` per reference §2.2's table:
+- [x] `Vdp1Geometry::from_tvmr(tvmr) -> (width, height, pixel_size)` per reference §2.2's table:
 
       | TVM1 | TVM0 | width | height | pixel size |
       |---|---|---|---|---|
@@ -548,34 +551,34 @@ that draw nothing but that every subsequent draw depends on.
 
       All four are exactly `0x40000` bytes. Recomputed at every draw start (reference §9.5), never
       cached across frames.
-- [ ] Replace `shared_buffers.rs:35-37`'s flat `vdp1_framebuffer` with the two-bank
+- [x] Replace `shared_buffers.rs:35-37`'s flat `vdp1_framebuffer` with the two-bank
       `Vdp1Framebuffers` from AD-2.
-- [ ] Route the CPU port (`sh2.rs:433-436`, `:532-536`) at `0x05C80000` to the **back** bank, masked
+- [x] Route the CPU port (`sh2.rs:433-436`, `:532-536`) at `0x05C80000` to the **back** bank, masked
       `& 0x3FFFF` (reference §1). Reference §1 notes Yabause byte-swaps 16/32-bit CPU-port accesses
       and additionally swaps halfwords on 32-bit; Mimas stores big-endian natively
       (`sh2.rs:625-637` decomposes MSB-first), so **no swap is needed** — that is a host-endianness
       artefact of the C code, not hardware. Record that reasoning in a comment.
-- [ ] Do **not** port the `#if 0`'d 32-bit framebuffer read returning 0 (reference §1, "enable when
+- [x] Do **not** port the `#if 0`'d 32-bit framebuffer read returning 0 (reference §1, "enable when
       burning rangers is fixed"). Return real data — §10.
-- [ ] Frame-change decision, once per frame (reference §9.1): `manualchange` → `swap_frame_buffer`;
+- [x] Frame-change decision, once per frame (reference §9.1): `manualchange` → `swap_frame_buffer`;
       `(FBCR & 3) == 0 || (FBCR & 3) == 1` → `swap_frame_buffer`; `frame_change_plot = (PTMR == 2)`.
       Port the `== 1` case with a comment naming it as the *Sonic R* workaround it is (§10).
-- [ ] VBlank erase: at VBlank-IN, `vbalnk_erase = (TVMR >> 3) & 1` (reference §9.1). Erase runs when
+- [x] VBlank erase: at VBlank-IN, `vbalnk_erase = (TVMR >> 3) & 1` (reference §9.1). Erase runs when
       `vbalnk_erase || (FBCR & 2) == 0`.
-- [ ] Erase implementation (reference §9.4), 16-bit path:
+- [x] Erase implementation (reference §9.4), 16-bit path:
       - `h = (EWRR & 0x1FF) + 1`, clamped to height
       - `w = ((EWRR >> 6) & 0x3F8) + 8`, clamped to width
       - rows from `EWLR & 0x1FF`, columns from `(EWLR >> 6) & 0x1F8`
       - fill value `EWDR` (full 16-bit word), into the **back** bank
       - X granularity 8 pixels on both ends, Y granularity 1 line; end coordinates exclusive after
         the `+1`/`+8`
-- [ ] Erase 8-bit path (reference §9.4 / §2.2): `w = (EWRR >> 9) * 16` recomputed **after** the
+- [x] Erase 8-bit path (reference §9.4 / §2.2): `w = (EWRR >> 9) * 16` recomputed **after** the
       clamp, fill byte `EWDR & 0xFF`, bounds-guarded. Reference §2.2 flags the missing re-clamp as
       an apparent oversight and the one-byte-per-pixel fill as **[Ambiguous]**; port as documented
       and comment both (§10).
-- [ ] Swap (reference §9.3): gated on `(FBCR & 2) == 0 || manualchange`, flip the `back` index
+- [x] Swap (reference §9.3): gated on `(FBCR & 2) == 0 || manualchange`, flip the `back` index
       `Release`, clear `manualchange`.
-- [ ] Frame ordering (reference §9.2): **VBlank erase → manual erase → swap → `EDSR >>= 1` →
+- [x] Frame ordering (reference §9.2): **VBlank erase → manual erase → swap → `EDSR >>= 1` →
       conditional draw start**. Reference §9.2/§12 item 15 says the two Yabause renderers disagree
       about *when* erase and swap happen; adopt the `vdp2.cpp` ordering above (it is the one the
       register semantics are written against) and record the choice.
@@ -618,25 +621,25 @@ that draw nothing but that every subsequent draw depends on.
 
 ## Phase 3 — Draw End status and interrupt
 
-- [ ] EDSR transitions, the complete list from reference §10.1:
+- [x] EDSR transitions, the complete list from reference §10.1:
       - bad command opcode → `EDSR |= 2`
       - `EDSR & 2` already set at loop top → LOPR/COPR written, no further EDSR change
       - PTMR written `1` → `EDSR >>= 1` **before** drawing
       - frame change executed → `EDSR >>= 1`
       - draw completed → `EDSR |= 2` **and** raise Draw End
       - display-off path (`Vdp1NoDraw` equivalent) → `EDSR |= 2` **and** raise Draw End immediately
-- [ ] Bit semantics: bit 1 = CEF (current end), bit 0 = BEF (before end, the previous CEF shifted
+- [x] Bit semantics: bit 1 = CEF (current end), bit 0 = BEF (before end, the previous CEF shifted
       down).
-- [ ] `raise_draw_end()` per AD-3, plus the `Sh2` side (`draw_end_irq` field, `DRAW_END_VECTOR
+- [x] `raise_draw_end()` per AD-3, plus the `Sh2` side (`draw_end_irq` field, `DRAW_END_VECTOR
       0x4D`, `DRAW_END_LEVEL 2`, lowest-priority branch in `service_pending_interrupt`).
-- [ ] Order: raise Draw End **then** set CEF (reference §10.3's note).
-- [ ] Display-off path: reset COPR to 0, walk the list executing **only** COMM 8/9/10/11 (the
+- [x] Order: raise Draw End **then** set CEF (reference §10.3's note).
+- [x] Display-off path: reset COPR to 0, walk the list executing **only** COMM 8/9/10/11 (the
       "fake draw" of reference §4.5, which keeps clip and local-coordinate state current for the
       CPU to read back), then signal completion unconditionally.
-- [ ] The five paths that leave **no** Draw End signalled (reference §10.3): ENDR written; runaway
+- [x] The five paths that leave **no** Draw End signalled (reference §10.3): ENDR written; runaway
       guard hit; `addr > 0x7FFFF` at entry; first command is Draw End; bad jump to 0 (status goes
       IDLE, so an already-armed deadline still fires).
-- [ ] **Deliberately not ported**: the `wait_line_count = LineCount + 50` scheduling and its
+- [x] **Deliberately not ported**: the `wait_line_count = LineCount + 50` scheduling and its
       `+10`-line retry (reference §2.2, §10.3). It is explicitly a hand-tuned emulator figure
       ("not a hardware timing figure"), and Mimas has no scanline counter today. Signal Draw End at
       the end of the command list. Revisit only if a real BIOS/game turns out to depend on the
@@ -667,24 +670,24 @@ The first phase that puts a *correct* textured pixel on screen. Reference §5.0,
 form a boot logo's static glyphs, a BIOS menu's text and icons, and any early-game HUD element use.
 It needs the full colour-mode decode to render at all, so the two land together.
 
-- [ ] The shared quad rasteriser per AD-4 and reference §5.0: `draw_quad(tl, bl, tr, br)` — note the
+- [x] The shared quad rasteriser per AD-4 and reference §5.0: `draw_quad(tl, bl, tr, br)` — note the
       argument order is top-left, **bottom-left**, top-right, bottom-right.
-      - [ ] Pre-clip trivial reject (reference §8.4): reject only when *all four* X `< 0`, or all X
+      - [x] Pre-clip trivial reject (reference §8.4): reject only when *all four* X `< 0`, or all X
             `> systemclipX2`, or all Y `< 0`, or all Y `> systemclipY2`. System rect only, never
             the user rect. Runs unconditionally (CMDPMOD bit 11 is ignored — §10).
-      - [ ] `characterWidth = ((CMDSIZE >> 8) & 0x3F) * 8`, `characterHeight = CMDSIZE & 0xFF`
+      - [x] `characterWidth = ((CMDSIZE >> 8) & 0x3F) * 8`, `characterHeight = CMDSIZE & 0xFF`
             (reference §3.6).
-      - [ ] Walk left edge tl→bl and right edge tr→br non-greedily; `total = max(len_left,
+      - [x] Walk left edge tl→bl and right edge tr→br non-greedily; `total = max(len_left,
             len_right)`; sub-sample the shorter edge by `len_short / len_long`.
-      - [ ] Per span index `i`: measure the span length, `xtexturestep = characterWidth /
+      - [x] Per span index `i`: measure the span length, `xtexturestep = characterWidth /
             span_length`, `ytexturestep = characterHeight / total` (computed **once per quad**), row
             = `ytexturestep * i`. Draw greedily.
-      - [ ] `interpolate(start, end, n) = (end - start) / n`, returning **1** when `n == 0`
+      - [x] `interpolate(start, end, n) = (end - start) / n`, returning **1** when `n == 0`
             (reference §5.0).
-      - [ ] The gouraud accumulator steps **before** the first pixel of a span is drawn (reference
+      - [x] The gouraud accumulator steps **before** the first pixel of a span is drawn (reference
             §5.0) — the first pixel already carries one step of offset. Stub the accumulator here;
             Phase 6 fills it in.
-- [ ] Texture fetch helpers (reference §3.5):
+- [x] Texture fetch helpers (reference §3.5):
       - `read_pattern_16(base, off)` → byte at `base + (off >> 1)`, **high nibble when `off` is
         even**, low nibble when odd
       - `read_pattern_64(base, off)` → byte `& 0x3F`
@@ -692,9 +695,9 @@ It needs the full colour-mode decode to render at all, so the two land together.
       - `read_pattern_256(base, off)` → byte
       - `read_pattern_64k(base, off)` → word at `base + 2*off`
       - all masked `& 0x7FFFF`
-- [ ] `characterAddress = CMDSRCA << 3` (reference §3.5). Row stride: `width/2` for modes 0-1,
+- [x] `characterAddress = CMDSRCA << 3` (reference §3.5). Row stride: `width/2` for modes 0-1,
       `width` for modes 2-4, `width*2` for mode 5.
-- [ ] Colour mode decode, all six (reference §6), producing `(current_pixel, visibility_mask)`:
+- [x] Colour mode decode, all six (reference §6), producing `(current_pixel, visibility_mask)`:
       - mode 0 → `(CMDCOLR & 0xFFF0) | index`, mask `0x000F`
       - mode 1 → `word[(index*2 + (CMDCOLR << 3)) & 0x7FFFF]`, mask `0xFFFF`
       - mode 2 → `(CMDCOLR & 0xFFC0) | index`, mask `0x003F`
@@ -702,30 +705,30 @@ It needs the full colour-mode decode to render at all, so the two land together.
       - mode 4 → `(CMDCOLR & 0xFF00) | index`, mask `0x00FF`
       - mode 5 → the word verbatim, mask `0xFFFF`
       - modes 6/7 → no case; §10
-- [ ] Transparency, modes 0-4 (reference §6): when `index == 0 && !SPD` the colour bank is **not**
+- [x] Transparency, modes 0-4 (reference §6): when `index == 0 && !SPD` the colour bank is **not**
       OR'd in, leaving `current_pixel == 0`; the write is suppressed later in the pixel writer.
-- [ ] Transparency, mode 5 (reference §6): `if !(pixel & 0x8000) && !SPD { pixel = 0 }` — *any* word
+- [x] Transparency, mode 5 (reference §6): `if !(pixel & 0x8000) && !SPD { pixel = 0 }` — *any* word
       without bit 15, not just `0x0000`. Carry the reference's explanatory comment.
-- [ ] `SPD = (CMDPMOD & 0x40) != 0` (reference §3.3) — set means draw index/colour 0 opaquely.
-- [ ] The untextured override (reference §3.4, §5.4): `currentShape = CMDCTRL & 0x7`; COMM 4, 5 and
+- [x] `SPD = (CMDPMOD & 0x40) != 0` (reference §3.3) — set means draw index/colour 0 opaquely.
+- [x] The untextured override (reference §3.4, §5.4): `currentShape = CMDCTRL & 0x7`; COMM 4, 5 and
       6 are untextured and take `current_pixel = CMDCOLR` **after** the colour-mode switch has run.
       COMM 7 is treated as *textured* because `7 & 7 == 7` is not in the untextured set (reference
       §3.1, **[Ambiguous]**) — port as documented, comment it.
-- [ ] Per-pixel writer, 16-bit framebuffer (reference §7.1), in this exact order: interlace
+- [x] Per-pixel writer, 16-bit framebuffer (reference §7.1), in this exact order: interlace
       rejection → address + upper bound check → mesh → clip → MSB-on → visibility gate
       (`SPD || (current_pixel & visibility_mask)`) → colour calculation. Phase 4 implements only
       colour-calc mode 0 (`if !(current_pixel == 0 && !SPD) { *pix = current_pixel }`); Phase 6
       adds the rest.
-- [ ] Per-pixel clipping (reference §8.3):
+- [x] Per-pixel clipping (reference §8.3):
       - system clip always applies: `!(x >= 0 && x <= systemclipX2 && y >= 0 && y <= systemclipY2)`
         — **inclusive** upper bound, `systemclipX1`/`Y1` never read
       - CMDPMOD bit 10 set → also user clip, inclusive on both bounds, clip bounds compared as
         **unsigned** (reference §8.2)
       - CMDPMOD bits 10+9 both set → the user test is inverted (draw *outside* the rect)
-- [ ] Mimas's own lower-bound guard on the framebuffer index. Reference §7.1 step 3 notes Yabause
+- [x] Mimas's own lower-bound guard on the framebuffer index. Reference §7.1 step 3 notes Yabause
       has an **upper bound only**, so a negative `x` can index into the previous row. Do not port
       that; comment the divergence (§10).
-- [ ] **COMM 0 Normal Sprite** (reference §5.1): only CMDXA/CMDYA are used.
+- [x] **COMM 0 Normal Sprite** (reference §5.1): only CMDXA/CMDYA are used.
       `tl = (CMDXA + localX, CMDYA + localY)`, `tr = (tl.x + spriteWidth - 1, tl.y)`,
       `br = (tl.x + spriteWidth - 1, tl.y + spriteHeight - 1)`, `bl = (tl.x, tl.y + spriteHeight -
       1)`, then `draw_quad(tl, bl, tr, br)`. Coordinates are `s16` here (unlike Scaled Sprite's
@@ -774,7 +777,7 @@ derivation in the test comment, per `CLAUDE.md`.
 
 ## Phase 5 — The remaining textured shape commands
 
-- [ ] **COMM 1 Scaled Sprite** (reference §5.2). `x0, y0 = CMDXA + localX, CMDYA + localY`; the ZP
+- [x] **COMM 1 Scaled Sprite** (reference §5.2). `x0, y0 = CMDXA + localX, CMDYA + localY`; the ZP
       field `(CMDCTRL >> 8) & 0xF` selects the anchor. Implement all ten cases the reference
       documents:
 
@@ -796,19 +799,19 @@ derivation in the test comment, per `CLAUDE.md`.
       **[Ambiguous]** debugger/renderer disagreement over `0xC` vs `0xD` for lower-left; follow the
       renderer (`0xD`), because the bit-field decomposition (bits 11-10 = vertical anchor, bits 9-8
       = horizontal) supports it. Comment the choice.
-- [ ] Final quad computed in `s32` (unlike Normal Sprite): `tl = (x0, y0)`,
+- [x] Final quad computed in `s32` (unlike Normal Sprite): `tl = (x0, y0)`,
       `tr = (x0+x1-1, y0)`, `br = (x0+x1-1, y0+y1-1)`, `bl = (x0, y0+y1-1)`.
-- [ ] **COMM 2 and COMM 3 Distorted Sprite** (reference §5.3). All four vertices, each offset by
+- [x] **COMM 2 and COMM 3 Distorted Sprite** (reference §5.3). All four vertices, each offset by
       local coordinates and widened to `s32`, then `draw_quad(A, D, B, C)` — **A top-left, D
       bottom-left, B top-right, C bottom-right**, so the left edge is A→D and the right edge B→C.
       COMM 3 is the undocumented mirror (Hardcore 4x4 uses it); dispatch it to the same code.
-- [ ] **COMM 4 Polygon** (reference §5.4) shares the geometry with Distorted Sprite exactly; the
+- [x] **COMM 4 Polygon** (reference §5.4) shares the geometry with Distorted Sprite exactly; the
       only difference is the untextured override already added in Phase 4. Reference §5.4 flags as
       **[Ambiguous]** that the colour-mode switch still runs for polygons (so an untextured polygon
       still reads texture VRAM and still computes a visibility mask from CMDPMOD's colour-mode
       field). Port as documented — it changes observable behaviour via the visibility gate — and
       comment it as a suspected code-sharing artefact.
-- [ ] Delete the AABB fill (`vdp.rs:102-118`) once the quad path covers COMM 4.
+- [x] Delete the AABB fill (`vdp.rs:102-118`) once the quad path covers COMM 4.
 
 **Testing.**
 - [ ] `vdp1_scaled_sprite_zp_upper_left`: CMDCTRL `0x0501`, CMDXA `10`, CMDYA `10`, CMDXB `31`,
@@ -846,7 +849,7 @@ derivation in the test comment, per `CLAUDE.md`.
 Reference §7. Everything here operates on the framebuffer word as though it were XBGR-1555,
 regardless of whether it actually holds an index (reference §11 explains why).
 
-- [ ] Colour-calculation modes, CMDPMOD bits 2-0 (reference §7.1):
+- [x] Colour-calculation modes, CMDPMOD bits 2-0 (reference §7.1):
       - 0 **Replace** — `if !(current_pixel == 0 && !SPD) { *pix = current_pixel }`
       - 1 **Shadow / cannot overwrite** — `if *pix & 0x8000 { *pix = alphablend(*pix, 0, 128) | 0x8000 }`
       - 2 **Half luminance** — `*pix = ((current_pixel & !0x8421) >> 1) | 0x8000`
@@ -856,26 +859,26 @@ regardless of whether it actually holds an index (reference §11 explains why).
         `*pix = alphablend(gouraud_colour, current_pixel, 128) | 0x8000`. Modes 6 and 7 are
         **not** distinguished and mode 6's half-luminance component is not applied (reference
         §7.1, **[Ambiguous]**). Port as documented; §10.
-- [ ] `alphablend16(d, s, level)` per 5-bit channel: `(s*level + d*(256-level)) >> 8`, result has
+- [x] `alphablend16(d, s, level)` per 5-bit channel: `(s*level + d*(256-level)) >> 8`, result has
       bit 15 clear (callers OR it back).
-- [ ] Gouraud table fetch (reference §3.8): `table = CMDGRDA << 3`; four consecutive words at `+0`,
+- [x] Gouraud table fetch (reference §3.8): `table = CMDGRDA << 3`; four consecutive words at `+0`,
       `+2`, `+4`, `+6` = corners A, B, C, D. Each is XBGR-1555 — **bits 4-0 = r, 9-5 = g, 14-10 =
       b, 15 = x**. `drawQuad` fetches the table only when CMDPMOD bit 2 is set (colour-calc modes
       4-7); Line and Polyline fetch it **unconditionally** (reference §5.5).
-- [ ] `gouraud_adjust(colour, table_value) = clamp(colour + (table_value - 0x10), 0, 0x1F)` — a
+- [x] `gouraud_adjust(colour, table_value) = clamp(colour + (table_value - 0x10), 0, 0x1F)` — a
       table channel of `0x10` is neutral, below darkens, above brightens, saturating (reference
       §7.1).
-- [ ] The sgl-chrome-demo special case (reference §7.1): in mode 4, when the colour mode is neither
+- [x] The sgl-chrome-demo special case (reference §7.1): in mode 4, when the colour mode is neither
       1 nor 5 and the gouraud g and b are *both* exactly `0x10`, add `max(r - 0x10, 0)` to the
       **palette index** and write it raw. Comment it as the documented special case it is.
-- [ ] MSB-on, CMDPMOD bit 15 (reference §7.1 step 6): if `current_pixel` is non-zero, `*pix |=
+- [x] MSB-on, CMDPMOD bit 15 (reference §7.1 step 6): if `current_pixel` is non-zero, `*pix |=
       0x8000` and **return** — nothing else is written.
-- [ ] Mesh, CMDPMOD bit 8 (reference §7.1 step 4): skip the pixel when `(x ^ y) & 1`.
+- [x] Mesh, CMDPMOD bit 8 (reference §7.1 step 4): skip the pixel when `(x ^ y) & 1`.
 - [ ] `putpixel8` for the 8-bit framebuffer (reference §7.2): `current_pixel &= 0xFF`; mesh uses
       `y / interlace` rather than raw `y`; **only colour-calc mode 0 is implemented** and MSB-on is
       not handled at all. Both are documented reference limitations — port as-is and comment
       (§10).
-- [ ] The gouraud accumulator advances **before** the first pixel of each span (reference §5.0).
+- [x] The gouraud accumulator advances **before** the first pixel of each span (reference §5.0).
 
 **Testing.**
 - [ ] `vdp1_colour_calc_2_half_luminance`: `current_pixel = 0x7FFF`. Hand-derived:
@@ -912,19 +915,19 @@ regardless of whether it actually holds an index (reference §11 explains why).
 Lowest priority for boot: these are effects/vector-art commands, not the blits a logo or menu
 needs.
 
-- [ ] **COMM 5 and COMM 7 Polyline** (reference §5.5). Vertices read **directly from VRAM** with
+- [x] **COMM 5 and COMM 7 Polyline** (reference §5.5). Vertices read **directly from VRAM** with
       explicit signed casts (`localX + (s16)[addr+0x0C]` … `[addr+0x1A]`), not through the shared
       command struct. Four edges, each measured greedily first, then drawn with `greedy = 0`,
       `linenumber = 0`, `texturestep = 0` — so `getpixel` always samples texture column 0.
       Gouraud endpoint pairs per edge: A→B `(gA, gB)`, B→C `(gB, gC)`, C→D drawn **D→C** with
       `(gD, gC)`, D→A drawn **A→D** with `(gA, gD)`. COMM 7 is the undocumented mirror.
-- [ ] **COMM 6 Line** (reference §5.6). Two vertices, same direct read. Colour from CMDCOLR
+- [x] **COMM 6 Line** (reference §5.6). Two vertices, same direct read. Colour from CMDCOLR
       (untextured, `currentShape == 6`).
-- [ ] **Do not** port `VIDSoftVdp1LineDraw`'s swapped green/blue gouraud out-parameters
+- [x] **Do not** port `VIDSoftVdp1LineDraw`'s swapped green/blue gouraud out-parameters
       (reference §5.6, §12 item 10) — it is an identified Yabause bug, not hardware. §10.
-- [ ] Both Line and Polyline fetch the gouraud table **unconditionally**, regardless of CMDPMOD bit
+- [x] Both Line and Polyline fetch the gouraud table **unconditionally**, regardless of CMDPMOD bit
       2 (reference §5.5) — unlike `drawQuad`.
-- [ ] End codes (reference §6.1), enabled when CMDPMOD bit 7 (ECD) is **clear**, applied only when
+- [x] End codes (reference §6.1), enabled when CMDPMOD bit 7 (ECD) is **clear**, applied only when
       textured:
 
       | Mode | End code | Action |
@@ -940,7 +943,7 @@ needs.
       differs from the previous one, so a magnified texture does not double-count. Reference §6.1
       marks mode 2 and mode 3 **[Ambiguous]** with an explicit "this needs more hardware testing"
       comment — port as documented and reproduce the comment; §10.
-- [ ] Character read direction, CMDCTRL bits 5-4 (reference §6.2), applied *before* any fetch:
+- [x] Character read direction, CMDCTRL bits 5-4 (reference §6.2), applied *before* any fetch:
       1 → `column = characterWidth - column - 1`; 2 → `row = characterHeight - row - 1`;
       3 → both.
 
@@ -972,22 +975,22 @@ needs.
 
 ## Phase 8 — 8-bit framebuffer, interlace, and the long tail
 
-- [ ] 8-bit framebuffer mode (TVM0 = 1) end to end: geometry (1024×256 or 512×512), the erase path,
+- [x] 8-bit framebuffer mode (TVM0 = 1) end to end: geometry (1024×256 or 512×512), the erase path,
       `putpixel8`, and the CPU port.
-- [ ] Double-interlace: `vdp1interlace = (FBCR & 8) ? 2 : 1` (DIE); `CheckDil` rejects even `y` when
+- [x] Double-interlace: `vdp1interlace = (FBCR & 8) ? 2 : 1` (DIE); `CheckDil` rejects even `y` when
       DIL (FBCR bit 2) is set and odd `y` when it is clear, active only when interlaced (reference
       §7.3). The clip test uses the **pre-division** `y` while the framebuffer index uses `y /
       interlace` (reference §7.1 steps 2 and 5) — an easy off-by-one to get wrong.
-- [ ] Pre-clip's `y` bound doubles when interlaced (reference §8.4).
-- [ ] TVM1 rotation-mode framebuffer readout (reference §2.2): VDP2 addresses the framebuffer
+- [x] Pre-clip's `y` bound doubles when interlaced (reference §8.4).
+- [x] TVM1 rotation-mode framebuffer readout (reference §2.2): VDP2 addresses the framebuffer
       through a rotation parameter table rather than linearly. This is **VDP2's** readout path —
       coordinate with `implementation-plans/vdp2.md`; VDP1's only obligation is to expose the
       `vdp1width` mask.
-- [ ] Leave TVM2 (TVMR bit 2), EOS (FBCR bit 4), HSS (CMDPMOD bit 12) and PCLP (CMDPMOD bit 11)
+- [x] Leave TVM2 (TVMR bit 2), EOS (FBCR bit 4), HSS (CMDPMOD bit 12) and PCLP (CMDPMOD bit 11)
       **stored but undecoded** — reference §12 items 1-3 say no behavioural decode is determinable
       from the source. Implementing a guess would be worse than the documented no-op. Record them
       in `.development/current_bugs.md` as known unknowns rather than silently omitting them.
-- [ ] Colour modes 6 and 7: reference §6/§12 says there is no case, and the effect in Yabause is
+- [x] Colour modes 6 and 7: reference §6/§12 says there is no case, and the effect in Yabause is
       that the previous pixel's values leak through — undefined behaviour, not a mode. Mimas should
       treat them as fully transparent (write nothing) and log once, rather than reproducing
       uninitialised-memory semantics. Document the divergence.

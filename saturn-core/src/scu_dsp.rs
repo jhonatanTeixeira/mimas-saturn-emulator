@@ -1001,7 +1001,14 @@ pub(crate) fn read_long(work_ram: &WorkRam, address: u32) -> u32 {
             read_long_from(&work_ram.vdp1_vram.read().unwrap()[..], off)
         }
         Some((DspRegion::Vdp1Framebuffer, off)) => {
-            read_long_from(&work_ram.vdp1_framebuffer.read().unwrap()[..], off)
+            let back = work_ram
+                .vdp1_framebuffers
+                .back
+                .load(std::sync::atomic::Ordering::Relaxed);
+            read_long_from(
+                &work_ram.vdp1_framebuffers.banks[back].read().unwrap()[..],
+                off,
+            )
         }
         Some((DspRegion::Vdp1Regs, off)) => {
             read_long_from(&work_ram.vdp1_regs.read().unwrap()[..], off)
@@ -1035,11 +1042,17 @@ pub(crate) fn write_long(work_ram: &WorkRam, address: u32, val: u32) {
         Some((DspRegion::Vdp1Vram, off)) => {
             write_long_to(&mut work_ram.vdp1_vram.write().unwrap()[..], off, val)
         }
-        Some((DspRegion::Vdp1Framebuffer, off)) => write_long_to(
-            &mut work_ram.vdp1_framebuffer.write().unwrap()[..],
-            off,
-            val,
-        ),
+        Some((DspRegion::Vdp1Framebuffer, off)) => {
+            let back = work_ram
+                .vdp1_framebuffers
+                .back
+                .load(std::sync::atomic::Ordering::Relaxed);
+            write_long_to(
+                &mut work_ram.vdp1_framebuffers.banks[back].write().unwrap()[..],
+                off,
+                val,
+            )
+        }
         Some((DspRegion::Vdp1Regs, off)) => {
             write_long_to(&mut work_ram.vdp1_regs.write().unwrap()[..], off, val)
         }
@@ -1072,11 +1085,17 @@ pub(crate) fn write_word(work_ram: &WorkRam, address: u32, val: u16) {
         Some((DspRegion::Vdp1Vram, off)) => {
             write_word_to(&mut work_ram.vdp1_vram.write().unwrap()[..], off, val)
         }
-        Some((DspRegion::Vdp1Framebuffer, off)) => write_word_to(
-            &mut work_ram.vdp1_framebuffer.write().unwrap()[..],
-            off,
-            val,
-        ),
+        Some((DspRegion::Vdp1Framebuffer, off)) => {
+            let back = work_ram
+                .vdp1_framebuffers
+                .back
+                .load(std::sync::atomic::Ordering::Relaxed);
+            write_word_to(
+                &mut work_ram.vdp1_framebuffers.banks[back].write().unwrap()[..],
+                off,
+                val,
+            )
+        }
         Some((DspRegion::Vdp1Regs, off)) => {
             write_word_to(&mut work_ram.vdp1_regs.write().unwrap()[..], off, val)
         }
@@ -1115,7 +1134,14 @@ pub(crate) fn read_word(work_ram: &WorkRam, address: u32) -> u16 {
             read_word_from(&work_ram.vdp1_vram.read().unwrap()[..], off)
         }
         Some((DspRegion::Vdp1Framebuffer, off)) => {
-            read_word_from(&work_ram.vdp1_framebuffer.read().unwrap()[..], off)
+            let back = work_ram
+                .vdp1_framebuffers
+                .back
+                .load(std::sync::atomic::Ordering::Relaxed);
+            read_word_from(
+                &work_ram.vdp1_framebuffers.banks[back].read().unwrap()[..],
+                off,
+            )
         }
         Some((DspRegion::Vdp1Regs, off)) => {
             read_word_from(&work_ram.vdp1_regs.read().unwrap()[..], off)

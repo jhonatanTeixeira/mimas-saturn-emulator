@@ -32,9 +32,8 @@ pub struct WorkRam {
     pub scsp_regs: RwLock<Box<[u8; 0x1000]>>,
     /// VDP1 VRAM, real size 512KB (0x05C00000-0x05C7FFFF).
     pub vdp1_vram: RwLock<Box<[u8; 0x80000]>>,
-    /// VDP1 framebuffer (double-buffered on real hardware; modeled here as
-    /// one flat window), 512KB (0x05C80000-0x05CFFFFF).
-    pub vdp1_framebuffer: RwLock<Box<[u8; 0x80000]>>,
+    /// VDP1 framebuffers (two banks of 256KB each).
+    pub vdp1_framebuffers: crate::vdp::Vdp1Framebuffers,
     /// VDP1 registers (0x05D00000-0x05D7FFFF).
     pub vdp1_regs: RwLock<Box<[u8; 0x100]>>,
     /// VDP2 VRAM, real size 512KB (0x05E00000-0x05E7FFFF).
@@ -43,6 +42,8 @@ pub struct WorkRam {
     pub vdp2_cram: RwLock<Box<[u8; 0x1000]>>,
     /// VDP2 registers (0x05F80000-0x05FBFFFF).
     pub vdp2_regs: RwLock<Box<[u8; 0x200]>>,
+    /// Per-line VDP2 register snapshot captured at H-Blank (for Phase 1.5).
+    pub vdp2_lines: RwLock<Box<[[u8; 0x200]; 263]>>,
     /// Internal backup RAM, real size 64KB (0x00180000-0x001FFFFF).
     pub backup_ram: RwLock<Box<[u8; 0x10000]>>,
     /// SMPC register file, real 0x80-byte window (0x00100000-0x0017FFFF,
@@ -81,11 +82,12 @@ impl WorkRam {
             sound_ram: RwLock::new(vec![0; 0x80000].into_boxed_slice().try_into().unwrap()),
             scsp_regs: RwLock::new(vec![0; 0x1000].into_boxed_slice().try_into().unwrap()),
             vdp1_vram: RwLock::new(vec![0; 0x80000].into_boxed_slice().try_into().unwrap()),
-            vdp1_framebuffer: RwLock::new(vec![0; 0x80000].into_boxed_slice().try_into().unwrap()),
+            vdp1_framebuffers: crate::vdp::Vdp1Framebuffers::new(),
             vdp1_regs: RwLock::new(vec![0; 0x100].into_boxed_slice().try_into().unwrap()),
             vdp2_vram: RwLock::new(vec![0; 0x80000].into_boxed_slice().try_into().unwrap()),
             vdp2_cram: RwLock::new(vec![0; 0x1000].into_boxed_slice().try_into().unwrap()),
             vdp2_regs: RwLock::new(vec![0; 0x200].into_boxed_slice().try_into().unwrap()),
+            vdp2_lines: RwLock::new(vec![[0; 0x200]; 263].into_boxed_slice().try_into().unwrap()),
             backup_ram: RwLock::new(vec![0; 0x10000].into_boxed_slice().try_into().unwrap()),
             smpc_regs: RwLock::new(vec![0; 0x80].into_boxed_slice().try_into().unwrap()),
             mem4b: std::sync::atomic::AtomicBool::new(false),
