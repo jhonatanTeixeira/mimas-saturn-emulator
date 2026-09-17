@@ -473,19 +473,19 @@ Breadth over the same machinery. Each item is small; the volume is the work.
 
 ### 3.1 NBG0, NBG1, NBG2
 
-- [ ] NBG2: `BGON` bits 2/10, `CHCTLB` bits 0-1, `PNCN2` `0x034`, `PLSZ` bits 4-5,
+- [x] NBG2: `BGON` bits 2/10, `CHCTLB` bits 0-1, `PNCN2` `0x034`, `PLSZ` bits 4-5,
       `MPOFN` bits 8-10 → `(MPOFN & 0x700) >> 2`, `MPABN2` `0x048` / `MPCDN2` `0x04A`,
       `SCXN2` `0x090` / `SCYN2` `0x092`, `CRAOFA` bits 8-10 → `CRAOFA & 0x700`,
       `PRINB` bits 0-2. `coordincx = coordincy = 1` unconditionally (§A.8).
-- [ ] NBG1: `BGON` bits 1/9, `CHCTLA` bits 8-13 (character size, bitmap enable, bitmap size,
+- [x] NBG1: `BGON` bits 1/9, `CHCTLA` bits 8-13 (character size, bitmap enable, bitmap size,
       **2-bit** colour format), `PNCN1` `0x032`, `PLSZ` bits 2-3, `MPOFN` bits 4-6 →
       `(MPOFN & 0x70) << 2`, `MPABN1` `0x044` / `MPCDN1` `0x046`, `SCXIN1`/`SCYIN1`
       `0x080`/`0x084` (`& 0x7FF`), `CRAOFA` bits 4-6 → `(CRAOFA & 0x70) << 4`, `PRINA` bits 8-10.
-- [ ] NBG0: `BGON` bits 0/8, `CHCTLA` bits 0-6 (**3-bit** colour format), `PNCN0` `0x030`,
+- [x] NBG0: `BGON` bits 0/8, `CHCTLA` bits 0-6 (**3-bit** colour format), `PNCN0` `0x030`,
       `PLSZ` bits 0-1, `MPOFN` bits 0-2 → `(MPOFN & 0x7) << 6`, `MPABN0` `0x040` / `MPCDN0`
       `0x042`, `SCXIN0`/`SCYIN0` `0x070`/`0x074`, `CRAOFA` bits 0-2 → `(CRAOFA & 0x7) << 8`,
       `PRINA` bits 0-2.
-- [ ] **Bandwidth exclusion rules** (§A.5) — the non-obvious cross-layer coupling that will
+- [x] **Bandwidth exclusion rules** (§A.5) — the non-obvious cross-layer coupling that will
       otherwise show up as "NBG2 mysteriously vanished":
       - NBG1 suppressed when NBG0 enabled and `N0CHCN == 4`
       - NBG2 suppressed when NBG0 enabled and `N0CHCN >= 2`
@@ -496,57 +496,57 @@ Breadth over the same machinery. Each item is small; the volume is the work.
 
 Per §B.4's table. Each needs its own transparency test and its own CRAM/direct path.
 
-- [ ] `colornumber == 1` — 8 bpp palette. Byte at `charaddr + y*cellw + x`; transparent when
+- [x] `colornumber == 1` — 8 bpp palette. Byte at `charaddr + y*cellw + x`; transparent when
       `(dot & 0xFF) == 0`; `CRAM[coloroffset + (paladdr | (dot & 0xFF))]`.
-- [ ] `colornumber == 2` — 16 bpp palette (2048 colours). Word; transparent when `dot == 0`;
+- [x] `colornumber == 2` — 16 bpp palette (2048 colours). Word; transparent when `dot == 0`;
       `CRAM[coloroffset + dot]` — **`paladdr` is deliberately not applied**. Easy to get wrong by
       symmetry with the other two palette modes.
-- [ ] `colornumber == 3` — RGB 5:5:5 direct. Word; transparent when `!(dot & 0x8000)`; no CRAM.
-- [ ] `colornumber == 4` — RGB 8:8:8 direct. Long; transparent when `!(dot & 0x80000000)`;
+- [x] `colornumber == 3` — RGB 5:5:5 direct. Word; transparent when `!(dot & 0x8000)`; no CRAM.
+- [x] `colornumber == 4` — RGB 8:8:8 direct. Long; transparent when `!(dot & 0x80000000)`;
       `dot & 0xFFFFFF`. Record §B.4's channel-order caveat: the source does not establish that
       mode 4's byte order is compatible with mode 3's.
-- [ ] Two-word pattern name decode (§B.2): `charaddr = tmp2 & 0x7FFF`,
+- [x] Two-word pattern name decode (§B.2): `charaddr = tmp2 & 0x7FFF`,
       `flipfunction = (tmp1 & 0xC000) >> 14`,
       `paladdr = (colornumber == 0) ? ((tmp1 & 0x7F) << 4) : ((tmp1 & 0x70) << 4)`,
       `specialfunction = (tmp1 & 0x2000) >> 13`, `specialcolorfunction = (tmp1 & 0x1000) >> 12`.
-- [ ] 16×16-cell characters (`patternwh == 2`): the `charaddr` merge variants in §B.2's table, and
+- [x] 16×16-cell characters (`patternwh == 2`): the `charaddr` merge variants in §B.2's table, and
       the four-sub-cell flip arithmetic in §B.3 (sub-cell order TL, TR, BL, BR laid out as four
       consecutive 8×8 blocks in `y`). This flip block is the single most error-prone piece of
       arithmetic in the phase — transcribe §B.3's exact conditional chain, do not re-derive it.
 
 ### 3.3 Bitmap mode
 
-- [ ] `ReadBitmapSize` (§A.5): 0 → 512×256, 1 → 512×512, 2 → 1024×256, 3 → 1024×512.
+- [x] `ReadBitmapSize` (§A.5): 0 → 512×256, 1 → 512×512, 2 → 1024×256, 3 → 1024×512.
       `cellw` doubles as the row stride, so bitmap addressing is
       `charaddr + (y * cellw + x) * bytes_per_pixel`.
-- [ ] Bitmap base addresses (§A.7): NBG0 `(MPOFN & 0x7) * 0x20000`,
+- [x] Bitmap base addresses (§A.7): NBG0 `(MPOFN & 0x7) * 0x20000`,
       NBG1 `((MPOFN & 0x70) >> 4) * 0x20000`. The *same* `MPOFN` fields that supply plane-address
       upper bits in tile mode, at a completely different scale.
-- [ ] `BMPNA` `0x02C`: NBG0 palette `(BMPNA & 0x7) << 8`, NBG0 special-colour-calc bit 4,
+- [x] `BMPNA` `0x02C`: NBG0 palette `(BMPNA & 0x7) << 8`, NBG0 special-colour-calc bit 4,
       NBG1 palette `BMPNA & 0x700`, NBG1 special-colour-calc bit 12.
-- [ ] **Flag the `<< 8` vs `<< 4` discrepancy** (§A.5): `vidsoft.c` scales by `<< 8`,
+- [x] **Flag the `<< 8` vs `<< 4` discrepancy** (§A.5): `vidsoft.c` scales by `<< 8`,
       `vdp2debug.c` prints `<< 4`, a factor of 16 apart. Implement `<< 8` (self-consistent with
       `paladdr | (dot & 0xFF)` for 8 bpp bitmaps) and add a code comment saying the source does not
       settle it, so a future "bitmap palettes are off by 16 banks" bug report has a starting point.
-- [ ] Bitmap mode zeroes the plane geometry: `xmask = cellw - 1`, `ymask = cellh - 1`, and
+- [x] Bitmap mode zeroes the plane geometry: `xmask = cellw - 1`, `ymask = cellh - 1`, and
       `map_calc_xy` is skipped entirely (§B.3, §B.6's `if !info.isbitmap`).
 
 ### 3.4 Testing — Phase 3
 
-- [ ] One `<format>_renders_a_hand_derived_cell` test per `colornumber` value (five tests), each
+- [x] One `<format>_renders_a_hand_derived_cell` test per `colornumber` value (five tests), each
       with its own hand-computed expected array. Reuse the Phase-2 fixture shape so only the
       format varies.
-- [ ] `colornumber_2_ignores_paladdr` — set a nonzero `paladdr` and assert the colour is unchanged.
+- [x] `colornumber_2_ignores_paladdr` — set a nonzero `paladdr` and assert the colour is unchanged.
       This is the format-specific rule most likely to be "fixed" into a bug later.
-- [ ] `two_word_pattern_name_decode` — separate assertions for each of the five decoded fields.
-- [ ] `sixteen_by_sixteen_flip_selects_the_right_subcell` — all four `flipfunction` values against
+- [x] `two_word_pattern_name_decode` — separate assertions for each of the five decoded fields.
+- [x] `sixteen_by_sixteen_flip_selects_the_right_subcell` — all four `flipfunction` values against
       a fixture whose four sub-cells are four distinct solid colours, so a wrong sub-cell is
       unmistakable.
-- [ ] `bitmap_mode_addressing_uses_cellw_as_stride` — a 512×256 bitmap with a known pixel at a
+- [x] `bitmap_mode_addressing_uses_cellw_as_stride` — a 512×256 bitmap with a known pixel at a
       non-trivial `(x, y)`, hand-computed offset.
-- [ ] `bandwidth_exclusion_suppresses_nbg2_when_nbg0_is_high_colour` (and the other two rules) —
+- [x] `bandwidth_exclusion_suppresses_nbg2_when_nbg0_is_high_colour` (and the other two rules) —
       three tests asserting a layer that *would* have drawn does not.
-- [ ] `each_nbg_reads_its_own_registers` — a fixture enabling all four with four distinct solid
+- [x] `each_nbg_reads_its_own_registers` — a fixture enabling all four with four distinct solid
       colours and four distinct `CRAOFA` fields, asserting no cross-wiring. Cheap, and it catches
       the copy-paste errors this phase's structure invites.
 

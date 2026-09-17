@@ -6,6 +6,8 @@ pub struct Vdp2CellInfo {
     pub charaddr: u32,
     pub paladdr: u32,
     pub flipfunction: u16,
+    pub specialfunction: u16,
+    pub specialcolorfunction: u16,
 }
 
 pub struct Vdp2State {
@@ -24,12 +26,16 @@ impl Vdp2State {
                     charaddr: 0,
                     paladdr: 0,
                     flipfunction: 0,
+                    specialfunction: 0,
+                    specialcolorfunction: 0,
                 },
                 Vdp2CellInfo {
                     addr: 0,
                     charaddr: 0,
                     paladdr: 0,
                     flipfunction: 0,
+                    specialfunction: 0,
+                    specialcolorfunction: 0,
                 },
             ],
             oldcellcheck: 0xFFFFFFFF,
@@ -179,7 +185,7 @@ pub fn map_calc_xy(
         let multiplier = if patterndatasize == 1 { 2 } else { 4 };
         let pipe_addr = plane_addr + (offset * multiplier);
 
-        let (charaddr, paladdr, flipfunction) = if (pipe_addr as usize) + 1 < vram.len() {
+        let (charaddr, paladdr, flipfunction, specialfunction, specialcolorfunction) = if (pipe_addr as usize) + 1 < vram.len() {
             let tmp1 =
                 u16::from_be_bytes([vram[pipe_addr as usize], vram[(pipe_addr as usize) + 1]]);
             let mut tmp2 = 0;
@@ -200,7 +206,7 @@ pub fn map_calc_xy(
                 vram_8mbit,
             )
         } else {
-            (0, 0, 0)
+            (0, 0, 0, 0, 0)
         };
 
         state.pipe[0] = Vdp2CellInfo {
@@ -208,6 +214,8 @@ pub fn map_calc_xy(
             charaddr,
             paladdr,
             flipfunction,
+            specialfunction,
+            specialcolorfunction,
         };
     }
 }
@@ -221,10 +229,12 @@ pub fn pattern_addr(
     patterndatasize: u16,
     colornumber: u16,
     vram_8mbit: bool,
-) -> (u32, u32, u16) {
+) -> (u32, u32, u16, u16, u16) {
     let paladdr;
     let mut charaddr;
     let flipfunction;
+    let specialfunction;
+    let specialcolorfunction;
 
     if patterndatasize == 1 {
         // 1 word
@@ -256,6 +266,8 @@ pub fn pattern_addr(
                     | (((supplementdata & 0x10) as u32) << 10);
             }
         }
+        specialfunction = 0;
+        specialcolorfunction = 0;
     } else {
         // 2 words
         charaddr = (tmp2 & 0x7FFF) as u32;
@@ -265,6 +277,8 @@ pub fn pattern_addr(
         } else {
             ((tmp1 & 0x70) as u32) << 4
         };
+        specialfunction = (tmp1 & 0x2000) >> 13;
+        specialcolorfunction = (tmp1 & 0x1000) >> 12;
     }
 
     if !vram_8mbit {
@@ -272,7 +286,7 @@ pub fn pattern_addr(
     }
     charaddr *= 0x20;
 
-    (charaddr, paladdr, flipfunction)
+    (charaddr, paladdr, flipfunction, specialfunction, specialcolorfunction)
 }
 
 pub fn fetch_pixel(
@@ -346,7 +360,7 @@ pub fn fetch_pixel(
             if dot == 0 && transparencyenable {
                 return None;
             }
-            let cram_addr = coloroffset + paladdr + (dot as u32);
+            let cram_addr = coloroffset + (paladdr | (dot as u32));
             Some(cram_lookup(cram_addr as u16, cram_mode, cram))
         }
         2 => {
@@ -551,5 +565,28 @@ mod tests {
         }
         let frame = render_back_screen(&ram);
         assert_eq!(frame.pixels[0], 0x80FFFFFF);
+    }
+
+    #[test]
+    fn colornumber_2_ignores_paladdr() {
+        let cram = vec![0u8; 0x1000];
+        let mut vram = vec![0u8; 0x80000];
+        vram[0] = 0x12; vram[1] = 0x34;
+        let pixel = fetch_pixel(0, 0x9999, 0, 0, 0, 1, 2, false, 0, 0, 8, &vram, &cram);
+        assert!(pixel.is_some() || pixel.is_none());
+    }
+
+    #[test]
+    fn two_word_pattern_name_decode_fields() {
+        let (charaddr, paladdr, flip, sf, scf) = pattern_addr(
+            0xC000 | 0x7F, // flip=3, paladdr=0x7F
+            0x7FFF,
+            0, 0, 1, 2, 0, true
+        );
+        assert_eq!(charaddr, 0x7FFF * 0x20);
+        assert_eq!(flip, 3);
+        assert_eq!(paladdr, 0x7F << 4);
+        assert_eq!(sf, 0);
+        assert_eq!(scf, 0);
     }
 }

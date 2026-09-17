@@ -712,88 +712,189 @@ pub fn execute_vdp1(state: &mut Vdp1State, ram: &crate::shared_buffers::WorkRam)
     false
 }
 
-fn render_nbg3(
+fn render_nbg_layer(
     regs: &crate::vdp2_regs::Vdp2Registers,
     frame: &mut Framebuffer,
     width: usize,
     height: usize,
     vdp2_vram: &[u8],
     vdp2_cram: &[u8],
+    layer: usize,
 ) {
-    let mut nbg3_state = crate::vdp2::Vdp2State::new();
-    let patternwh = if regs.n3chsz() == 0 { 1 } else { 2 };
-    let patterndatasize = if regs.pncn3_patterndatasize() != 0 {
-        1
-    } else {
-        2
-    };
-    let (planew, planeh) = match regs.plsz_nbg3() {
-        0 => (1, 1),
-        1 => (2, 1),
-        2 => (1, 1),
-        3 => (2, 2),
-        _ => (1, 1),
-    };
-    let mapwh = 2;
-    let colornumber = 0;
-    let screen_vars = crate::vdp2::setup_screen_vars(patternwh, planew, planeh, mapwh);
+    let mut state = crate::vdp2::Vdp2State::new();
 
-    crate::vdp2::generate_plane_addr_table(
-        &mut nbg3_state.planetbl,
-        regs.mpofn_nbg3(),
-        regs.mpabn3(),
-        regs.mpcdn3(),
-        patterndatasize,
+    let (
         patternwh,
+        patterndatasize,
         planew,
         planeh,
-        regs.vram_8mbit(),
-    );
+        mapwh,
+        colornumber,
+        mpofn,
+        mpab,
+        mpcd,
+        scx,
+        scy,
+        supplementdata,
+        auxmode,
+        coloroffset,
+        transparency_enable,
+        is_bitmap,
+        bitmap_size,
+    ) = match layer {
+        0 => {
+            let pwh = if regs.chctla_nbg0_pattern_size() == 0 { 1 } else { 2 };
+            let (pw, ph) = match regs.plsz_nbg0() {
+                0 => (1, 1), 1 => (2, 1), 2 => (1, 1), 3 => (2, 2), _ => (1, 1),
+            };
+            (
+                pwh,
+                if regs.pncn0_patterndatasize() != 0 { 1 } else { 2 },
+                pw, ph, 2,
+                regs.n0chcn(),
+                regs.mpofn_nbg0(),
+                regs.mpabn0(),
+                regs.mpcdn0(),
+                regs.scxn0(), regs.scyn0(),
+                regs.pncn0_supplementary_char(), // was & 0x3FF
+                regs.pncn0_auxmode(),
+                regs.craofa_nbg0(),
+                regs.n0_transparency_enable(),
+                regs.n0bmen(),
+                regs.n0bmsz(),
+            )
+        }
+        1 => {
+            let pwh = if regs.chctla_nbg1_pattern_size() == 0 { 1 } else { 2 };
+            let (pw, ph) = match regs.plsz_nbg1() {
+                0 => (1, 1), 1 => (2, 1), 2 => (1, 1), 3 => (2, 2), _ => (1, 1),
+            };
+            (
+                pwh,
+                if regs.pncn1_patterndatasize() != 0 { 1 } else { 2 },
+                pw, ph, 2,
+                regs.n1chcn(),
+                regs.mpofn_nbg1(),
+                regs.mpabn1(),
+                regs.mpcdn1(),
+                regs.scxn1(), regs.scyn1(),
+                regs.pncn1_supplementary_char(),
+                regs.pncn1_auxmode(),
+                regs.craofa_nbg1(),
+                regs.n1_transparency_enable(),
+                regs.n1bmen(),
+                regs.n1bmsz(),
+            )
+        }
+        2 => {
+            let pwh = if regs.chctlb_nbg2_pattern_size() == 0 { 1 } else { 2 };
+            let (pw, ph) = match regs.plsz_nbg2() {
+                0 => (1, 1), 1 => (2, 1), 2 => (1, 1), 3 => (2, 2), _ => (1, 1),
+            };
+            (
+                pwh,
+                if regs.pncn2_patterndatasize() != 0 { 1 } else { 2 },
+                pw, ph, 2,
+                regs.n2chcn(),
+                regs.mpofn_nbg2(),
+                regs.mpabn2(),
+                regs.mpcdn2(),
+                regs.scxn2(), regs.scyn2(),
+                regs.pncn2_supplementary_char(),
+                regs.pncn2_auxmode(),
+                regs.craofa_nbg2(),
+                regs.n2_transparency_enable(),
+                false, 0,
+            )
+        }
+        3 => {
+            let pwh = if regs.n3chsz() == 0 { 1 } else { 2 };
+            let (pw, ph) = match regs.plsz_nbg3() {
+                0 => (1, 1), 1 => (2, 1), 2 => (1, 1), 3 => (2, 2), _ => (1, 1),
+            };
+            (
+                pwh,
+                if regs.pncn3_patterndatasize() != 0 { 1 } else { 2 },
+                pw, ph, 2,
+                regs.n3chcn(), // fixes colornumber=0 hardcode
+                regs.mpofn_nbg3(),
+                regs.mpabn3(),
+                regs.mpcdn3(),
+                regs.scxn3(), regs.scyn3(),
+                regs.pncn3_supplementary_char(),
+                regs.pncn3_auxmode(),
+                regs.craofa_nbg3(),
+                regs.n3_transparency_enable(),
+                false, 0,
+            )
+        }
+        _ => unreachable!(),
+    };
 
-    let scx = (regs.scxn3() & 0x7FF) as u32;
-    let scy = (regs.scyn3() & 0x7FF) as u32;
-    let supplementdata = regs.pncn3() & 0x3FF; // fixed supplementdata
-    let auxmode = regs.pncn3_auxmode();
     let vram_8mbit = regs.vram_8mbit();
-    let coloroffset = regs.craofa_nbg3() as u32;
-    let transparency_enable = regs.n3_transparency_enable();
     let cram_mode = regs.color_mode();
+    let bmpna = regs.bmpna();
+
+    let is_bitmap = is_bitmap && (layer == 0 || layer == 1);
+    let mut bmp_width = 512;
+    let mut bmp_height = 256;
+    if is_bitmap {
+        match bitmap_size {
+            0 => { bmp_width = 512; bmp_height = 256; }
+            1 => { bmp_width = 512; bmp_height = 512; }
+            2 => { bmp_width = 1024; bmp_height = 256; }
+            3 => { bmp_width = 1024; bmp_height = 512; }
+            _ => {}
+        }
+    }
+
+    let screen_vars = if is_bitmap {
+        crate::vdp2::ScreenVars {
+            pagepixelwh: 0, planepixelwidth: 0, planepixelheight: 0, screenwidth: 0,
+            xmask: bmp_width - 1, ymask: bmp_height - 1,
+        }
+    } else {
+        crate::vdp2::setup_screen_vars(patternwh, planew, planeh, mapwh)
+    };
+
+    if !is_bitmap {
+        crate::vdp2::generate_plane_addr_table(
+            &mut state.planetbl, mpofn, mpab, mpcd, patterndatasize, patternwh, planew, planeh, vram_8mbit,
+        );
+    }
+
+    let scx = (scx & 0x7FF) as u32;
+    let scy = (scy & 0x7FF) as u32;
 
     for y in 0..height {
         let actual_y = (y as u32 + scy) & screen_vars.ymask;
         for x in 0..width {
             let actual_x = (x as u32 + scx) & screen_vars.xmask;
 
-            crate::vdp2::map_calc_xy(
-                &mut nbg3_state,
-                actual_x,
-                actual_y,
-                &screen_vars,
-                patternwh,
-                patterndatasize,
-                mapwh,
-                supplementdata,
-                auxmode,
-                colornumber,
-                vram_8mbit,
-                vdp2_vram,
-            );
+            let (charaddr, paladdr, flipfunction, cellw) = if is_bitmap {
+                let base = if layer == 0 {
+                    (regs.mpofn() & 0x7) as u32 * 0x20000
+                } else {
+                    ((regs.mpofn() & 0x70) >> 4) as u32 * 0x20000
+                };
+                // "vidsoft.c scales by << 8, vdp2debug.c prints << 4. Implement << 8 and add a code comment."
+                // The source does not settle it, so if bitmap palettes are off by 16 banks, this is why.
+                let pal = if layer == 0 {
+                    ((bmpna & 0x7) as u32) << 8
+                } else {
+                    (bmpna & 0x700) as u32
+                };
+                (base, pal, 0, bmp_width)
+            } else {
+                crate::vdp2::map_calc_xy(
+                    &mut state, actual_x, actual_y, &screen_vars, patternwh, patterndatasize, mapwh, supplementdata, auxmode, colornumber, vram_8mbit, vdp2_vram,
+                );
+                let cell = state.pipe[0];
+                (cell.charaddr, cell.paladdr, cell.flipfunction, 8)
+            };
 
-            let cell = nbg3_state.pipe[0];
             if let Some(color) = crate::vdp2::fetch_pixel(
-                cell.charaddr,
-                cell.paladdr,
-                actual_x,
-                actual_y,
-                cell.flipfunction,
-                patternwh,
-                colornumber,
-                transparency_enable,
-                coloroffset,
-                cram_mode,
-                8,
-                vdp2_vram,
-                vdp2_cram,
+                charaddr, paladdr, actual_x, actual_y, flipfunction, patternwh, colornumber, transparency_enable, coloroffset as u32, cram_mode, cellw, vdp2_vram, vdp2_cram,
             ) {
                 frame.pixels[y * width + x] = color;
             }
@@ -852,8 +953,39 @@ pub fn render_back_screen(ram: &WorkRam) -> Framebuffer {
     let vdp2_cram = ram.vdp2_cram.read().unwrap();
 
     // Phase 4 will replace this with real priority resolution.
-    if disp_enabled && regs.n3on() {
-        render_nbg3(&regs, &mut frame, width, height, &vdp2_vram[..], &vdp2_cram[..]);
+    if disp_enabled {
+        let n0chcn = regs.n0chcn();
+        let n1chcn = regs.n1chcn();
+        
+        let mut n1_suppressed = false;
+        let mut n2_suppressed = false;
+        let mut n3_suppressed = false;
+
+        let nbg0_enabled = regs.n0on();
+        let nbg1_enabled = regs.n1on();
+
+        if nbg0_enabled && n0chcn == 4 {
+            n1_suppressed = true;
+        }
+        if nbg0_enabled && n0chcn >= 2 {
+            n2_suppressed = true;
+        }
+        if (nbg0_enabled && n0chcn == 4) || (nbg1_enabled && n1chcn >= 2) {
+            n3_suppressed = true;
+        }
+        
+        if nbg0_enabled {
+            render_nbg_layer(&regs, &mut frame, width, height, &vdp2_vram[..], &vdp2_cram[..], 0);
+        }
+        if nbg1_enabled && !n1_suppressed {
+            render_nbg_layer(&regs, &mut frame, width, height, &vdp2_vram[..], &vdp2_cram[..], 1);
+        }
+        if regs.n2on() && !n2_suppressed {
+            render_nbg_layer(&regs, &mut frame, width, height, &vdp2_vram[..], &vdp2_cram[..], 2);
+        }
+        if regs.n3on() && !n3_suppressed {
+            render_nbg_layer(&regs, &mut frame, width, height, &vdp2_vram[..], &vdp2_cram[..], 3);
+        }
     }
 
     // Overlay VDP1 Framebuffer if active

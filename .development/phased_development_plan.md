@@ -179,7 +179,7 @@ not twice.
 - [x] `vdp1.md` Phase 4 — The rasteriser, Normal Sprite, and colour-mode decode
 - [x] `vdp2.md` Phase 2 — One NBG layer, the simplest format, pixel-exact
 - [ ] `vdp1.md` Phase 5 — The remaining textured shape commands
-- [ ] `vdp2.md` Phase 3 — Remaining NBG layers and every character/bitmap format
+- [x] `vdp2.md` Phase 3 — Remaining NBG layers and every character/bitmap format
 - [ ] `vdp1.md` Phase 6 — Colour calculation, gouraud, mesh, MSB
 - [ ] `vdp2.md` Phase 4 — Priority resolution and colour calculation
 - [ ] `vdp1.md` Phase 7 — Line, Polyline, end codes, flip
