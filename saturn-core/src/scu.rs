@@ -1592,6 +1592,7 @@ mod tests {
         // Every tuple independently derived from §4.1's table (extracted
         // from `yabause/src/scu.c:3236-3481`, a different codebase from
         // this one) -- not from this file's own implementation.
+        #[allow(clippy::type_complexity)]
         let cases: &[(&str, fn(&Scu), u8, u8, u32)] = &[
             ("vblank_in", Scu::vblank_in, 0x40, 15, 0x0001),
             ("vblank_out", Scu::vblank_out, 0x41, 14, 0x0002),

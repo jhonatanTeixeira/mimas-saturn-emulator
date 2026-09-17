@@ -602,6 +602,7 @@ impl PeripheralState {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn serialize_buttons(
     right: bool,
     left: bool,
