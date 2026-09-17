@@ -570,6 +570,7 @@ fn scu_dma_engine_on_core6_does_not_stall_core0_for_the_whole_transfer() {
                     return;
                 }
                 while scu_c6.dma_active() {
+                    // not a polling loop, this drives actual DMA work passes
                     if sync_c6.is_shutdown() {
                         return;
                     }

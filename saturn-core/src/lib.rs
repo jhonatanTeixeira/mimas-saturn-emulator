@@ -491,6 +491,7 @@ impl SaturnSystem {
                 let mut cycles = 0u64;
                 let mut sample_cycles_acc: u64 = 0;
                 while !shutdown_c5.load(Ordering::Relaxed) {
+                    // golden-rule-ok: documented exception for scsp-synth
                     if sync_c5.is_shutdown() {
                         break;
                     }

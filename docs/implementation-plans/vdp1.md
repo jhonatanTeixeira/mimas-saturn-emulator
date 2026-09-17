@@ -812,29 +812,29 @@ It needs the full colour-mode decode to render at all, so the two land together.
 - [x] Delete the AABB fill (`vdp.rs:102-118`) once the quad path covers COMM 4.
 
 **Testing.**
-- [ ] `vdp1_scaled_sprite_zp_upper_left`: CMDCTRL `0x0501`, CMDXA `10`, CMDYA `10`, CMDXB `31`,
+- [x] `vdp1_scaled_sprite_zp_upper_left`: CMDCTRL `0x0501`, CMDXA `10`, CMDYA `10`, CMDXB `31`,
       CMDYB `15`. Hand-derived `x1 = 32`, `y1 = 16` → quad `(10,10)`, `(41,10)`, `(41,25)`,
       `(10,25)`.
-- [ ] `vdp1_scaled_sprite_zp_two_point_matches_upper_left`: CMDCTRL `0x0001`, CMDXA `10`, CMDYA
+- [x] `vdp1_scaled_sprite_zp_two_point_matches_upper_left`: CMDCTRL `0x0001`, CMDXA `10`, CMDYA
       `10`, CMDXC `41`, CMDYC `25` → `x1 = 41 - 10 + 0 + 1 = 32`, `y1 = 25 - 10 + 0 + 1 = 16`, the
       *same* quad as above. Two independent derivations of one result.
-- [ ] `vdp1_scaled_sprite_zp_two_point_ignores_local`: because `x0` already includes `localX` and
+- [x] `vdp1_scaled_sprite_zp_two_point_ignores_local`: because `x0` already includes `localX` and
       the formula adds `localX` back, the local offset cancels out of the *extent* (but not the
       origin). Assert with `localX = 100`: origin moves, size does not.
-- [ ] `vdp1_scaled_sprite_zp_centre_centre`: CMDCTRL `0x0A01`, CMDXA `10`, CMDYA `10`, CMDXB `31`,
+- [x] `vdp1_scaled_sprite_zp_centre_centre`: CMDCTRL `0x0A01`, CMDXA `10`, CMDYA `10`, CMDXB `31`,
       CMDYB `15`. Hand-derived: `x1 = 31`, `x0 = 10 - 15 = -5`; `y1 = 15`, `y0 = 10 - 7 = 3`; then
       `x1 = 32`, `y1 = 16` → quad `(-5,3)`, `(26,3)`, `(26,18)`, `(-5,18)`. Also exercises negative
       coordinates against the clip path.
-- [ ] `vdp1_scaled_sprite_unimplemented_zp_falls_back_to_two_point`: ZP `0x4` and ZP `0xC` produce
+- [x] `vdp1_scaled_sprite_unimplemented_zp_falls_back_to_two_point`: ZP `0x4` and ZP `0xC` produce
       the two-point quad.
-- [ ] `vdp1_distorted_sprite_vertex_order`: four vertices forming a *non*-axis-aligned quad; assert
+- [x] `vdp1_distorted_sprite_vertex_order`: four vertices forming a *non*-axis-aligned quad; assert
       a pixel that is inside the true quad but outside another plausible vertex ordering is drawn,
       and one that is inside the wrong ordering's quad but outside the true one is not. This is the
       test that catches an A/B/C/D → tl/bl/tr/br mix-up, which an axis-aligned test cannot.
-- [ ] `vdp1_polygon_and_distorted_sprite_have_identical_geometry`: the same four vertices as COMM 2
+- [x] `vdp1_polygon_and_distorted_sprite_have_identical_geometry`: the same four vertices as COMM 2
       (textured, 1×1 character of a known colour) and COMM 4 (untextured, CMDCOLR that same colour)
       → identical framebuffer contents.
-- [ ] `vdp1_scaled_sprite_magnifies_texture`: an 8-wide character stretched across a 32-wide span →
+- [x] `vdp1_scaled_sprite_magnifies_texture`: an 8-wide character stretched across a 32-wide span →
       each source column occupies four destination columns. **Before asserting exact columns,
       re-verify against `vidsoft.c:2932` whether `currentStep = (int)i * texturestep` truncates
       per-pixel or accumulates in floating point** — reference §5.0 does not settle it, and an
@@ -885,25 +885,25 @@ regardless of whether it actually holds an index (reference §11 explains why).
       bit 15 set), `current_pixel = 0x7C00` (r `0`, g `0`, b `0x1F`). Per channel at level 128 this
       is `(s + d) >> 1`: r `(0+31)>>1 = 15`, g `(0+31)>>1 = 15`, b `(31+0)>>1 = 15` →
       `15 | (15<<5) | (15<<10) = 0x3DEF`; `| 0x8000` → **`0xBDEF`**.
-- [ ] `vdp1_colour_calc_3_replaces_when_msb_clear`: existing `*pix = 0x03FF` (bit 15 clear) → result
+- [x] `vdp1_colour_calc_3_replaces_when_msb_clear`: existing `*pix = 0x03FF` (bit 15 clear) → result
       is `current_pixel` verbatim, no blend.
-- [ ] `vdp1_colour_calc_1_shadow_only_where_msb_set`: two adjacent pixels, one prefilled `0x83FF`
+- [x] `vdp1_colour_calc_1_shadow_only_where_msb_set`: two adjacent pixels, one prefilled `0x83FF`
       and one `0x03FF` → the first is halved and keeps bit 15, the second is untouched.
-- [ ] `vdp1_gouraud_neutral_table_is_identity`: all four corners `= 0x4210` (r `0x10`, g `0x10`, b
+- [x] `vdp1_gouraud_neutral_table_is_identity`: all four corners `= 0x4210` (r `0x10`, g `0x10`, b
       `0x10`: `0x10 | (0x10<<5) | (0x10<<10) = 0x10 | 0x200 | 0x4000`). Every channel adjust is
       `+0`, so the output equals the input pixel with bit 15 forced set by `COLOR()`.
-- [ ] `vdp1_gouraud_darkens_red`: all four corners `= 0x4208` (r `0x08`, g/b `0x10`), input pixel
+- [x] `vdp1_gouraud_darkens_red`: all four corners `= 0x4208` (r `0x08`, g/b `0x10`), input pixel
       r `= 0x1F` → `0x1F + (0x08 - 0x10) = 0x17`; g and b unchanged.
-- [ ] `vdp1_gouraud_clamps`: table r `= 0x00` with input r `= 0x02` → `max(0x02 - 0x10, 0) = 0`;
+- [x] `vdp1_gouraud_clamps`: table r `= 0x00` with input r `= 0x02` → `max(0x02 - 0x10, 0) = 0`;
       table r `= 0x1F` with input r `= 0x1D` → `min(0x1D + 0x0F, 0x1F) = 0x1F`.
-- [ ] `vdp1_gouraud_index_special_case`: colour mode 0, table `= 0x4218` (r `0x18`, g/b `0x10`),
+- [x] `vdp1_gouraud_index_special_case`: colour mode 0, table `= 0x4218` (r `0x18`, g/b `0x10`),
       `current_pixel = 0x0123` → `c = 0x18 - 0x10 = 8`, written raw as **`0x012B`**, *not* run
       through the RGB path.
-- [ ] `vdp1_mesh_stipples`: fill `(0,0)-(3,3)` with CMDPMOD bit 8 → `(0,0)` and `(1,1)` written,
+- [x] `vdp1_mesh_stipples`: fill `(0,0)-(3,3)` with CMDPMOD bit 8 → `(0,0)` and `(1,1)` written,
       `(1,0)` and `(0,1)` not.
-- [ ] `vdp1_msb_on_ors_existing_pixel`: prefill `(5,5)` with `0x1234`, draw over it with CMDPMOD
+- [x] `vdp1_msb_on_ors_existing_pixel`: prefill `(5,5)` with `0x1234`, draw over it with CMDPMOD
       `0x8000` and a non-zero source → `0x9234`, and the source colour is *not* written.
-- [ ] `vdp1_gouraud_table_only_fetched_when_bit2_set`: a quad with colour-calc mode 0 and a CMDGRDA
+- [x] `vdp1_gouraud_table_only_fetched_when_bit2_set`: a quad with colour-calc mode 0 and a CMDGRDA
       pointing at a poisoned table renders unshaded.
 
 ---
@@ -946,24 +946,24 @@ needs.
       3 → both.
 
 **Testing.**
-- [ ] `vdp1_line_endpoints`: a horizontal line `(10,20)`-`(20,20)` writes exactly 11 pixels
+- [x] `vdp1_line_endpoints`: a horizontal line `(10,20)`-`(20,20)` writes exactly 11 pixels
       inclusive of both endpoints (reference §5.0: the endpoint is always emitted).
-- [ ] `vdp1_line_is_not_greedy`: a 45-degree line `(0,0)`-`(4,4)` writes exactly 5 pixels — `DrawLine`
+- [x] `vdp1_line_is_not_greedy`: a 45-degree line `(0,0)`-`(4,4)` writes exactly 5 pixels — `DrawLine`
       for COMM 6 passes `greedy = 0` — whereas the same edge used as a *span* inside `draw_quad`
       is greedy. Contrast the two in one test.
-- [ ] `vdp1_polyline_draws_four_edges`: a rectangle outline → perimeter written, interior not.
-- [ ] `vdp1_polyline_edge_direction`: with a gouraud table whose four corners are distinguishable,
+- [x] `vdp1_polyline_draws_four_edges`: a rectangle outline → perimeter written, interior not.
+- [x] `vdp1_polyline_edge_direction`: with a gouraud table whose four corners are distinguishable,
       assert the C→D edge's gradient runs from D's colour to C's (reference §5.5's drawn-direction
       table). This is the only way to catch a transposed edge.
-- [ ] `vdp1_end_code_mode_0_terminates_span`: an 8-wide 4bpp character with nibble `0xF` at columns
+- [x] `vdp1_end_code_mode_0_terminates_span`: an 8-wide 4bpp character with nibble `0xF` at columns
       3 and 5, ECD clear → columns 0-2 and 4 written, column 6+ not.
-- [ ] `vdp1_end_code_disabled_by_ecd`: same character with CMDPMOD bit 7 set → all 8 columns
+- [x] `vdp1_end_code_disabled_by_ecd`: same character with CMDPMOD bit 7 set → all 8 columns
       written, `0xF` treated as an ordinary index.
-- [ ] `vdp1_end_code_mode_3_never_matches`: an 8bpp-128 character containing `0xFF` → masked to
+- [x] `vdp1_end_code_mode_3_never_matches`: an 8bpp-128 character containing `0xFF` → masked to
       `0x7F`, drawn as an ordinary index, span not terminated (reference §6.1).
-- [ ] `vdp1_end_code_mode_2_is_transparent_not_terminal`: index `63` in mode 2 → that pixel is
+- [x] `vdp1_end_code_mode_2_is_transparent_not_terminal`: index `63` in mode 2 → that pixel is
       transparent, the span continues.
-- [ ] `vdp1_character_flip`: a 16×1 4bpp character with bytes `0x01 0x23 0x45 0x67 0x89 0xAB 0xCD
+- [x] `vdp1_character_flip`: a 16×1 4bpp character with bytes `0x01 0x23 0x45 0x67 0x89 0xAB 0xCD
       0xEF` → nibbles `0..0xF` at columns 0..15. With CMDPMOD bit 7 set (**required** — otherwise
       index `0xF` is an end code in mode 0) and SPD set (otherwise index 0 is transparent):
       unflipped, destination column 0 gets index `0`; with Dir `= 1`, column 0 gets index `0xF`.

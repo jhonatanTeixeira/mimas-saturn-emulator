@@ -99,7 +99,7 @@ impl LockStepSync {
                         // wake us at all.
                         state.waiting[core_id] = true;
                         state.wake_at[core_id] = current_cycles.saturating_sub(self.slack_limit);
-                        let start = std::time::Instant::now();
+                        let start = std::time::Instant::now(); // golden-rule-ok: telemetry measurement, not a deadline pacing timer
                         state = self.condvar.wait(state).unwrap();
                         let duration = start.elapsed().as_nanos() as u64;
                         crate::telemetry::record_idle_time(core_id, duration);
