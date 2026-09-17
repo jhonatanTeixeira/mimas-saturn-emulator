@@ -30,8 +30,8 @@ const SR_S: u16 = 1 << 13;
 const SR_IMASK_SHIFT: u16 = 8;
 
 static UNIMPL_LOG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-static TRACE_RING: std::sync::Mutex<Vec<(u32, u16, u32, u32, u32)>> =
-    std::sync::Mutex::new(Vec::new());
+type TraceEntryType = (u32, u16, u32, u32, u32);
+static TRACE_RING: std::sync::Mutex<Vec<TraceEntryType>> = std::sync::Mutex::new(Vec::new());
 static LOOP_ENTRY_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// SCSP register offsets for the real main-CPU interrupt handshake
@@ -832,7 +832,7 @@ impl M68k {
             return;
         }
         // MOVE An,USP / MOVE USP,An -- privileged, no real USP modeled; no-op read as 0.
-        if (opcode & 0xFFF0) == 0x4E60 || (opcode & 0xFFF0) == 0x4E68 {}
+        if (opcode & 0xFFF8) == 0x4E60 || (opcode & 0xFFF8) == 0x4E68 {}
         // Trap/illegal/stop/reset -- not needed by ordinary driver code paths; no-op.
     }
 
@@ -963,7 +963,7 @@ impl M68k {
         };
         if cc == 1 {
             // BSR
-            self.push_long(self.pc.wrapping_add(if disp8 == 0 { 0 } else { 0 })); // return addr already correct: pc after operand fetch
+            self.push_long(self.pc.wrapping_add(0)); // return addr already correct: pc after operand fetch
             self.pc = target;
             return;
         }
@@ -1049,21 +1049,21 @@ impl M68k {
             return;
         }
         // EXG (register exchange) shares this major opcode: 1100 rrr1 ss01 0 rrr etc.
-        if (opcode & 0x01F0) == 0x0140 {
+        if (opcode & 0x01F8) == 0x0140 {
             // EXG Dx,Dy
             let rx = reg;
             let ry = ea_reg;
             self.d.swap(rx, ry);
             return;
         }
-        if (opcode & 0x01F0) == 0x0148 {
+        if (opcode & 0x01F8) == 0x0148 {
             // EXG Ax,Ay
             let rx = reg;
             let ry = ea_reg;
             self.a.swap(rx, ry);
             return;
         }
-        if (opcode & 0x01F0) == 0x0188 {
+        if (opcode & 0x01F8) == 0x0188 {
             // EXG Dx,Ay
             std::mem::swap(&mut self.d[reg], &mut self.a[ea_reg]);
             return;

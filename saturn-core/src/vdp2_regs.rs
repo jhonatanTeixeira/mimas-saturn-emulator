@@ -18,10 +18,10 @@ impl Vdp2Registers {
 
     // A.0 Complete register index (selected registers for Phase 1)
     pub fn tvmd(&self) -> u16 {
-        self.regs[0x000 / 2]
+        self.regs[0]
     }
     pub fn exten(&self) -> u16 {
-        self.regs[0x002 / 2]
+        self.regs[1]
     }
     pub fn tvstat(&self) -> u16 {
         self.regs[0x004 / 2]

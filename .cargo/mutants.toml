@@ -1,0 +1,40 @@
+# cargo-mutants configuration. See docs/quality-gate.md.
+#
+# Every exclusion here is about *viability*, never about improving a number.
+# A surviving mutant is resolved by killing it with a real assertion or by
+# recording it as an equivalent mutant -- not by adding a glob.
+
+exclude_globs = [
+    # Mutating these hangs rather than fails.
+    "saturn-core/src/throttle.rs",     # mutating MAX_SINGLE_SLEEP or the .min()
+                                       # makes advance_never_sleeps_longer_than_the_cap
+                                       # sleep ~1000s before failing
+    "saturn-core/src/lib.rs",          # 8 thread spawns, 5 unbounded loops
+    "saturn-core/src/sync.rs",         # every mutant is a deadlock candidate
+    "saturn-core/src/bus_arbiter.rs",  # the unbounded joins in the stress tests
+                                       # wait on exactly these functions
+
+    # Structurally incompatible: run_native_cli invokes the binary by guessed
+    # relative paths, and cargo-mutants builds in a copied tree.
+    "e2e-tests/**",
+    "saturn-frontend-*/**",
+
+    # Constants only -- near-zero mutants, no signal.
+    "saturn-core/src/telemetry.rs",
+    "saturn-core/src/sh2_onchip.rs",
+]
+
+# Baseline here is noisy, so the default (5x baseline, 20s floor) is unreliable.
+timeout_multiplier = 3.0
+
+# `--lib` only. The integration tests now live under
+# `saturn-core/src/integration_tests/` behind `#[cfg(test)]`, so they are part of
+# the lib target rather than separate test binaries -- naming them with `--test`
+# fails outright ("no test target named peripheral_tests").
+#
+# That also means the thread- and sleep-heavy suites (sync_tests,
+# adversarial_tests: 20 tests spawning threads, one with a 30s timeout) can no
+# longer be excluded by target selection. They enter every mutant's baseline,
+# which is why `timeout_multiplier` below is generous and why the hot-path list
+# deliberately avoids the code those tests exercise.
+additional_cargo_test_args = ["--lib"]

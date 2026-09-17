@@ -779,53 +779,27 @@ impl Sh2 {
 
     fn mem_cycles_r(&self, addr: u32) -> u32 {
         let phys = addr & 0x1FFF_FFFF;
-        if phys <= 0x000F_FFFF {
-            16 // BIOS ROM
-        } else if (0x0010_0000..=0x001F_FFFF).contains(&phys) {
-            16 // Backup RAM
-        } else if (0x0020_0000..=0x00FF_FFFF).contains(&phys) {
-            12 // Low Work RAM
-        } else if (0x0200_0000..=0x03FF_FFFF).contains(&phys) {
-            24 // CS0
-        } else if (0x0580_0000..=0x059F_FFFF).contains(&phys) {
-            24 // CS2
-        } else if (0x05A0_0000..=0x05AF_FFFF).contains(&phys) {
-            50 // Sound RAM
-        } else if (0x05B0_0000..=0x05BF_FFFF).contains(&phys) {
-            50 // Sound regs
-        } else if (0x05C0_0000..=0x05DF_FFFF).contains(&phys) {
-            50 // VDP1 RAM
-        } else if (0x05E0_0000..=0x05FF_FFFF).contains(&phys) {
-            // PLACEHOLDER: until getVramCycle is implemented in VDP2
-            2
-        } else {
-            0
+        match phys {
+            0..=0x001F_FFFF => 16,
+            0x0020_0000..=0x00FF_FFFF => 12,
+            0x0200_0000..=0x03FF_FFFF => 24,
+            0x0580_0000..=0x059F_FFFF => 24,
+            0x05A0_0000..=0x05DF_FFFF => 50,
+            0x05E0_0000..=0x05FF_FFFF => 2,
+            _ => 0,
         }
     }
 
     fn mem_cycles_w(&self, addr: u32) -> u32 {
         let phys = addr & 0x1FFF_FFFF;
-        if phys <= 0x000F_FFFF {
-            0 // BIOS ROM
-        } else if (0x0010_0000..=0x001F_FFFF).contains(&phys) {
-            0 // Backup RAM
-        } else if (0x0020_0000..=0x00FF_FFFF).contains(&phys) {
-            7 // Low Work RAM
-        } else if (0x0200_0000..=0x03FF_FFFF).contains(&phys) {
-            0 // CS0
-        } else if (0x0580_0000..=0x059F_FFFF).contains(&phys) {
-            0 // CS2
-        } else if (0x05A0_0000..=0x05AF_FFFF).contains(&phys) {
-            7 // Sound RAM only
-        } else if (0x05C0_0000..=0x05DF_FFFF).contains(&phys) {
-            2 // VDP1 RAM
-        } else if (0x05E0_0000..=0x05FF_FFFF).contains(&phys) {
-            // PLACEHOLDER: until getVramCycle is implemented in VDP2
-            2
-        } else if (0x0600_0000..=0x060F_FFFF).contains(&phys) {
-            2 // High Work RAM
-        } else {
-            0
+        match phys {
+            0..=0x001F_FFFF => 0,
+            0x0020_0000..=0x00FF_FFFF => 7,
+            0x0200_0000..=0x03FF_FFFF => 0,
+            0x0580_0000..=0x059F_FFFF => 0,
+            0x05A0_0000..=0x05AF_FFFF => 7,
+            0x05C0_0000..=0x060F_FFFF => 2,
+            _ => 0,
         }
     }
 
@@ -3107,9 +3081,7 @@ impl Sh2 {
                 if self.s() {
                     const SAT_MAX: i64 = 0x0000_7FFF_FFFF_FFFFi64;
                     const SAT_MIN: i64 = -0x0000_8000_0000_0000i64;
-                    if sum > SAT_MAX {
-                        sum = if mul < 0 { SAT_MIN } else { SAT_MAX };
-                    } else if sum < SAT_MIN {
+                    if !(SAT_MIN..=SAT_MAX).contains(&sum) {
                         sum = if mul < 0 { SAT_MIN } else { SAT_MAX };
                     }
                 }
@@ -3762,14 +3734,7 @@ impl Sh2 {
                 if self.s() {
                     const SAT_MAX: i64 = 0x7FFFFFFF;
                     const SAT_MIN: i64 = -0x80000000;
-                    if sum > SAT_MAX {
-                        self.mach |= 1;
-                        self.macl = if mul < 0 {
-                            SAT_MIN as u32
-                        } else {
-                            SAT_MAX as u32
-                        };
-                    } else if sum < SAT_MIN {
+                    if !(SAT_MIN..=SAT_MAX).contains(&sum) {
                         self.mach |= 1;
                         self.macl = if mul < 0 {
                             SAT_MIN as u32
@@ -6940,10 +6905,10 @@ mod opcode_tests {
                     }
 
                     // Verify against destination buffer
-                    for i in 0..64 {
+                    for (i, &expected) in expected_dst.iter().enumerate() {
                         let actual = cpu.read_byte(dst_base + i as u32);
                         assert_eq!(
-                            actual, expected_dst[i],
+                            actual, expected,
                             "Mismatch at offset {} for mode src={}, dst={}, size={}",
                             i, src_mode, dst_mode, size
                         );

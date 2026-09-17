@@ -53,8 +53,8 @@ pub fn print_report() {
     let writes = WRAM_WRITES.load(Ordering::Relaxed);
     eprintln!("--- MIMAS TELEMETRY REPORT ---");
     eprintln!("WRAM Accesses: Reads={}, Writes={}", reads, writes);
-    for i in 0..8 {
-        let idle_ns = THREAD_IDLE_NS[i].load(Ordering::Relaxed);
+    for (i, idle) in THREAD_IDLE_NS.iter().enumerate() {
+        let idle_ns = idle.load(Ordering::Relaxed);
         eprintln!(
             "  Core {}: Idle Time = {:.3} ms",
             i,

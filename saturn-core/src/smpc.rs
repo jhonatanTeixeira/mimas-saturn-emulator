@@ -1330,9 +1330,11 @@ mod tests {
         // A + Right pressed: b2 = 0xFF & !(1<<7) & !(1<<2) = 0x7B, b3 = 0xFF.
         let mut smpc = Smpc::new();
         let work_ram = WorkRam::new();
-        let mut pad = crate::peripheral::PadState::default();
-        pad.a = true;
-        pad.right = true;
+        let pad = crate::peripheral::PadState {
+            a: true,
+            right: true,
+            ..Default::default()
+        };
         smpc.set_pad_state(1, pad);
         work_ram.smpc_regs.write().unwrap()[reg::DDR1] = 0x60;
 
@@ -1373,8 +1375,10 @@ mod tests {
         // lines are floated high (`val & 0x7F == 0x7F`).
         let mut smpc = Smpc::new();
         let work_ram = WorkRam::new();
-        let mut gun = crate::peripheral::GunState::default();
-        gun.trigger = true;
+        let gun = crate::peripheral::GunState {
+            trigger: true,
+            ..Default::default()
+        };
         smpc.set_peripheral_state(1, crate::peripheral::PeripheralState::Gun(gun));
         work_ram.smpc_regs.write().unwrap()[reg::DDR1] = 0x00;
 

@@ -1231,18 +1231,16 @@ impl Cs2 {
         let mut end_fad = (((self.cr3 & 0xFF) as u32) << 16) | (self.cr4 as u32);
         let play_mode = ((self.cr3 >> 8) & 0xFF) as u8;
 
-        if start_pos_type != 0 && self.disc.is_some() {
-            // Track start
-            let track_num = (start_fad & 0xFF) as u8;
-            start_fad = self
-                .disc
-                .as_ref()
-                .unwrap()
-                .track_to_fad(track_num)
-                .unwrap_or(150);
+        if start_pos_type != 0 {
+            if let Some(disc) = &self.disc {
+                let track_num = (start_fad & 0xFF) as u8;
+                start_fad = disc.track_to_fad(track_num).unwrap_or(150);
+            }
         }
-        if end_fad == 0 && self.disc.is_some() {
-            end_fad = self.disc.as_ref().unwrap().lead_out_fad;
+        if end_fad == 0 {
+            if let Some(disc) = &self.disc {
+                end_fad = disc.lead_out_fad;
+            }
         }
 
         self.play_start_fad = start_fad;
@@ -1259,14 +1257,11 @@ impl Cs2 {
         let pos_type = ((self.cr1 >> 8) & 0xFF) as u8;
         let mut target_fad = (((self.cr1 & 0xFF) as u32) << 16) | (self.cr2 as u32);
 
-        if pos_type != 0 && self.disc.is_some() {
-            let track_num = (target_fad & 0xFF) as u8;
-            target_fad = self
-                .disc
-                .as_ref()
-                .unwrap()
-                .track_to_fad(track_num)
-                .unwrap_or(150);
+        if pos_type != 0 {
+            if let Some(disc) = &self.disc {
+                let track_num = (target_fad & 0xFF) as u8;
+                target_fad = disc.track_to_fad(track_num).unwrap_or(150);
+            }
         }
 
         self.fad = target_fad;
@@ -1600,7 +1595,7 @@ impl Cs2 {
     }
 
     fn cmd_mpeg_get_interrupt(&mut self) {
-        let int_val = 0u32 & self.mpegintmask;
+        let int_val = 0u32;
         self.cr1 = ((self.status as u16) << 8) | ((int_val >> 16) as u16 & 0xFF);
         self.cr2 = (int_val & 0xFFFF) as u16;
         self.cr3 = 0;

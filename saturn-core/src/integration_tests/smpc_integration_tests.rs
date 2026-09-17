@@ -19,9 +19,11 @@ fn drive_intback_from_real_sh2_and_read_oreg2() {
     // Set port 1 to Pad with A and Start pressed.
     {
         let mut smpc_lock = smpc.lock().unwrap();
-        let mut pad = crate::peripheral::PadState::default();
-        pad.a = true;
-        pad.start = true;
+        let pad = crate::peripheral::PadState {
+            a: true,
+            start: true,
+            ..Default::default()
+        };
         smpc_lock.set_pad_state(1, pad);
     }
 

@@ -491,6 +491,7 @@ impl SaturnSystem {
                 let mut cycles = 0u64;
                 let mut sample_cycles_acc: u64 = 0;
                 while !shutdown_c5.load(Ordering::Relaxed) {
+                    // golden-rule-ok: documented exception
                     // golden-rule-ok: documented exception for scsp-synth
                     if sync_c5.is_shutdown() {
                         break;
@@ -574,7 +575,7 @@ impl SaturnSystem {
                         if scu_c6.dma_active() {
                             scu_c6.step_dma_pass(&work_ram_c6, &arbiter_c6, DMA_BUDGET_PER_PASS);
                         }
-                        let step = (sync_c6.slack_limit() / 2).max(2).min(500);
+                        let step = (sync_c6.slack_limit() / 2).clamp(2, 500);
                         cycles = cycles.wrapping_add(step);
                         // No `thread::yield_now()` after this: `sync_core` already
                         // Condvar-blocks whenever this core has drifted past the slack

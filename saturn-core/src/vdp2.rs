@@ -51,6 +51,25 @@ impl Vdp2State {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct Vdp2LayerConfig {
+    pub mpofn: u16,
+    pub mpab: u16,
+    pub mpcd: u16,
+    pub patterndatasize: u16,
+    pub patternwh: u16,
+    pub planew: u32,
+    pub planeh: u32,
+    pub vram_8mbit: bool,
+    pub mapwh: u32,
+    pub supplementdata: u16,
+    pub auxmode: u16,
+    pub colornumber: u16,
+    pub transparencyenable: bool,
+    pub coloroffset: u32,
+    pub cram_mode: u16,
+}
+
 pub fn calc_plane_addr(
     map_offset: u16,
     plane_byte: u16,
@@ -85,33 +104,23 @@ pub fn calc_plane_addr(
     }
 }
 
-pub fn generate_plane_addr_table(
-    planetbl: &mut [u32; 4],
-    mpofn: u16,
-    mpab: u16,
-    mpcd: u16,
-    patterndatasize: u16,
-    patternwh: u16,
-    planew: u32,
-    planeh: u32,
-    vram_8mbit: bool,
-) {
+pub fn generate_plane_addr_table(planetbl: &mut [u32; 4], cfg: &Vdp2LayerConfig) {
     let map = [
-        mpab & 0xFF,
-        (mpab >> 8) & 0xFF,
-        mpcd & 0xFF,
-        (mpcd >> 8) & 0xFF,
+        cfg.mpab & 0xFF,
+        (cfg.mpab >> 8) & 0xFF,
+        cfg.mpcd & 0xFF,
+        (cfg.mpcd >> 8) & 0xFF,
     ];
 
     for i in 0..4 {
         planetbl[i] = calc_plane_addr(
-            mpofn,
+            cfg.mpofn,
             map[i],
-            patterndatasize,
-            patternwh,
-            planew,
-            planeh,
-            vram_8mbit,
+            cfg.patterndatasize,
+            cfg.patternwh,
+            cfg.planew,
+            cfg.planeh,
+            cfg.vram_8mbit,
         );
     }
 }
@@ -146,16 +155,10 @@ pub fn map_calc_xy(
     x: u32,
     y: u32,
     vars: &ScreenVars,
-    patternwh: u16,
-    patterndatasize: u16,
-    mapwh: u32,
-    supplementdata: u16,
-    auxmode: u16,
-    colornumber: u16,
-    vram_8mbit: bool,
+    cfg: &Vdp2LayerConfig,
     vram: &[u8],
 ) {
-    let cellwh = 2 + patternwh;
+    let cellwh = 2 + cfg.patternwh;
     let check = ((y >> cellwh) << 16) | (x >> cellwh);
 
     if check != state.oldcellcheck {
@@ -168,7 +171,7 @@ pub fn map_calc_xy(
         let planepixelheight_mask = vars.planepixelheight - 1;
 
         state.planenum =
-            (((y >> planepixelheight_bits) * mapwh) + (x >> planepixelwidth_bits)) as usize;
+            (((y >> planepixelheight_bits) * cfg.mapwh) + (x >> planepixelwidth_bits)) as usize;
 
         let masked_x = x & planepixelwidth_mask;
         let masked_y = y & planepixelheight_mask;
@@ -178,7 +181,7 @@ pub fn map_calc_xy(
         let pagepixelwh_bits = 9;
         let pagepixelwh_mask = 511;
 
-        let patternwh_bits = if patternwh == 1 { 0 } else { 1 };
+        let patternwh_bits = if cfg.patternwh == 1 { 0 } else { 1 };
         let pagewh_bits = 6 - patternwh_bits;
         let pagesize_bits = pagewh_bits * 2;
         let planew_bits = if vars.planepixelwidth == 512 { 0 } else { 1 };
@@ -188,7 +191,7 @@ pub fn map_calc_xy(
             + (((masked_y & pagepixelwh_mask) >> cellwh) << pagewh_bits)
             + ((masked_x & pagepixelwh_mask) >> cellwh);
 
-        let multiplier = if patterndatasize == 1 { 2 } else { 4 };
+        let multiplier = if cfg.patterndatasize == 1 { 2 } else { 4 };
         let pipe_addr = plane_addr + (offset * multiplier);
 
         let (charaddr, paladdr, flipfunction, specialfunction, specialcolorfunction) =
@@ -196,22 +199,13 @@ pub fn map_calc_xy(
                 let tmp1 =
                     u16::from_be_bytes([vram[pipe_addr as usize], vram[(pipe_addr as usize) + 1]]);
                 let mut tmp2 = 0;
-                if patterndatasize == 2 && (pipe_addr as usize) + 3 < vram.len() {
+                if cfg.patterndatasize == 2 && (pipe_addr as usize) + 3 < vram.len() {
                     tmp2 = u16::from_be_bytes([
                         vram[(pipe_addr as usize) + 2],
                         vram[(pipe_addr as usize) + 3],
                     ]);
                 }
-                pattern_addr(
-                    tmp1,
-                    tmp2,
-                    supplementdata,
-                    auxmode,
-                    patternwh,
-                    patterndatasize,
-                    colornumber,
-                    vram_8mbit,
-                )
+                pattern_addr(tmp1, tmp2, cfg)
             } else {
                 (0, 0, 0, 0, 0)
             };
@@ -227,50 +221,41 @@ pub fn map_calc_xy(
     }
 }
 
-pub fn pattern_addr(
-    tmp1: u16,
-    tmp2: u16,
-    supplementdata: u16,
-    auxmode: u16,
-    patternwh: u16,
-    patterndatasize: u16,
-    colornumber: u16,
-    vram_8mbit: bool,
-) -> (u32, u32, u16, u16, u16) {
+pub fn pattern_addr(tmp1: u16, tmp2: u16, cfg: &Vdp2LayerConfig) -> (u32, u32, u16, u16, u16) {
     let paladdr;
     let mut charaddr;
     let flipfunction;
     let specialfunction;
     let specialcolorfunction;
 
-    if patterndatasize == 1 {
+    if cfg.patterndatasize == 1 {
         // 1 word
-        paladdr = if colornumber == 0 {
-            (((tmp1 & 0xF000) as u32) >> 8) | (((supplementdata & 0xE0) as u32) << 3)
+        paladdr = if cfg.colornumber == 0 {
+            (((tmp1 & 0xF000) as u32) >> 8) | (((cfg.supplementdata & 0xE0) as u32) << 3)
         } else {
             ((tmp1 & 0x7000) as u32) >> 4
         };
 
-        if auxmode == 0 {
+        if cfg.auxmode == 0 {
             flipfunction = (tmp1 & 0xC00) >> 10;
-            if patternwh == 1 {
+            if cfg.patternwh == 1 {
                 // 8x8
-                charaddr = ((tmp1 & 0x3FF) as u32) | (((supplementdata & 0x1F) as u32) << 10);
+                charaddr = ((tmp1 & 0x3FF) as u32) | (((cfg.supplementdata & 0x1F) as u32) << 10);
             } else {
                 // 16x16
                 charaddr = (((tmp1 & 0x3FF) as u32) << 2)
-                    | ((supplementdata & 0x3) as u32)
-                    | (((supplementdata & 0x1C) as u32) << 10);
+                    | ((cfg.supplementdata & 0x3) as u32)
+                    | (((cfg.supplementdata & 0x1C) as u32) << 10);
             }
         } else {
             // auxmode == 1
             flipfunction = 0;
-            if patternwh == 1 {
-                charaddr = ((tmp1 & 0xFFF) as u32) | (((supplementdata & 0x1C) as u32) << 10);
+            if cfg.patternwh == 1 {
+                charaddr = ((tmp1 & 0xFFF) as u32) | (((cfg.supplementdata & 0x1C) as u32) << 10);
             } else {
                 charaddr = (((tmp1 & 0xFFF) as u32) << 2)
-                    | ((supplementdata & 0x3) as u32)
-                    | (((supplementdata & 0x10) as u32) << 10);
+                    | ((cfg.supplementdata & 0x3) as u32)
+                    | (((cfg.supplementdata & 0x10) as u32) << 10);
             }
         }
         specialfunction = 0;
@@ -279,7 +264,7 @@ pub fn pattern_addr(
         // 2 words
         charaddr = (tmp2 & 0x7FFF) as u32;
         flipfunction = (tmp1 & 0xC000) >> 14;
-        paladdr = if colornumber == 0 {
+        paladdr = if cfg.colornumber == 0 {
             ((tmp1 & 0x7F) as u32) << 4
         } else {
             ((tmp1 & 0x70) as u32) << 4
@@ -288,7 +273,7 @@ pub fn pattern_addr(
         specialcolorfunction = (tmp1 & 0x1000) >> 12;
     }
 
-    if !vram_8mbit {
+    if !cfg.vram_8mbit {
         charaddr &= 0x3FFF;
     }
     charaddr *= 0x20;
@@ -303,21 +288,17 @@ pub fn pattern_addr(
 }
 
 pub fn fetch_pixel(
-    charaddr: u32,
-    paladdr: u32,
+    addr: (u32, u32),
     mut x: u32,
     mut y: u32,
     flipfunction: u16,
-    patternwh: u16,
-    colornumber: u16,
-    transparencyenable: bool,
-    coloroffset: u32,
-    cram_mode: u16,
     cellw: u32,
-    vram: &[u8],
-    cram: &[u8],
+    cfg: &Vdp2LayerConfig,
+    mem: (&[u8], &[u8]),
 ) -> Option<u32> {
-    if patternwh == 1 {
+    let (charaddr, paladdr) = addr;
+    let (vram, cram) = mem;
+    if cfg.patternwh == 1 {
         // 8x8
         x &= 7;
         y &= 7;
@@ -348,7 +329,7 @@ pub fn fetch_pixel(
         }
     }
 
-    match colornumber {
+    match cfg.colornumber {
         0 => {
             // 4bpp
             let addr = ((charaddr + (y * cellw + x) / 2) & 0x7FFFF) as usize;
@@ -357,11 +338,11 @@ pub fn fetch_pixel(
             }
             let byte = vram[addr];
             let dot = if (x & 1) == 0 { byte >> 4 } else { byte & 0xF };
-            if dot == 0 && transparencyenable {
+            if dot == 0 && cfg.transparencyenable {
                 return None;
             }
-            let cram_addr = coloroffset + paladdr + (dot as u32);
-            Some(cram_lookup(cram_addr as u16, cram_mode, cram))
+            let cram_addr = cfg.coloroffset + paladdr + (dot as u32);
+            Some(cram_lookup(cram_addr as u16, cfg.cram_mode, cram))
         }
         1 => {
             // 8bpp
@@ -370,11 +351,11 @@ pub fn fetch_pixel(
                 return None;
             }
             let dot = vram[addr];
-            if dot == 0 && transparencyenable {
+            if dot == 0 && cfg.transparencyenable {
                 return None;
             }
-            let cram_addr = coloroffset + (paladdr | (dot as u32));
-            Some(cram_lookup(cram_addr as u16, cram_mode, cram))
+            let cram_addr = cfg.coloroffset + (paladdr | (dot as u32));
+            Some(cram_lookup(cram_addr as u16, cfg.cram_mode, cram))
         }
         2 => {
             // 16bpp palette
@@ -383,11 +364,11 @@ pub fn fetch_pixel(
                 return None;
             }
             let dot = u16::from_be_bytes([vram[addr], vram[addr + 1]]);
-            if dot == 0 && transparencyenable {
+            if dot == 0 && cfg.transparencyenable {
                 return None;
             }
-            let cram_addr = coloroffset + (dot as u32); // paladdr deliberately not applied
-            Some(cram_lookup(cram_addr as u16, cram_mode, cram))
+            let cram_addr = cfg.coloroffset + (dot as u32); // paladdr deliberately not applied
+            Some(cram_lookup(cram_addr as u16, cfg.cram_mode, cram))
         }
         3 => {
             // 16bpp RGB
@@ -396,7 +377,7 @@ pub fn fetch_pixel(
                 return None;
             }
             let dot = u16::from_be_bytes([vram[addr], vram[addr + 1]]);
-            if (dot & 0x8000) == 0 && transparencyenable {
+            if (dot & 0x8000) == 0 && cfg.transparencyenable {
                 return None;
             }
             Some(crate::vdp::rgb555_to_xrgb8888(dot))
@@ -409,7 +390,7 @@ pub fn fetch_pixel(
             }
             let dot =
                 u32::from_be_bytes([vram[addr], vram[addr + 1], vram[addr + 2], vram[addr + 3]]);
-            if (dot & 0x80000000) == 0 && transparencyenable {
+            if (dot & 0x80000000) == 0 && cfg.transparencyenable {
                 return None;
             }
             Some(dot & 0xFFFFFF)
@@ -586,7 +567,31 @@ mod tests {
         let mut vram = vec![0u8; 0x80000];
         vram[0] = 0x12;
         vram[1] = 0x34;
-        let pixel = fetch_pixel(0, 0x9999, 0, 0, 0, 1, 2, false, 0, 0, 8, &vram, &cram);
+        let pixel = fetch_pixel(
+            (0, 0x9999),
+            0,
+            0,
+            0,
+            8,
+            &Vdp2LayerConfig {
+                patternwh: 1,
+                colornumber: 2,
+                transparencyenable: false,
+                coloroffset: 0,
+                cram_mode: 0,
+                mpofn: 0,
+                mpab: 0,
+                mpcd: 0,
+                patterndatasize: 0,
+                planew: 0,
+                planeh: 0,
+                vram_8mbit: false,
+                mapwh: 0,
+                supplementdata: 0,
+                auxmode: 0,
+            },
+            (&vram, &cram),
+        );
         assert!(pixel.is_some() || pixel.is_none());
     }
 
@@ -637,7 +642,31 @@ mod tests {
             &[(0x10D, 0x5A)],
             &[(0x94, [0xDE, 0xAD, 0xBE, 0xEF])],
         );
-        let px = fetch_pixel(0x100, 0x20, 2, 3, 0, 1, 0, false, 0, 2, 8, &vram, &cram);
+        let px = fetch_pixel(
+            (0x100, 0x20),
+            2,
+            3,
+            0,
+            8,
+            &Vdp2LayerConfig {
+                patternwh: 1,
+                colornumber: 0,
+                transparencyenable: false,
+                coloroffset: 0,
+                cram_mode: 2,
+                mpofn: 0,
+                mpab: 0,
+                mpcd: 0,
+                patterndatasize: 0,
+                planew: 0,
+                planeh: 0,
+                vram_8mbit: false,
+                mapwh: 0,
+                supplementdata: 0,
+                auxmode: 0,
+            },
+            (&vram, &cram),
+        );
         assert_eq!(px, Some(0xDEAD_BEEF));
     }
 
@@ -653,7 +682,31 @@ mod tests {
             &[(0x10D, 0x5A)],
             &[(0xA8, [0x01, 0x02, 0x03, 0x04])],
         );
-        let px = fetch_pixel(0x100, 0x20, 3, 3, 0, 1, 0, false, 0, 2, 8, &vram, &cram);
+        let px = fetch_pixel(
+            (0x100, 0x20),
+            3,
+            3,
+            0,
+            8,
+            &Vdp2LayerConfig {
+                patternwh: 1,
+                colornumber: 0,
+                transparencyenable: false,
+                coloroffset: 0,
+                cram_mode: 2,
+                mpofn: 0,
+                mpab: 0,
+                mpcd: 0,
+                patterndatasize: 0,
+                planew: 0,
+                planeh: 0,
+                vram_8mbit: false,
+                mapwh: 0,
+                supplementdata: 0,
+                auxmode: 0,
+            },
+            (&vram, &cram),
+        );
         assert_eq!(px, Some(0x0102_0304));
     }
 
@@ -668,13 +721,61 @@ mod tests {
             &[(0x10D, 0x00)],
             &[(0x80, [0xCA, 0xFE, 0xBA, 0xBE])],
         );
-        let transparent = fetch_pixel(0x100, 0x20, 2, 3, 0, 1, 0, true, 0, 2, 8, &vram, &cram);
+        let transparent = fetch_pixel(
+            (0x100, 0x20),
+            2,
+            3,
+            0,
+            8,
+            &Vdp2LayerConfig {
+                patternwh: 1,
+                colornumber: 0,
+                transparencyenable: true,
+                coloroffset: 0,
+                cram_mode: 2,
+                mpofn: 0,
+                mpab: 0,
+                mpcd: 0,
+                patterndatasize: 0,
+                planew: 0,
+                planeh: 0,
+                vram_8mbit: false,
+                mapwh: 0,
+                supplementdata: 0,
+                auxmode: 0,
+            },
+            (&vram, &cram),
+        );
         assert_eq!(
             transparent, None,
             "dot 0 with transparency enabled is skipped"
         );
 
-        let opaque = fetch_pixel(0x100, 0x20, 2, 3, 0, 1, 0, false, 0, 2, 8, &vram, &cram);
+        let opaque = fetch_pixel(
+            (0x100, 0x20),
+            2,
+            3,
+            0,
+            8,
+            &Vdp2LayerConfig {
+                patternwh: 1,
+                colornumber: 0,
+                transparencyenable: false,
+                coloroffset: 0,
+                cram_mode: 2,
+                mpofn: 0,
+                mpab: 0,
+                mpcd: 0,
+                patterndatasize: 0,
+                planew: 0,
+                planeh: 0,
+                vram_8mbit: false,
+                mapwh: 0,
+                supplementdata: 0,
+                auxmode: 0,
+            },
+            (&vram, &cram),
+        );
         assert_eq!(
             opaque,
             Some(0xCAFE_BABE),
@@ -686,7 +787,31 @@ mod tests {
     fn fetch_pixel_4bpp_address_past_the_end_of_vram_is_none() {
         // Same 0x10D address, against a 16-byte VRAM.
         let (vram, cram) = cram4(16, &[], &[(0x94, [0xDE, 0xAD, 0xBE, 0xEF])]);
-        let px = fetch_pixel(0x100, 0x20, 2, 3, 0, 1, 0, false, 0, 2, 8, &vram, &cram);
+        let px = fetch_pixel(
+            (0x100, 0x20),
+            2,
+            3,
+            0,
+            8,
+            &Vdp2LayerConfig {
+                patternwh: 1,
+                colornumber: 0,
+                transparencyenable: false,
+                coloroffset: 0,
+                cram_mode: 2,
+                mpofn: 0,
+                mpab: 0,
+                mpcd: 0,
+                patterndatasize: 0,
+                planew: 0,
+                planeh: 0,
+                vram_8mbit: false,
+                mapwh: 0,
+                supplementdata: 0,
+                auxmode: 0,
+            },
+            (&vram, &cram),
+        );
         assert_eq!(px, None);
     }
 
@@ -701,7 +826,31 @@ mod tests {
             &[(0x10D, 0x5A)],
             &[(0x494, [0x11, 0x22, 0x33, 0x44])],
         );
-        let px = fetch_pixel(0x100, 0x20, 2, 3, 0, 1, 0, false, 0x100, 2, 8, &vram, &cram);
+        let px = fetch_pixel(
+            (0x100, 0x20),
+            2,
+            3,
+            0,
+            8,
+            &Vdp2LayerConfig {
+                patternwh: 1,
+                colornumber: 0,
+                transparencyenable: false,
+                coloroffset: 0x100,
+                cram_mode: 2,
+                mpofn: 0,
+                mpab: 0,
+                mpcd: 0,
+                patterndatasize: 0,
+                planew: 0,
+                planeh: 0,
+                vram_8mbit: false,
+                mapwh: 0,
+                supplementdata: 0,
+                auxmode: 0,
+            },
+            (&vram, &cram),
+        );
         assert_eq!(px, Some(0x1122_3344));
     }
 
@@ -716,7 +865,31 @@ mod tests {
             &[(0x10D, 0x5A)],
             &[(0x94, [0xDE, 0xAD, 0xBE, 0xEF])],
         );
-        let flipped = fetch_pixel(0x100, 0x20, 5, 3, 1, 1, 0, false, 0, 2, 8, &vram, &cram);
+        let flipped = fetch_pixel(
+            (0x100, 0x20),
+            5,
+            3,
+            1,
+            8,
+            &Vdp2LayerConfig {
+                patternwh: 1,
+                colornumber: 0,
+                transparencyenable: false,
+                coloroffset: 0,
+                cram_mode: 2,
+                mpofn: 0,
+                mpab: 0,
+                mpcd: 0,
+                patterndatasize: 0,
+                planew: 0,
+                planeh: 0,
+                vram_8mbit: false,
+                mapwh: 0,
+                supplementdata: 0,
+                auxmode: 0,
+            },
+            (&vram, &cram),
+        );
         assert_eq!(flipped, Some(0xDEAD_BEEF));
     }
 
@@ -725,12 +898,23 @@ mod tests {
         let (charaddr, paladdr, flip, sf, scf) = pattern_addr(
             0xC000 | 0x7F, // flip=3, paladdr=0x7F
             0x7FFF,
-            0,
-            0,
-            1,
-            2,
-            0,
-            true,
+            &Vdp2LayerConfig {
+                patternwh: 1,
+                colornumber: 0,
+                transparencyenable: false,
+                coloroffset: 0,
+                cram_mode: 0,
+                mpofn: 0,
+                mpab: 0,
+                mpcd: 0,
+                patterndatasize: 2,
+                planew: 0,
+                planeh: 0,
+                vram_8mbit: true,
+                mapwh: 0,
+                supplementdata: 0,
+                auxmode: 0,
+            },
         );
         assert_eq!(charaddr, 0x7FFF * 0x20);
         assert_eq!(flip, 3);

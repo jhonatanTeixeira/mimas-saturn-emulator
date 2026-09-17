@@ -213,9 +213,12 @@ fn wheel_hysteresis_press_thresholds_match_the_reference_table() {
     // tighter press threshold every call. See `WheelState::axis1`... no per-
     // field comment exists since the struct just stores a raw axis value;
     // the simplification lives here, at the one place that interprets it.
-    let mut w = WheelState::default();
+    let mut w = WheelState {
+        axis1: 0x67,
+        ..Default::default()
+    };
 
-    w.axis1 = 0x67; // at the press threshold
+    // at the press threshold
     let b0 = PeripheralState::Wheel(w).to_port_data().data[0];
     assert_eq!(b0 & (1 << 6), 0, "Left (bit 6) must read pressed at 0x67");
 
@@ -230,8 +233,10 @@ fn wheel_hysteresis_press_thresholds_match_the_reference_table() {
 
 #[test]
 fn mouse_buttons_are_active_high() {
-    let mut m = MouseState::default();
-    m.left = true;
+    let m = MouseState {
+        left: true,
+        ..Default::default()
+    };
     let pd = PeripheralState::Mouse(m).to_port_data();
     assert_eq!(pd.data[0] & 1, 1, "§9.6: Left is bit 0, active-high");
 }
@@ -242,9 +247,11 @@ fn mouse_negative_displacement_is_ones_complement() {
     // magnitude, stored at the moment of the real `PerMouseMove` call (not
     // recomputed later). `MouseState`'s displacement fields mirror that:
     // whatever is stored there already IS the wire byte.
-    let mut m = MouseState::default();
-    m.x_sign = true;
-    m.x_displacement = !1u8; // magnitude 1, one's-complement-encoded: 0xFE
+    let m = MouseState {
+        x_sign: true,
+        x_displacement: !1u8,
+        ..Default::default()
+    }; // magnitude 1, one's-complement-encoded: 0xFE
     let pd = PeripheralState::Mouse(m).to_port_data();
     assert_eq!(pd.data[1], 0xFE);
     assert_eq!(
@@ -258,8 +265,10 @@ fn mouse_negative_displacement_is_ones_complement() {
 fn mouse_flush_clears_deltas_but_keeps_buttons() {
     // §5.4 step 2 / §9.6: `PerFlush` clears sign+overflow+displacement,
     // keeps the button bits (`mousebits[0] &= 0x0F`).
-    let mut m = MouseState::default();
-    m.left = true;
+    let mut m = MouseState {
+        left: true,
+        ..Default::default()
+    };
     m.start = true;
     m.x_sign = true;
     m.x_overflow = true;
