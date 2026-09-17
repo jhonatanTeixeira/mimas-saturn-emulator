@@ -25,6 +25,15 @@ pub struct LockStepSync {
 struct SyncState {
     cycles: Vec<u64>,
     active: Vec<bool>,
+    /// Which cores are currently blocked inside `sync_core`'s drift wait.
+    waiting: Vec<bool>,
+    /// For each waiter, the minimum active cycle count at which it could
+    /// actually proceed (`its own cycles - slack_limit`). Meaningless unless
+    /// `waiting[i]`. This is what makes the notify conditional: without it
+    /// `sync_core` has no way to tell "the minimum moved" from "the minimum
+    /// moved far enough to unblock somebody", and has to broadcast on every
+    /// call just in case.
+    wake_at: Vec<u64>,
     shutdown: bool,
 }
 
@@ -40,6 +49,8 @@ impl LockStepSync {
             state: Mutex::new(SyncState {
                 cycles: vec![0; num_threads],
                 active: vec![true; num_threads],
+                waiting: vec![false; num_threads],
+                wake_at: vec![0; num_threads],
                 shutdown: false,
             }),
             condvar: Condvar::new(),
@@ -83,10 +94,16 @@ impl LockStepSync {
                 Some(min_val) => {
                     let diff = current_cycles.wrapping_sub(min_val) as i64;
                     if diff > self.slack_limit as i64 {
+                        // Publish what this core is waiting for, so whoever
+                        // advances the minimum can tell whether it needs to
+                        // wake us at all.
+                        state.waiting[core_id] = true;
+                        state.wake_at[core_id] = current_cycles.saturating_sub(self.slack_limit);
                         let start = std::time::Instant::now();
                         state = self.condvar.wait(state).unwrap();
                         let duration = start.elapsed().as_nanos() as u64;
                         crate::telemetry::record_idle_time(core_id, duration);
+                        state.waiting[core_id] = false;
                     } else {
                         break;
                     }
@@ -98,8 +115,43 @@ impl LockStepSync {
             }
         }
 
-        // Notify other threads because we have updated cycles or woke up
-        self.condvar.notify_all();
+        state.waiting[core_id] = false;
+
+        // Conditional broadcast. This used to be an unconditional
+        // `notify_all()` on *every* call -- from Core 0 that is once per ~32
+        // guest cycles, i.e. ~10^5 futex wakes a second at a core that was
+        // Condvar-blocked ~97% of the time and could only make progress every
+        // ~650 cycles. Roughly 15 of every 16 wakeups were spurious: the woken
+        // core re-locked this same mutex, recomputed the minimum, found nothing
+        // had changed for it, and slept again. Now a broadcast only goes out
+        // when the minimum active cycle count has actually reached some
+        // waiter's threshold.
+        //
+        // Using the global minimum (rather than each waiter's own "minimum of
+        // the others") is deliberately conservative in the safe direction: a
+        // waiter is by definition *ahead* of the minimum, so it is never itself
+        // the minimum, and `global_min >= wake_at[i]` therefore implies that
+        // core's own drift condition is satisfied. Deactivation and shutdown
+        // still broadcast unconditionally (`set_thread_active`,
+        // `request_shutdown`), which covers the cases where the minimum jumps
+        // without anyone calling `sync_core`.
+        let mut global_min: Option<u64> = None;
+        for i in 0..self.num_threads {
+            if state.active[i] {
+                global_min = Some(match global_min {
+                    None => state.cycles[i],
+                    Some(v) => v.min(state.cycles[i]),
+                });
+            }
+        }
+        let should_notify = match global_min {
+            Some(min_val) => (0..self.num_threads)
+                .any(|i| i != core_id && state.waiting[i] && state.wake_at[i] <= min_val),
+            None => false,
+        };
+        if should_notify {
+            self.condvar.notify_all();
+        }
         true
     }
 

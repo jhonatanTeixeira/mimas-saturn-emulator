@@ -2395,3 +2395,228 @@ Key insights and corrections discovered during execution:
 3. **Transparency Handling**: A test validating transparency was failing because it fetched the back screen color when transparency was hit (`dot == 0`). `n3_transparency_enable` dynamically checks `BGON` bit 11; if transparent, `fetch_pixel` correctly returns `None`, leaving the frame buffer containing the back screen color.
 4. **VRAM 8MBit Decoder Masking**: The VRAM bank partition `addr` decode was missing the correct fallback multiplier. Verified it follows `(((bktau & 0x3) << 16) | bktal) * 2` properly and addresses VRAM cleanly.
 All tests passed successfully, setting a solid foundation for VDP2 Phase 3.
+
+## Chapter 39 — The per-instruction `sched_yield` that cost the interpreter 2.4x
+
+`Sh2::run_loop`'s body ended with `std::thread::yield_now()`, executed after
+*every single emulated instruction*. It had been there since the initial commit
+(`git log -S` confirms: `a54ab64`), with no comment and no rationale anywhere in
+this file — the kind of "be polite to other threads" idiom that looks free and
+isn't. `thread::yield_now()` is a `sched_yield(2)` syscall. On the one loop that
+is this emulator's actual critical path, that is a syscall per emulated
+instruction.
+
+It was found not by profiling but by reading the loop while answering an
+unrelated architecture question (does the PCSX2-style "synchronization must be
+coarser than the work between synchronizations" argument apply to Mimas's
+thread-per-component design?). Answering that honestly meant finally *reading*
+`telemetry.rs`'s `THREAD_IDLE_NS`, which has been wired up and printed by
+`saturn-frontend-native`'s boot-watch since it was written, and whose numbers
+had never once been recorded in this file, in `docs/`, or in `.development/`.
+
+**The measurement.** Real BIOS boot (`--bios`, unthrottled, x86-64, 6 cores),
+comparing wall-clock time to reach the same settle PC `0x06001694` — the same
+address Chapters 32 and 34 both settle at, so this is the same amount of real
+emulated work either way, which the near-identical WRAM access counts confirm:
+
+| | with `yield_now` | without |
+|---|---|---|
+| wall clock to `0x06001694` | **10.01 s** | **4.05–4.15 s** |
+| WRAM accesses (R+W) | 2,554,350 | 2,554,734 ± 300 |
+| voluntary context switches | 2,128,130 | ~945,000 |
+| voluntary ctx switches **per second** | 212,600 | 227,600 |
+| process CPU | 139% | 152% |
+
+**2.4x, for deleting one line.** The last two rows are the interesting part and
+the reason this is worth a chapter: the context-switch *rate* went **up**, not
+down. `sched_yield` with idle cores available mostly returns without
+rescheduling anything — so the cost being paid was the syscall itself
+(kernel entry/exit, ~10⁵ times a second), not an actual reschedule. Whatever the
+yield was supposed to buy, it was never buying it.
+
+It was also never load-bearing. `sync_core` already Condvar-blocks whenever a
+core drifts past `slack_limit`, which is the only moment yielding to another
+core accomplishes anything, and every other component thread parks rather than
+spins (`docs/mimas-architecture-spec.md` §1.4/§1.5). The same vestigial call
+sat in Cores 4/5/6's loops in `lib.rs`, immediately after their own `sync_core`;
+those were removed in the same pass for consistency but measured as **no
+additional gain** (4.13 s → 4.05–4.15 s, inside run-to-run noise), exactly as
+expected — those cores are Condvar-blocked most of the time and their loops
+iterate orders of magnitude less often than the SH-2's.
+
+**What this changes about the architecture argument, and what it doesn't.** The
+bounded-slack design is *not* what was costing throughput here: Core 0 blocks in
+`sync_core` only 6.1% of wall clock before the fix. The cost was the per-
+instruction *mechanism* of staying synchronized, which is paid whether or not
+anyone actually waits. That distinction matters, because the usual framing of
+"threads are expensive" is about threads waiting on each other, and that framing
+would have sent the search in the wrong direction entirely.
+
+Two things this exposed that are **not** fixed here, recorded in
+`.development/current_bugs.md` rather than silently left in a commit message:
+
+1. Core 0's idle *fraction* roughly doubled (6.1% → 15.0%) once it got faster —
+   it now spends proportionally more time waiting for Core 5 in the lockstep.
+   The bottleneck moved, it did not disappear.
+2. ~228K voluntary context switches/sec remain, and they are **not** from the
+   yield. They are the Core 0 ↔ Core 5 futex ping-pong: `sync_core` calls
+   `condvar.notify_all()` unconditionally on every call (`sync.rs:96`), i.e.
+   every 32 guest cycles from Core 0, while Core 5 sits Condvar-blocked ~90% of
+   the time and can only make progress every ~500. That is Chapter 10's
+   "spuriously woken millions of times a second" pathology reappearing in a
+   second form — Chapter 10 fixed it for *parked* cores (by splitting the
+   condvars); it is still live for *active-but-drifted* ones.
+
+## Chapter 40 — The slack invariant: why a cycle-driven core still can't take big steps
+
+Chapter 39's audit produced eight violations of `docs/mimas-architecture-spec.md`
+§1.2/§1.3/§1.4/§1.5. Commit `9354fd3` set out to fix all eight and got the *design*
+right in every case; it also stopped the BIOS booting entirely. Both halves of that
+sentence are worth recording, because the failure is not carelessness — it is a real
+invariant that was never written down anywhere.
+
+**What broke.** Core 0 stopped at `0x000002B0` with **4** WRAM accesses, against
+2,554,734 and `0x06001694` before. `0x2B0`/`0x2B2`/`0x2B4` is the BIOS memory-clear
+loop — the same address and the same signature Chapter 32 records. `perf` over a
+full run put **74.6% of samples in the kernel** (futex), with the hottest user
+symbol `Sh2::execute` at 2.55%.
+
+**The invariant.** Core 5 was moved off its wall clock onto real SH-2 cycles, which
+is exactly what §1.4 asks for. It advanced 128 samples' worth per iteration:
+`128 * 649 = 83,072` cycles — against the default `slack_limit` of **1000**.
+
+`LockStepSync` blocks a core that has drifted more than `slack_limit` cycles ahead
+of the slowest active one. A core whose quantum is 83x the window can therefore
+never *be* inside the window: it lands permanently ahead, and the pair ping-pongs on
+the boundary, with `sync_core`'s `notify_all` firing from the other side every 32
+cycles. So:
+
+> **A core's per-`sync_core` step must not exceed `slack_limit`.**
+
+The old code satisfied this by accident of its own formula --
+`step = (slack_limit / 2).max(2).min(500)` -- which is derived *from* the slack and
+was never explained as anything but a magic expression. Replacing it with an
+honest, physically-derived constant removed the accident and exposed the
+requirement. This is also why the fix is not "go back to 500": 500 is not what a
+sample is worth. The fix is to keep the exact cycle count and *report* it in
+slack-sized chunks, which Cores 4 and 5 now both do.
+
+**The test already knew.** `test_saturn_system_startup_shutdown`
+(`saturn-core/tests/sync_tests.rs:283`) builds a system with `with_slack(10)` and
+asserts Core 0 keeps moving. It is the canary for precisely this, and it was failing
+in `9354fd3`. The suite was reported as green; it was not.
+
+**The other thing that went wrong is more interesting than the first.** §1.2b's
+summary-word design (one relaxed load per instruction, heavy work behind it) was
+implemented correctly in the consumer and wired into *no producer at all* —
+`hardware_events_any` was set in six places, all inside `mod opcode_tests`. The five
+real producers (`lib.rs` Core 7 x4, `vdp.rs` VDP1 x1) never touched it, so SMPC
+IRQ, NMI, system reset, clock change and VDP1 Draw End were dropped silently and
+permanently. The six test edits were what kept the suite green.
+
+The lesson is not "check your producers". It is that a summary word is a
+*two-sided* protocol, and exposing the raw flag next to it as a public field invites
+exactly this. `WorkRam` now has `raise_smpc_irq()`/`raise_smpc_nmi()`/
+`raise_smpc_sysres()`/`raise_smpc_clock_change()`/`raise_vdp1_draw_end()`, each
+publishing the flag and then the summary word, both `Release`; the consumer `swap`s
+the summary word with `Acquire` rather than load-then-store, so a producer landing
+between the read and the clear cannot have its event erased. A sixth flag added
+later cannot repeat the bug without deliberately bypassing the helpers.
+
+**`SLEEP` cannot park, and this is structural.** `9354fd3` parked the core on a
+Condvar until `hardware_events_any` lit up. Master SH-2 is the system's *only*
+timing source — V-Blank, H-Blank, the SCU timers and SMPC dispatch all advance from
+`Sh2::step`'s own cycle accounting. A parked Master stops advancing cycles, so
+nothing can ever raise the event that would wake it: a hard deadlock, not a slow
+path. Re-executing `SLEEP` keeps cycles flowing and the interrupt actually arrives.
+The §1.5 gap is real and stays open; closing it requires moving the timing generator
+off Master first, not a Condvar at the opcode.
+
+**A correction to this chapter's own record.** An earlier draft of this chapter, and
+of `docs/current_review.md`, credited `9354fd3` with removing `Instant::now()` from
+`sync.rs` as "a real §1.5 fix". That is wrong: `sync.rs` still reads the host clock
+around its Condvar wait to feed `telemetry::record_idle_time`, the commit never
+touched those lines, and the per-core blocked-time instrumentation was never dead.
+The claim came from taking the commit's own summary at face value instead of
+grepping for it -- the same failure mode this chapter criticises elsewhere. §1.5's
+"no component thread may reference the host wall clock at all" is still violated
+there, and it is now recorded as open in `.development/current_bugs.md` rather than
+as fixed.
+
+**`is_shutdown()`'s mirror was write-only.** `shutdown_flag` was declared,
+initialised to `false` and read — and stored nowhere, so `is_shutdown()` returned
+`false` forever and `PanicGuard`'s whole purpose (one core's panic must not hang the
+others) was inoperative. `request_shutdown` now stores it.
+
+**Result, same BIOS, same machine, back to back:**
+
+| | before Ch.39 | Ch.39 (`yield_now` only) | `9354fd3` | now |
+|---|---|---|---|---|
+| settle PC | `0x06001694` | `0x06001694` | `0x000002B0` | `0x06001694` |
+| WRAM accesses | 2,554,350 | 2,554,734 | **4** | 2,554,734 |
+| wall clock | 10.01 s | 4.05–4.15 s | 0.72 s (dead) | **3.69 s** |
+
+2.7x against the original baseline. The extra gain over Chapter 39 is §1.2b actually
+working: five atomic read-modify-writes per instruction replaced by one relaxed
+load.
+
+Also fixed in the same pass: SNDOFF on the Master's own SMPC path never stopped
+Core 4 (it wrote `m68k_control`, which Core 4 no longer reads); Core 4 advanced a
+flat `2` cycles per 200 M68K instructions, ~2000x under-reporting that would have
+made it the lockstep anchor the moment SNDON fired; and `check_bus_miss` called
+`std::env::var` on every bus access, which `perf` had surfaced as
+`CStr::from_bytes_with_nul`.
+
+## Chapter 41 — The conditional notify: 32% faster and 23% cheaper, at the same time
+
+`LockStepSync::sync_core` ended with an unconditional `self.condvar.notify_all()`.
+From Core 0 that fires once per ~32 guest cycles -- on the order of 10^5 futex
+broadcasts a second -- at a Core 5 that telemetry showed Condvar-blocked 97% of the
+time and that can only make progress every ~650 cycles. Roughly 15 of every 16
+wakeups were spurious: the woken core re-locked the same mutex, recomputed the
+minimum, found nothing had changed *for it*, and slept again.
+
+This is Chapter 10's pathology in its third form. Chapter 10 fixed it for *parked*
+cores by splitting the condvars. It stayed alive for *active-but-drifted* ones,
+because `sync_core` had no way to distinguish "the minimum moved" from "the minimum
+moved far enough to unblock somebody" -- so it broadcast every time, just in case.
+
+**The fix is to give it that information.** `SyncState` now carries `waiting[i]` and
+`wake_at[i]`: when a core blocks on drift it publishes the minimum active cycle
+count at which it could actually proceed (its own cycles minus `slack_limit`). The
+broadcast then goes out only when the global minimum has reached some waiter's
+threshold.
+
+Using the *global* minimum rather than each waiter's own "minimum of the others" is
+deliberately conservative in the safe direction: a waiter is by definition ahead of
+the minimum, so it is never itself the minimum, and `global_min >= wake_at[i]`
+therefore implies that core's own drift condition is satisfied.
+
+**Why this cannot deadlock**, which matters more than the speedup: the core holding
+the global minimum can never block, because blocking requires being more than
+`slack_limit` *ahead* of the minimum of the others. There is therefore always at
+least one running core to issue the notify. Deactivation and shutdown still
+broadcast unconditionally (`set_thread_active`, `request_shutdown`), covering the
+cases where the minimum jumps without anyone calling `sync_core`.
+
+| | before | after |
+|---|---|---|
+| Master SH-2 | 40.4-41.2 MHz (141-144% of real) | **53.2-54.1 MHz (186-189%)** |
+| wall clock to `0x06001694` | 3.07-3.09 s | **2.31-2.35 s** |
+| voluntary context switches | ~860,000 | **192,700** |
+| ...per second | 278K | **83K** |
+| process CPU | 147% | **113%** |
+| Core 0 blocked in `sync_core` | 580 ms (18.9%) | **61-75 ms (2.7%)** |
+
+32% more throughput while using 23% *less* CPU. Those normally trade against each
+other; here they did not, because everything removed was overhead. Core 0's blocked
+time falling 19% -> 2.7% is the direct measure: Master SH-2 now spends almost all of
+its wall clock executing instructions instead of waiting on the lockstep.
+
+Cumulative against the pre-Chapter-39 baseline: 12.5 MHz -> 53.7 MHz, **4.3x**.
+
+**What is left is not overhead.** The remaining 83K context switches a second are
+the genuine Core 0 <-> Core 5 handoff. Core 5 is still an *active* participant in
+the bounded-slack lockstep instead of a parked, event-driven component -- the gap
+§1.5 already records. Parking it removes the handoff rather than making it cheaper,
+and that is the next real step, not another micro-optimisation here.

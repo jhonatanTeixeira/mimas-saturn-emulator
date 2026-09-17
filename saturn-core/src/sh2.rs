@@ -4510,6 +4510,9 @@ impl Sh2 {
                 };
                 self.pending_sync += delta;
                 if self.pending_sync >= batch {
+                    if !self.is_slave {
+                        crate::telemetry::record_master_cycles(self.cycles);
+                    }
                     sync.sync_core(self.core_id, self.cycles);
                     self.pending_sync = 0;
                 }
@@ -6815,7 +6818,10 @@ mod opcode_tests {
         let mut throttle =
             crate::throttle::ClockThrottle::new(crate::throttle::SH2_CLOCK_28MHZ, speed);
 
-        // Just verify advance can accept delta cycles without panicking
+        // no-assert: this covers the wiring only -- that a `Multiplier(1.0)`
+        // throttle accepts a cycle delta without panicking or blocking. The
+        // pacing arithmetic itself is asserted in `throttle.rs`'s own tests
+        // (`advance_never_sleeps_longer_than_the_cap` and friends).
         throttle.advance(100);
     }
 

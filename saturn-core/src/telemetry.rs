@@ -3,6 +3,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 pub static TELEMETRY_ENABLED: AtomicBool = AtomicBool::new(true);
 
 // Metrics
+/// Master SH-2's emulated cycle count, republished at each `sync_core` batch
+/// boundary (every ~32 guest cycles, alongside a shared-state access that
+/// already happens there -- not a new per-instruction cost). Divided by
+/// wall-clock seconds this is the only number that says how fast the emulator
+/// actually runs, against the real 28.6364 MHz: everything else measures time
+/// to reach a fixed point, which says nothing about real-time headroom.
+pub static MASTER_CYCLES: AtomicU64 = AtomicU64::new(0);
+
 pub static WRAM_READS: AtomicU64 = AtomicU64::new(0);
 pub static WRAM_WRITES: AtomicU64 = AtomicU64::new(0);
 
@@ -17,6 +25,10 @@ pub static THREAD_IDLE_NS: [AtomicU64; 8] = [
     AtomicU64::new(0),
     AtomicU64::new(0),
 ];
+
+pub fn record_master_cycles(cycles: u64) {
+    MASTER_CYCLES.store(cycles, Ordering::Relaxed);
+}
 
 pub fn record_wram_read() {
     if TELEMETRY_ENABLED.load(Ordering::Relaxed) {

@@ -198,6 +198,7 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(2);
+    let run_started = Instant::now();
     let deadline = Instant::now() + Duration::from_secs(watch_secs);
     let mut last_pc = start_pc;
     let mut last_change = Instant::now();
@@ -251,6 +252,28 @@ fn main() {
     }
 
     // Print telemetry profiling report
+    // Real emulation speed. Everything else measured here (time to reach a
+    // given PC, WRAM access counts) compares runs against each other; only this
+    // says whether the emulator could run a game at full speed on this host.
+    {
+        use std::sync::atomic::Ordering as O;
+        let cycles = saturn_core::telemetry::MASTER_CYCLES.load(O::Relaxed);
+        let secs = run_started.elapsed().as_secs_f64();
+        let hz = if secs > 0.0 {
+            cycles as f64 / secs
+        } else {
+            0.0
+        };
+        let real = saturn_core::throttle::SH2_CLOCK_28MHZ;
+        println!(
+            "Master SH-2: {} cycles in {:.2}s = {:.2} MHz ({:.1}% of real {:.3} MHz)",
+            cycles,
+            secs,
+            hz / 1e6,
+            hz / real * 100.0,
+            real / 1e6
+        );
+    }
     saturn_core::telemetry::print_report();
 
     // Shutdown system gracefully

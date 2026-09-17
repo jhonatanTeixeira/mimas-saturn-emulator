@@ -1827,8 +1827,10 @@ mod tests {
 
     #[test]
     fn no_slave_target_wired_is_a_silent_no_op() {
-        // A bare `Scu::new()` (no `set_slave_target` call) must not panic
-        // when a mirrorable vector fires.
+        // no-assert: proving the absence of a panic *is* the assertion here --
+        // a bare `Scu::new()` with no `set_slave_target` must stay a silent
+        // no-op when a mirrorable vector fires, and there is no observable
+        // state to check afterwards.
         let scu = Scu::new();
         let _master = wire_master(&scu);
         scu.vblank_in();

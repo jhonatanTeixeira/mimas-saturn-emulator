@@ -1,204 +1,206 @@
-# Current review — `HEAD~2..HEAD` (VDP2 Phase 2 + Phase 3)
+# Code review — commit `9354fd3` "Fix architectural violations (Spec 1.2, 1.4, 1.5)"
 
-Snapshot of the **latest** review only (per `CLAUDE.md`). Overwrite, don't append.
+> The previous contents of this file (the VDP2 Phase 2/3 review, 15 findings, still
+> **open**) are recoverable with `git show 9354fd3:docs/current_review.md`. None of
+> those findings were addressed by this commit.
 
-Range: `604632f..194572f`
-- `604632f` VDP2 Phase 2: One NBG layer, the simplest format, pixel-exact
-- `194572f` VDP2 Phase 3: Remaining NBG layers and every character/bitmap format
+**Verdict: this commit must not ship as-is. It breaks BIOS boot completely.**
+Verified empirically, not inferred. `cargo test --workspace` is green (396 tests),
+which is itself part of the problem — see F3.
 
-Also present in the working tree at review time (separate, in-flight work, not part of the
-review target): `cargo fmt` of the above files plus the `thread::yield_now()` removal in
-`Sh2::run_loop` / Cores 4/5/6. Those were read but are not covered by the findings below.
+## Measured regression
 
-Cross-checked against `../yabause/src/` (`vidsoft.c`, `vidshared.h`, `vdp2.h`, `titan/titan.c`)
-and `docs/implementation-plans/vdp2.md`.
+Same binary flags, same BIOS, same machine, back to back:
 
-`cargo test --workspace`: green (395 tests). `cargo fmt --check`: clean.
+| | before (`194572f` + the reverted `yield_now` fix) | after `9354fd3` |
+|---|---|---|
+| Core 0 settle PC | `0x06001694` | **`0x000002B0`** |
+| WRAM accesses (R+W) | 2,554,734 | **4** |
+| wall clock to settle | 4.05–4.15 s | 0.72 s (dies immediately) |
+| process CPU | 152% | 48% |
+
+`0x2B0`/`0x2B2`/`0x2B4` is the BIOS memory-clear loop (`MOV.L R4,@R3` / `DT R6` /
+`BF/S`) — the exact address and the exact signature `history.md` Chapter 32 records
+for "Master SH-2 throttled by the bounded-slack model". Boot no longer progresses
+past it. `perf record` over a full run: **74.6% of samples are in the kernel**
+(futex), with the hottest user symbol `Sh2::execute` at 2.55%.
+
+## F1 — `shutdown_flag` is written nowhere; `is_shutdown()` returns `false` forever
+
+`saturn-core/src/sync.rs:4` declares it, `:37` initialises it to `false`, `:180`
+reads it. **There is no `store` anywhere in the repo** (`grep -rn shutdown_flag`
+returns exactly those three lines). `request_shutdown()` (`sync.rs:172-177`) still
+sets only `state.shutdown`.
+
+Consequence: every `sync.is_shutdown()` check is dead — `Sh2::run_loop`
+(`sh2.rs:4470`), Core 4 (`lib.rs:427`), Core 5 (`lib.rs:472`), Core 6
+(`lib.rs:521`). `PanicGuard`'s whole purpose — "on panic it force-triggers
+`sync.request_shutdown()` so one core's crash doesn't hang the rest of the system
+silently" (CLAUDE.md) — is now inoperative. A panic on any core hangs the process.
+
+Fix: `request_shutdown` must `self.shutdown_flag.store(true, Ordering::Release)`.
+
+## F2 — the summary word is never set by any production producer
+
+This is the boot-breaking one. `service_pending_interrupt` (`sh2.rs:2766-2769`) now
+gates all five hardware events behind `hardware_events_any`. The real producers do
+**not** set it:
+
+- `lib.rs:581-582` sets `smpc_irq_pending` — no summary store
+- `lib.rs:586-587` sets `smpc_nmi_pending` — no summary store
+- `lib.rs:591-592` sets `smpc_sysres_pending` — no summary store
+- `lib.rs:595` sets `smpc_clock_change` — no summary store
+- `vdp.rs:406-407` sets `vdp1_draw_end_pending` — no summary store
+
+`grep -rn hardware_events_any` finds `store(true, …)` at exactly six places:
+`sh2.rs:4945, 4980, 5004, 5382, 5409, 5862` — **all inside `mod opcode_tests`**.
+
+So in production the gate never opens and SMPC System Manager IRQ, NMI, system
+reset, 320/352 clock change and VDP1 Draw End are **silently dropped forever**.
+
+The summary-word technique is right; it just has to be written at every producer,
+ideally by funnelling all five through one `WorkRam::raise_hardware_event(…)`
+helper so a future sixth flag cannot repeat this.
+
+## F3 — the tests were patched instead of the producers, and that masked F2
+
+The only `hardware_events_any.store(true)` additions in the diff are six lines added
+to six existing tests so their assertions keep passing. This is exactly the failure
+mode CLAUDE.md names: *"never assert a value you haven't independently derived. A
+self-consistent-but-wrong test is worse than no test."* 396 tests pass while the
+emulator cannot boot. No test covers "Core 7 raises an SMPC IRQ and Master SH-2
+services it", which is what would have caught this.
+
+## F4 — the measured `yield_now` fix was reverted without mention
+
+`std::thread::yield_now()` is back at `sh2.rs:4496`, and the comment block recording
+*why* it was removed (with the 10.01s → 4.13s A/B) is gone. That was a measured 2.4x
+on the emulator's hottest loop. The three `lib.rs` pointer comments survive and now
+describe a state that no longer exists, so the code contradicts itself.
+
+## F5 — `park_for_sleep` would deadlock the system clock if Master ever reached it
+
+`sync.rs:165-170`. Master SH-2 is the *only* source of cycle-driven timing —
+V-Blank, H-Blank, SCU timers and SMPC dispatch all advance from `Sh2::step`'s own
+cycle accounting (CLAUDE.md, `sh2.rs:2446-2483`). If Master parks inside a `SLEEP`
+opcode waiting for `hardware_events_any`, nothing advances cycles, so nothing can
+ever raise the event that would wake it. It is not the cause of the current failure
+(BIOS offset `0x52E` is the only `SLEEP` in the first 4KB and boot dies before it),
+but it is a latent hard deadlock. A CPU waiting on an interrupt must stay in the
+cycle-advancing loop, or the timing source has to move off Master first.
+
+## F6 — `cargo fmt` was not run; CLAUDE.md requires it
+
+`cargo fmt --check` fails on `sh2.rs:2766` and `sh2.rs:4942`. `sync.rs:54`'s
+`pub fn sync_core` is also indented at column 0 inside the `impl`.
+
+## F7 — 18 throwaway scripts committed to the repo root
+
+`fix_core4.py`, `fix_core5.py`, `fix_flags.py`, `fix_instant.py`, `fix_newlines.py`,
+`fix_perf_doc.py`, `fix_perf_doc2.py`, `fix_sh2_final.py`, `fix_sh2_run_loop.py`,
+`fix_shutdown.py`, `fix_sleep.py`, `fix_sleep2.py`, `fix_sync3.py`,
+`fix_sync_again.py`, `fix_sync_order.py`, `fix_sync_robust.py`,
+`fix_test_newlines.py` … — untracked, but they are working-tree litter that should
+be deleted, not left for the next session to wonder about.
+
+## F8 — duplicated statement
+
+`lib.rs:607-608`: `sync_c7.set_thread_active(4, true);` twice in a row.
+
+## F9 — `m68k_control` is now half-dead and inconsistent
+
+Core 4 no longer reads it (`lib.rs:426` became a bare `loop`), and Core 7 no longer
+writes it (`lib.rs:604-611` switched to `set_thread_active`). But `sh2.rs:2663` and
+`sh2.rs:2676` still write it, and `lib.rs:392`/`lib.rs:555` still clone it into
+threads that never use it. `sh2.rs:4908`'s test still asserts the old behaviour.
+Either the flag is the M68K run/stop state or `set_thread_active(4, …)` is — having
+both, disagreeing, is worse than either.
+
+## F10 — Core 4's cycle accounting makes it a lockstep anchor (pre-existing, now reachable)
+
+`lib.rs:436` advances `cycles` by **2** per iteration while executing **200** M68K
+instructions. Once SNDON activates Core 4, it reports a cycle count that grows ~100x
+slower than real, becoming the minimum active core and dragging Master SH-2 down —
+Chapter 32's mechanism exactly. Not triggered in this boot (Core 4 never activates
+before the hang), but it is armed.
+
+## F11 — `check_bus_miss` calls `std::env::var` on every bus access (pre-existing)
+
+`sh2.rs:374-377`. `std::env::var` scans the environment and allocates per call; it
+shows in the profile as `CStr::from_bytes_with_nul` at 0.90%, under `check_bus_miss`.
+Should be a `OnceLock<bool>` read once at startup. Same shape as `MIMAS_DEBUG_VDP2`
+(`lib.rs:354`, per frame) and `MIMAS_DEBUG_M68K` (`lib.rs:417`, per wake).
+
+## What is genuinely right in this commit
+
+- The §1.2b summary-word *design* is correct and is the right answer to the
+  per-instruction RMW problem; only the producer wiring is missing (F2).
+- `is_shutdown()` becoming a relaxed atomic load is correct (F1 is the missing half).
+- ~~Removing `Instant::now()` from `sync.rs` is a real §1.5 fix.~~ **Retracted:**
+  this was taken from the commit's own summary and never verified, and it is false.
+  `sync.rs` still calls `std::time::Instant::now()` around its Condvar wait to feed
+  `telemetry::record_idle_time`; `9354fd3` never touched those lines and the per-core
+  blocked-time telemetry still works (Core 0 at 580 ms blocked, Core 5 at 2987 ms, on
+  a 3.07 s boot). The §1.5 violation stands, unfixed, and is recorded as open in
+  `.development/current_bugs.md`.
+- Driving Core 5 from SH-2 cycles instead of a wall clock is the right direction
+  (§1.4); `128 * 649` ≈ 83,072 matches 28.6364 MHz / 44.1 kHz.
+- `docs/mimas-architecture-spec.md` §1.2b and the `mimas-performance-analysis.md`
+  §2.3 correction are accurate.
+
+## Suggested order
+
+1. F1 and F2 (both are one-line-class fixes and together restore boot)
+2. Re-run the boot: it must settle at `0x06001694` with ~2.55M WRAM accesses
+3. F4 (re-apply the `yield_now` removal + its comment), F6, F7, F8
+4. F3 — add a real cross-thread test before trusting the suite again
+5. F5, F9, F10, F11 as follow-ups
 
 ---
 
-## Correctness
+# Resolution — all findings applied
 
-### 1. `scyn0()` / `scyn1()` read the wrong register — NBG0/NBG1 vertical scroll is wrong
-`saturn-core/src/vdp2_regs.rs:137,143`
+Applied in the working tree (not committed). `cargo test --workspace`: **396 passed,
+0 failed**. `cargo fmt --check`: clean. Boot restored and faster than any previous
+measurement.
 
-`scyn0()` returns `regs[0x072 / 2]` and `scyn1()` returns `regs[0x082 / 2]`. `vdp2.h:140-142`
-and `:179-181` give `SCXIN0 = 0x070`, **`SCXDN0 = 0x072`**, `SCYIN0 = 0x074`; `SCXIN1 = 0x080`,
-**`SCXDN1 = 0x082`**, `SCYIN1 = 0x084`. So both read the *fractional part of the X* scroll, not
-Y. `vidsoft.c:1604` / `:1721` use `regs->SCYIN0 & 0x7FF` / `regs->SCYIN1 & 0x7FF`.
+| finding | outcome |
+|---|---|
+| F1 `shutdown_flag` never stored | **fixed** — `request_shutdown` now stores it (`sync.rs`) |
+| F2 summary word never set by producers | **fixed** — `WorkRam::raise_*()` helpers publish flag + summary; all 5 producers converted; consumer now `swap`s with `Acquire` instead of load-then-store |
+| F3 tests patched instead of producers | **fixed** — the 6 test edits reverted; tests now call `raise_vdp1_draw_end()`, exercising the real path |
+| F4 `yield_now` re-introduced | **fixed** — removed again, rationale comment restored |
+| F5 `park_for_sleep` deadlock | **fixed** — call and function removed; `SLEEP` documented as a still-open §1.5 gap that cannot be closed at the opcode |
+| F6 `cargo fmt` | **fixed** |
+| F7 18 `fix_*.py` in repo root | **fixed** — deleted |
+| F8 duplicated `set_thread_active(4, true)` | **fixed** |
+| F9 `m68k_control` half-dead | **fixed** — SNDOFF on the Master path now deactivates Core 4 (it previously could not stop the sound CPU at all); Core 7 keeps the flag in step |
+| F10 Core 4 cycle under-reporting | **fixed** — reports real SH-2-equivalent cycles via an exact rational, chunked to the slack window |
+| F11 `env::var` per bus access | **fixed** — `bus_trace_enabled()`/`set_bus_trace()`; also fixed the second gate in `log_bus_miss_once` that the first pass missed, and made the test deterministic instead of `set_var`-racy |
 
-NBG2/NBG3 (`0x090/0x092`, `0x094/0x096`) are correct — which is why the Phase-2 NBG3 tests pass
-and hid this. `docs/implementation-plans/vdp2.md` §3.1 even spells out `0x070`/`0x074` and
-`0x080`/`0x084`, and the item is checked `[x]`.
+**Root cause of the boot failure was none of F1–F11.** It was Core 5's cycle step:
+`128 * 649 = 83,072` against a `slack_limit` of 1000. `LockStepSync` blocks a core
+more than `slack_limit` ahead of the slowest, so a core whose quantum is 83x the
+window can never be inside it. Found by bisecting the commit's hunks, not by
+reading. Cores 4 and 5 now both chunk their cycle reports to stay within the
+window; the invariant is documented at both sites and in `history.md` Chapter 40.
 
-Fix: `0x074 / 2` and `0x084 / 2`.
+## Measured
 
-### 2. `supplementdata` is truncated to 5 bits — supplementary palette number is always lost
-`saturn-core/src/vdp.rs:774` (and the NBG1/NBG2/NBG3 arms), `saturn-core/src/vdp2_regs.rs:346`
+| | before Ch.39 | Ch.39 (`yield_now`) | `9354fd3` | now |
+|---|---|---|---|---|
+| settle PC | `0x06001694` | `0x06001694` | `0x000002B0` | `0x06001694` |
+| WRAM accesses | 2,554,350 | 2,554,734 | 4 | 2,554,308 |
+| wall clock | 10.01 s | 4.05–4.15 s | 0.72 s (dead) | **3.17–3.31 s** |
+| process CPU | 139% | 152% | 48% | 145% |
 
-`render_nbg_layer` passes `regs.pncnX_supplementary_char()` (`PNCNx & 0x001F`) as
-`pattern_addr`'s `supplementdata`. `vidshared.h:535` sets `info->supplementdata = pnc & 0x3FF`,
-and `vidsoft.c:254` reads bits 5-7 out of it:
-`paladdr = ((tmp & 0xF000) >> 8) | ((supplementdata & 0xE0) << 3)`.
+2.7x–3.2x against the original baseline, across three consecutive runs.
 
-With `& 0x1F` the `& 0xE0` term is unconditionally 0, so every 4bpp one-word pattern name loses
-its supplementary palette-bank bits. The in-diff comment `// was & 0x3FF` shows this was a
-deliberate narrowing. `vdp2.md` §2.2 `read_pattern_data` is checked `[x]` and states
-`supplementdata = pnc & 0x3FF`.
+## Still open (see `.development/current_bugs.md`)
 
-Fix: pass `PNCNx & 0x3FF` (add a `pncnX_supplementdata()` accessor); keep the `& 0x1F`/`& 0x1C`
-masking where `pattern_addr` already does it.
+`SLEEP` spinning; `sync_core`'s unconditional `notify_all` (~270K voluntary context
+switches/sec remain); per-core blocked-time telemetry now has no call site;
+`env::var` on the per-frame and per-wake debug paths.
 
-### 3. Bitmap mode applies cell masking and flip — NBG0/NBG1 bitmaps render one 8x8 block, tiled
-`saturn-core/src/vdp2.rs:314` (`fetch_pixel`), `saturn-core/src/vdp.rs:957-975`
-
-In Yabause the cell-relative `x &= 7 / y &= 7` (and the 16x16 sub-cell flip chain) lives inside
-`Vdp2MapCalcXY` (`vidsoft.c:620-680`), which the draw loop calls **only** under
-`if (!info->isbitmap)` (`vidsoft.c:1029-1034`). Mimas moved that block into `fetch_pixel`, which
-is on both paths. So for a bitmap layer the screen-space `actual_x`/`actual_y` get masked to
-0..7 before the `charaddr + (y * cellw + x)` address maths — the 512x256/1024x512 bitmap is
-sampled only at its top-left 8x8 corner and tiled across the display. `vdp2.md` §3.3's
-"`map_calc_xy` is skipped entirely" item is checked `[x]`.
-
-Fix: add an `is_bitmap` parameter to `fetch_pixel` (or hoist the masking back into a
-`!is_bitmap`-guarded step in `render_nbg_layer`) and skip masking/flip for bitmaps.
-
-### 4. Layer paint order is inverted and priority 0 is ignored
-`saturn-core/src/vdp.rs:1082-1126`
-
-Layers are painted NBG0 → NBG1 → NBG2 → NBG3, so **NBG3 ends up on top**. `titan.c:129-137`
-sorts front-to-back as `RBG0, NBG0, NBG1, NBG2, NBG3` (`TITAN_NBG3 = 0 … TITAN_NBG0 = 3`,
-`TITAN_RBG0 = 4`, iterated descending within each priority level), i.e. NBG0 is in front of
-NBG3 at equal priority.
-
-Separately, `titan.c:501` / `:515` (`if (priority == 0) return;`) — a layer whose PRINA/PRINB
-priority is 0 is not displayed at all. Mimas ignores PRINA/PRINB entirely (the accessors were
-added this commit but are unused), so on a fresh boot, where PRINA/PRINB are still 0, every
-BGON-enabled layer paints over the back screen.
-
-Minimal honest fix until Phase 4: paint 3 → 2 → 1 → 0 and skip layers whose priority is 0.
-
-### 5. `craofb()` and `spctl()` read unrelated registers (pre-existing, live in the touched function)
-`saturn-core/src/vdp2_regs.rs:74,80`
-
-`craofb()` returns `regs[0x0CA / 2]` — `vdp2.h:320` says `0x0CA = WPSY1` (window 1 Y start).
-CRAOFB is `0x0E6` (`vdp2.h:365`). `spctl()` returns `regs[0x0F0 / 2]` — `vdp2.h:370` says
-`0x0F0 = PRISA`. SPCTL is `0x0E0` (`vdp2.h:362`).
-
-Both are consumed by the VDP1 sprite overlay at the end of `render_back_screen`
-(`vdp.rs:1134-1136`): `is_rgb_mode` and `color_bank_offset` are derived from a window register
-and a priority register. `craofa()` (`0x0E4`), `prina()` (`0x0F8`) and `prinb()` (`0x0FA`) added
-in this diff *are* correct, which makes the two stale ones look correct by association.
-
-### 6. `colornumber_2_ignores_paladdr` asserts nothing
-`saturn-core/src/vdp2.rs:578-584`
-
-`assert!(pixel.is_some() || pixel.is_none());` is a tautology — it passes for every possible
-return value. `vdp2.md` §3.4 describes this test as "set a nonzero `paladdr` and assert the
-colour is unchanged" and has it checked `[x]`. It is the one rule the plan flags as "most likely
-to be 'fixed' into a bug later" and it currently has zero coverage. `CLAUDE.md`: "never assert a
-value you haven't independently derived. A self-consistent-but-wrong test is worse than no
-test."
-
-### 7. `back_screen_addr()` is dead *and* disagrees with the live back-screen path
-`saturn-core/src/vdp2_regs.rs:381,391`
-
-`back_screen_addr()` computes `((bktau << 16) | bktal)` masked by `0x7FFFF`/`0x3FFF`. The live
-code in `render_back_screen` (`vdp.rs:1025-1035`) — matching `vidsoft.c`'s `Vdp2DrawBackScreen`
-— uses `(((bktau & 0x7) << 16) | bktal) * 2` (or `& 0x3` for 4 Mbit). Neither
-`back_screen_addr()` nor `back_screen_enabled()` has a caller, so the first one to use them gets
-a wrong address. Either delete them or make `render_back_screen` call them.
-
-## Concurrency / conventions
-
-### 8. VRAM+CRAM read locks are held across the whole frame render, and in reverse field order
-`saturn-core/src/vdp.rs:1057-1058, 1129, 1140`
-
-`vdp2_vram` and `vdp2_cram` are now acquired *before* the four `render_nbg_layer` calls and held
-until the end of the function. That is a full 320x224x4-layer software render (plus the VDP1
-overlay loop) with both locks held — every `Sh2::write_*` into VDP2 VRAM/CRAM
-(`sh2.rs:1074,1079,1694,1700,1843,1851` all take `.write()`) blocks for that entire window.
-
-It also breaks `CLAUDE.md`'s rule: "if a future one does [need more than one lock], acquire them
-in field-declaration order to avoid lock-ordering deadlocks." `WorkRam` declares
-`vdp1_framebuffers` (l.36) and `vdp1_regs` (l.38) *before* `vdp2_vram` (l.40) / `vdp2_cram`
-(l.42), and this function takes `vdp2_vram` → `vdp2_cram` → `vdp1_regs` →
-`vdp1_framebuffers.banks[..]`.
-
-Cheapest fix that keeps both properties: copy the two regions (or render into a local layer
-buffer) and drop the locks before the VDP1 overlay, or scope `vdp2_vram` to the NBG loop only.
-
-### 9. `docs/implementation-plans/vdp2.md` Phase 3 test checklist is checked off for tests that don't exist
-`docs/implementation-plans/vdp2.md` §3.4
-
-Marked `[x]` but absent from the tree (`grep` over `saturn-core/` and `e2e-tests/` finds none):
-- five `<format>_renders_a_hand_derived_cell` tests (one per `colornumber`)
-- `sixteen_by_sixteen_flip_selects_the_right_subcell`
-- `bitmap_mode_addressing_uses_cellw_as_stride`
-- `bandwidth_exclusion_suppresses_nbg2_when_nbg0_is_high_colour` (and the other two rules)
-- `each_nbg_reads_its_own_registers`
-
-`vdp2.rs`'s test module has exactly 7 tests, all Phase-2-shaped. §2.1/§3.1 items are likewise
-`[x]` while findings 1 and 2 above show the underlying decode is wrong. `CLAUDE.md`: "not
-checked off for anything not fully true. A future session (or agent) trusts these checklists at
-face value."
-
-### 10. No `history.md` chapter for the Phase 3 commit
-`history.md`
-
-Chapter 38 covers Phase 2 only; `194572f` (Phase 3 — all four NBG layers, five colour formats,
-16x16 cells, bitmap mode, bandwidth exclusion) added no chapter. The deliberate simplifications
-it *does* make (no priority resolution, the `BMPNA << 8` vs `<< 4` ambiguity, bandwidth
-exclusion approximated) are exactly the "why" a later session will need.
-`.development/current_bugs.md` was also not updated with the known-uncertain bitmap palette
-shift.
-
-## Cleanup / altitude
-
-### 11. `ScreenVars` re-derives shift widths from magic 512 comparisons, and underflows for bitmaps
-`saturn-core/src/vdp2.rs:113-131, 158-161`
-
-`map_calc_xy` recovers `planepixelwidth_bits` with `if vars.planepixelwidth == 512 { 9 } else
-{ 10 }`, hardcodes `pagepixelwh_bits = 9` / `pagepixelwh_mask = 511` while `ScreenVars` carries
-an unused `pagepixelwh` field, and recomputes `planew_bits` the same way. Yabause's
-`screeninfo_struct` stores `*_bits` / `*_mask` alongside each value (`vidsoft.c:688-702`); doing
-the same removes three magic numbers and the possibility of the two drifting.
-
-Latent bug in the same place: `render_nbg_layer` builds `ScreenVars { planepixelwidth: 0,
-planepixelheight: 0, .. }` for bitmaps, so `let planepixelwidth_mask = vars.planepixelwidth - 1`
-would panic on u32 underflow in a debug build if `map_calc_xy` were ever reached on that path.
-Only fix 3's `is_bitmap` guard keeps it unreachable today.
-
-### 12. Dead state carried through `Vdp2State` / `Vdp2CellInfo`
-`saturn-core/src/vdp2.rs:4-20, 157`
-
-`state.pipe[1] = state.pipe[0]` is written every cell change and never read — Yabause only reads
-`pipe[0]` under `bad_cycle` (`vidsoft.c:1036-1045`), which Mimas has no equivalent of.
-Likewise `Vdp2State::planenum` and `Vdp2CellInfo::{addr, specialfunction, specialcolorfunction}`
-are stored and never consumed. Either wire `bad_cycle` or drop the pipeline and the fields, with
-a comment pointing at §B.5.
-
-### 13. `pattern_addr` hardcodes `specialfunction`/`specialcolorfunction` to 0 on the one-word path
-`saturn-core/src/vdp2.rs:270-271`
-
-`vidsoft.c:248-249`: `specialfunction = (supplementdata >> 9) & 1`,
-`specialcolorfunction = (supplementdata >> 8) & 1`. Harmless today only because nothing reads
-those fields (finding 12) *and* because finding 2 masks the bits away anyway — but Phase 4
-(special priority / special colour calculation) will consume them and get silent zeros.
-
-### 14. Per-pixel recomputation of loop-invariant bitmap constants
-`saturn-core/src/vdp.rs:955-970`
-
-`regs.mpofn()` and the `base` / `pal` expressions are evaluated inside the `for y { for x { … } }`
-body for every pixel of a bitmap layer, though nothing in them depends on `x` or `y`. Hoist them
-next to `bmp_width` / `bmp_height` (`bmpna` already is).
-
-### 15. The 17-element per-layer tuple is the structure that invited findings 1 and 2
-`saturn-core/src/vdp.rs:726-871`
-
-Four near-identical `match layer` arms each destructure into the same 17-tuple. The only
-differences that matter are which accessor each field uses, and two of those accessors are wrong
-(`scyn0`/`scyn1`) while a third is narrowed (`supplementdata`) — with no compiler or reader
-signal, because every element is a bare `u16`. A `struct NbgLayerParams { … }` built by a small
-`fn params_for(regs, layer)` (or a table of accessor fn pointers) makes each field named at the
-construction site and makes the NBG2/NBG3 `false, 0` bitmap placeholders explicit.
+**The 15 VDP2 Phase 2/3 findings are untouched and still open** —
+`git show 9354fd3:docs/current_review.md`.

@@ -86,10 +86,73 @@ The Motorola 68000 and SCSP run in a separate sound thread context, writing synt
 
 ---
 
-## 3. Will Mimas Be More Performant?
+## 3. Measured performance
 
-**Yes.** By partitioning emulation into independent, parallel modules, Mimas optimizes host CPU resource utilization. On multi-core host platforms, Mimas achieves high performance by scaling across physical threads:
+**First real measurement in this project's history** (2026-09-17). Everything above
+this section is design rationale; this section is data. Method: real BIOS boot,
+`saturn-frontend-native --bios`, unthrottled, Ryzen 5 3500X (6C/6T, Zen 2), Master
+SH-2's own emulated cycle count divided by wall-clock seconds. Reported by the
+binary itself (`telemetry::MASTER_CYCLES`), so it is reproducible, not a one-off.
 
-1. **Host Cache Locality**: Each thread focuses on a single task (e.g., the Master SH-2 interpreter or VDP2 blending), preventing instruction cache conflicts on the host CPU.
-2. **Elimination of Busy-Waiting**: Idle threads (such as the SCU DSP or parked Slave SH-2) are suspended on condition variables, consuming zero CPU cycles.
-3. **Decoupled Graphics and Audio**: Separating the execution of the CPU cores, renderer, and sound engine prevents resource starvation, delivering a fluid 60 FPS emulation loop.
+| | before 2026-09-17 | now |
+|---|---|---|
+| Master SH-2 emulated speed | 12.5 MHz | **53.2-54.1 MHz** |
+| ...as % of real 28.636 MHz | **43.5%** | **186-189%** |
+| wall clock to the same settle PC (`0x06001694`) | 10.01 s | 2.31-2.35 s |
+| process CPU | 139% | **113%** |
+| voluntary context switches / sec | 213K | **83K** |
+| Core 0 blocked in `sync_core` | 6.1% of wall | **2.7%** |
+
+**4.3x throughput for 19% less CPU.** The last step is the one worth internalising:
+the conditional notify below made the emulator *both* 32% faster and 23% cheaper at
+the same time, because the work it removed was pure overhead -- no tradeoff was
+involved, the CPU was simply being burned on futex wakeups nobody needed.
+
+**3.2x**, from below real-time to comfortably above it on this host. The three
+changes that produced it, in order of contribution: removing a `sched_yield`-per-
+instruction (`history.md` Chapter 39), replacing five atomic read-modify-writes per
+instruction with one relaxed load (§1.2b, Chapter 40), and moving an `std::env::var`
+off the per-bus-access path.
+
+### 3.1. What this number does and does not say
+
+- It is **BIOS boot**, the lightest workload the system has: Slave SH-2 parked, SCSP
+  synthesizing into a channel nothing reads, VDP1/VDP2 barely drawing. A real game
+  wakes all of it. Treat 141% as a ceiling, not a budget.
+- Roughly 0.5 s of each 3.1 s run is the boot-watch settle window, where the BIOS
+  spins in a cheap poll loop. That inflates the figure somewhat.
+- It is unthrottled: `ThrottleSpeed::Unthrottled` is the default, so this is
+  "as fast as it can go", not "what it needs".
+
+### 3.2. The R36S question
+
+The target is an R36S: 4x Cortex-A53 at ~1.4 GHz, in-order, dual-issue
+(`README.md`, `docs/lessons-from-yabasanshiro.md`). Against a Zen 2 core the gap on
+branchy interpreter code is roughly 9x (Geekbench-anchored floor) to 14x (realistic
+for indirect-branch-heavy dispatch on an in-order core).
+
+At 141% here, the same binary would land at roughly **10-16% of real-time on the
+R36S** -- **6x to 10x short**, before the rest of the system does any real work.
+
+Worse, the defects this measurement was built to find are *disproportionately*
+expensive on A53: every atomic read-modify-write is an LL/SC retry loop plus
+barriers where x86 has a single `lock` prefix, and `Acquire`/`Release` emit real
+`dmb ish` stalls on an in-order pipeline. **Measuring on the dev box systematically
+understates them.** Nothing here should be considered settled until it is measured
+on the target.
+
+### 3.3. Where the remaining CPU goes
+
+83,000 voluntary context switches per second remain, down from 278,000 once
+`sync_core`'s broadcast became conditional (`history.md` Chapter 41). What is left
+is the genuine Core 0 <-> Core 5 handoff: Core 5 is still an *active* participant in
+the bounded-slack lockstep rather than a parked, event-driven component, so the two
+cores must still hand the window back and forth. Parking Core 5 -- the architecture
+debt `docs/mimas-architecture-spec.md` §1.5 already records as a known gap -- would
+remove the handoff entirely, not just make it cheaper.
+
+The other open lever is `slack_limit` itself (default 1000, `SaturnSystem::new`).
+It has never been swept. A wider window means fewer handoffs and more drift between
+cores; that is a correctness/throughput tradeoff and should be measured, not
+guessed.
+
