@@ -389,7 +389,6 @@ impl SaturnSystem {
         let sync_c4 = sync.clone();
         let arbiter_c4 = arbiter.clone();
         let work_ram_c4 = work_ram.clone();
-        let m68k_control_c4 = self.m68k_control.clone();
         let scu_c4 = self.scu.clone();
         let speed_c4 = self.speed.clone();
         let handle_c4 = thread::Builder::new()
@@ -414,6 +413,7 @@ impl SaturnSystem {
                     }
                     // Just reactivated -- SNDON fired.
                     m68k.reset();
+                    let mut m68k_cycles_acc: u64 = 0;
                     if std::env::var("MIMAS_DEBUG_M68K").is_ok() {
                         let ram = work_ram_c4.sound_ram.read().unwrap();
                         eprintln!(
@@ -432,8 +432,31 @@ impl SaturnSystem {
                             m68k_throttle
                                 .advance(crate::throttle::M68K_NOMINAL_CYCLES_PER_INSTRUCTION);
                         }
-                        cycles = cycles.wrapping_add(2);
-                        if !sync_c4.sync_core(4, cycles) {
+                        // Report the SH-2-cycle equivalent of the M68K cycles
+                        // just executed. This used to advance a flat `2` per
+                        // 200 instructions -- ~2000x under-reporting, which
+                        // makes Core 4 the slowest "active" core the moment
+                        // SNDON fires and drags Master SH-2 down to its
+                        // reporting rate (`history.md` Chapter 32).
+                        m68k_cycles_acc += 200
+                            * crate::throttle::M68K_NOMINAL_CYCLES_PER_INSTRUCTION
+                            * crate::throttle::M68K_TO_SH2_NUM;
+                        let mut owed = m68k_cycles_acc / crate::throttle::M68K_TO_SH2_DEN;
+                        m68k_cycles_acc -= owed * crate::throttle::M68K_TO_SH2_DEN;
+                        // Same slack invariant as Core 5: never advance more
+                        // than the slack window in one `sync_core` call.
+                        let chunk_max = sync_c4.slack_limit().max(1);
+                        let mut still_active = true;
+                        while owed > 0 {
+                            let chunk = owed.min(chunk_max);
+                            cycles = cycles.wrapping_add(chunk);
+                            owed -= chunk;
+                            if !sync_c4.sync_core(4, cycles) {
+                                still_active = false;
+                                break;
+                            }
+                        }
+                        if !still_active {
                             break;
                         }
                     }
@@ -461,26 +484,47 @@ impl SaturnSystem {
         let shutdown_c5 = shutdown.clone();
         let work_ram_c5 = work_ram.clone();
         let scsp_c5 = self.scsp.clone();
-        let speed_c5 = self.speed.clone();
         let handle_c5 = thread::Builder::new()
             .name("scsp-synth".into())
             .spawn(move || {
                 let _guard = PanicGuard::new(sync_c5.clone(), arbiter_c5);
                 let mut cycles = 0u64;
+                let mut sample_cycles_acc: u64 = 0;
                 while !shutdown_c5.load(Ordering::Relaxed) {
                     if sync_c5.is_shutdown() {
                         break;
                     }
-                    // Synthesize 128 audio samples per step
-                    scsp_c5.lock().unwrap().synthesize(&work_ram_c5, 128);
-                    // 28.6364 MHz / 44100 Hz = ~649.35 CPU cycles per sample
-                    let step = (128 * 649) as u64;
-                    cycles = cycles.wrapping_add(step);
-                    // No `thread::yield_now()` after this: `sync_core` already
-                    // Condvar-blocks whenever this core has drifted past the slack
-                    // limit, so the yield was a bare syscall per iteration. See
-                    // `Sh2::run_loop`'s comment for the measured cost.
-                    sync_c5.sync_core(5, cycles);
+                    // One sample's worth of synthesis, then report the SH-2
+                    // cycles it represents. Paced by real emulated cycles, not
+                    // a host wall clock (spec 1.4 scopes `ClockThrottle` to the
+                    // CPU cores alone).
+                    scsp_c5.lock().unwrap().synthesize(&work_ram_c5, 1);
+                    sample_cycles_acc += crate::throttle::SCSP_SAMPLE_CYCLES_NUM;
+                    let mut owed = sample_cycles_acc / crate::throttle::SCSP_SAMPLE_CYCLES_DEN;
+                    sample_cycles_acc -= owed * crate::throttle::SCSP_SAMPLE_CYCLES_DEN;
+
+                    // **Invariant: never advance by more than `slack_limit` in
+                    // one `sync_core` call.** `LockStepSync` blocks a core that
+                    // has drifted more than the slack window ahead of the
+                    // slowest one, so a core whose quantum is larger than the
+                    // window can never *be* inside it -- it lands permanently
+                    // ahead and the pair ping-pongs on the boundary. Shipping a
+                    // flat 128-sample (83,072-cycle) step against the default
+                    // 1000-cycle slack did exactly that and stopped the BIOS
+                    // booting at `0x2B0` (`docs/current_review.md`). Reporting
+                    // the same total in slack-sized chunks keeps the cycle
+                    // accounting exact and the core inside the window.
+                    let chunk_max = sync_c5.slack_limit().max(1);
+                    while owed > 0 {
+                        let chunk = owed.min(chunk_max);
+                        cycles = cycles.wrapping_add(chunk);
+                        owed -= chunk;
+                        // No `thread::yield_now()` here: `sync_core` already
+                        // Condvar-blocks on drift. See `Sh2::run_loop`.
+                        if !sync_c5.sync_core(5, cycles) {
+                            break;
+                        }
+                    }
                 }
             })
             .expect("failed to spawn Core 5 (SCSP Sound Synthesizer) thread");
@@ -577,25 +621,16 @@ impl SaturnSystem {
                     if smpc.is_dispatch_ready() {
                         let effects = smpc.execute_expired_command(&work_ram_c7);
                         if effects.system_manager_irq {
-                            work_ram_c7
-                                .smpc_irq_pending
-                                .store(true, std::sync::atomic::Ordering::Release);
+                            work_ram_c7.raise_smpc_irq();
                         }
                         if effects.nmi {
-                            work_ram_c7
-                                .smpc_nmi_pending
-                                .store(true, std::sync::atomic::Ordering::Release);
+                            work_ram_c7.raise_smpc_nmi();
                         }
                         if effects.system_reset {
-                            work_ram_c7
-                                .smpc_sysres_pending
-                                .store(true, std::sync::atomic::Ordering::Release);
+                            work_ram_c7.raise_smpc_sysres();
                         }
                         if let Some(is_352) = effects.clock_change {
-                            work_ram_c7.smpc_clock_change.store(
-                                if is_352 { 2 } else { 1 },
-                                std::sync::atomic::Ordering::Release,
-                            );
+                            work_ram_c7.raise_smpc_clock_change(is_352);
                         }
                         if effects.start_slave {
                             sync_c7.set_thread_active(1, true);
@@ -604,10 +639,14 @@ impl SaturnSystem {
                             sync_c7.set_thread_active(1, false);
                         }
                         if effects.sound_on {
-                            sync_c7.set_thread_active(4, true);
+                            // Keep `m68k_control` (the observable "is the sound
+                            // CPU running" state) in step with the thread's
+                            // real activation, so the two can't disagree.
+                            m68k_control_c7.store(true, std::sync::atomic::Ordering::Release);
                             sync_c7.set_thread_active(4, true);
                         }
                         if effects.sound_off {
+                            m68k_control_c7.store(false, std::sync::atomic::Ordering::Release);
                             sync_c7.set_thread_active(4, false);
                         }
                         did_work = true;

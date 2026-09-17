@@ -27,6 +27,12 @@ pub struct Vdp1Framebuffers {
     pub back: std::sync::atomic::AtomicUsize,
 }
 
+impl Default for Vdp1Framebuffers {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Vdp1Framebuffers {
     pub fn new() -> Self {
         Self {
@@ -139,6 +145,12 @@ pub struct Vdp1State {
     pub manualerase: bool,
     pub manualchange: bool,
     pub frame_change_plot: bool,
+}
+
+impl Default for Vdp1State {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Vdp1State {
@@ -403,8 +415,7 @@ pub fn execute_vdp1(state: &mut Vdp1State, ram: &crate::shared_buffers::WorkRam)
                 return false;
             }
             state.edsr |= 2;
-            ram.vdp1_draw_end_pending
-                .store(true, std::sync::atomic::Ordering::Release);
+            ram.raise_vdp1_draw_end();
             return true;
         }
 
@@ -439,8 +450,8 @@ pub fn execute_vdp1(state: &mut Vdp1State, ram: &crate::shared_buffers::WorkRam)
                 let current_shape = cmd.cmdctrl & 0x7;
                 if current_shape == 0 {
                     // Normal Sprite
-                    let tl_x = (cmd.cmdxa as i16).wrapping_add(state.local_x) as i32;
-                    let tl_y = (cmd.cmdya as i16).wrapping_add(state.local_y) as i32;
+                    let tl_x = cmd.cmdxa.wrapping_add(state.local_x) as i32;
+                    let tl_y = cmd.cmdya.wrapping_add(state.local_y) as i32;
                     let char_width = (((cmd.cmdsize >> 8) & 0x3F) * 8) as i32;
                     let char_height = (cmd.cmdsize & 0xFF) as i32;
 
@@ -459,8 +470,8 @@ pub fn execute_vdp1(state: &mut Vdp1State, ram: &crate::shared_buffers::WorkRam)
                     draw_quad(state, &cmd, &vram[..], &mut fb[..], tl, bl, tr, br);
                 } else if current_shape == 1 {
                     // Scaled Sprite
-                    let x0 = (cmd.cmdxa as i16).wrapping_add(state.local_x) as i32;
-                    let y0 = (cmd.cmdya as i16).wrapping_add(state.local_y) as i32;
+                    let x0 = cmd.cmdxa.wrapping_add(state.local_x) as i32;
+                    let y0 = cmd.cmdya.wrapping_add(state.local_y) as i32;
                     let zp = (cmd.cmdctrl >> 8) & 0xF;
 
                     let mut x_origin = x0;
@@ -553,14 +564,14 @@ pub fn execute_vdp1(state: &mut Vdp1State, ram: &crate::shared_buffers::WorkRam)
                     draw_quad(state, &cmd, &vram[..], &mut fb[..], tl, bl, tr, br);
                 } else if current_shape == 2 || current_shape == 3 || current_shape == 4 {
                     // Distorted Sprite (2, 3) / Polygon (4)
-                    let xa = (cmd.cmdxa as i16).wrapping_add(state.local_x) as i32;
-                    let ya = (cmd.cmdya as i16).wrapping_add(state.local_y) as i32;
-                    let xb = (cmd.cmdxb as i16).wrapping_add(state.local_x) as i32;
-                    let yb = (cmd.cmdyb as i16).wrapping_add(state.local_y) as i32;
-                    let xc = (cmd.cmdxc as i16).wrapping_add(state.local_x) as i32;
-                    let yc = (cmd.cmdyc as i16).wrapping_add(state.local_y) as i32;
-                    let xd = (cmd.cmdxd as i16).wrapping_add(state.local_x) as i32;
-                    let yd = (cmd.cmdyd as i16).wrapping_add(state.local_y) as i32;
+                    let xa = cmd.cmdxa.wrapping_add(state.local_x) as i32;
+                    let ya = cmd.cmdya.wrapping_add(state.local_y) as i32;
+                    let xb = cmd.cmdxb.wrapping_add(state.local_x) as i32;
+                    let yb = cmd.cmdyb.wrapping_add(state.local_y) as i32;
+                    let xc = cmd.cmdxc.wrapping_add(state.local_x) as i32;
+                    let yc = cmd.cmdyc.wrapping_add(state.local_y) as i32;
+                    let xd = cmd.cmdxd.wrapping_add(state.local_x) as i32;
+                    let yd = cmd.cmdyd.wrapping_add(state.local_y) as i32;
 
                     let tl = Point { x: xa, y: ya };
                     let tr = Point { x: xb, y: yb };
@@ -570,14 +581,14 @@ pub fn execute_vdp1(state: &mut Vdp1State, ram: &crate::shared_buffers::WorkRam)
                     draw_quad(state, &cmd, &vram[..], &mut fb[..], tl, bl, tr, br);
                 } else if current_shape == 5 {
                     // Polyline
-                    let xa = (cmd.cmdxa as i16).wrapping_add(state.local_x) as i32;
-                    let ya = (cmd.cmdya as i16).wrapping_add(state.local_y) as i32;
-                    let xb = (cmd.cmdxb as i16).wrapping_add(state.local_x) as i32;
-                    let yb = (cmd.cmdyb as i16).wrapping_add(state.local_y) as i32;
-                    let xc = (cmd.cmdxc as i16).wrapping_add(state.local_x) as i32;
-                    let yc = (cmd.cmdyc as i16).wrapping_add(state.local_y) as i32;
-                    let xd = (cmd.cmdxd as i16).wrapping_add(state.local_x) as i32;
-                    let yd = (cmd.cmdyd as i16).wrapping_add(state.local_y) as i32;
+                    let xa = cmd.cmdxa.wrapping_add(state.local_x) as i32;
+                    let ya = cmd.cmdya.wrapping_add(state.local_y) as i32;
+                    let xb = cmd.cmdxb.wrapping_add(state.local_x) as i32;
+                    let yb = cmd.cmdyb.wrapping_add(state.local_y) as i32;
+                    let xc = cmd.cmdxc.wrapping_add(state.local_x) as i32;
+                    let yc = cmd.cmdyc.wrapping_add(state.local_y) as i32;
+                    let xd = cmd.cmdxd.wrapping_add(state.local_x) as i32;
+                    let yd = cmd.cmdyd.wrapping_add(state.local_y) as i32;
 
                     let mut grd = [0u16; 4];
                     let grda = (cmd.cmdgrda as usize) << 3;
@@ -640,10 +651,10 @@ pub fn execute_vdp1(state: &mut Vdp1State, ram: &crate::shared_buffers::WorkRam)
                     );
                 } else if current_shape == 6 {
                     // Line
-                    let xa = (cmd.cmdxa as i16).wrapping_add(state.local_x) as i32;
-                    let ya = (cmd.cmdya as i16).wrapping_add(state.local_y) as i32;
-                    let xb = (cmd.cmdxb as i16).wrapping_add(state.local_x) as i32;
-                    let yb = (cmd.cmdyb as i16).wrapping_add(state.local_y) as i32;
+                    let xa = cmd.cmdxa.wrapping_add(state.local_x) as i32;
+                    let ya = cmd.cmdya.wrapping_add(state.local_y) as i32;
+                    let xb = cmd.cmdxb.wrapping_add(state.local_x) as i32;
+                    let yb = cmd.cmdyb.wrapping_add(state.local_y) as i32;
 
                     let mut grd = [0u16; 4];
                     let grda = (cmd.cmdgrda as usize) << 3;
@@ -1040,8 +1051,8 @@ pub fn render_back_screen(ram: &WorkRam) -> Framebuffer {
                 let masked = (addr as usize) & mask;
                 let val = u16::from_be_bytes([vram[masked], vram[masked + 1]]);
                 let color = rgb555_to_xrgb8888(val);
-                let row_start = (y * width) as usize;
-                for x in 0..(width as usize) {
+                let row_start = y * width;
+                for x in 0..width {
                     frame.pixels[row_start + x] = color;
                 }
                 addr += 2;
@@ -1315,11 +1326,9 @@ mod tests {
         }
         execute_vdp1(&mut state, &ram);
         // First command is End Code! It should NOT raise Draw End!
-        assert_eq!(
-            ram.vdp1_draw_end_pending
-                .load(std::sync::atomic::Ordering::Acquire),
-            false
-        );
+        assert!(!ram
+            .vdp1_draw_end_pending
+            .load(std::sync::atomic::Ordering::Acquire));
 
         {
             let mut vram = ram.vdp1_vram.write().unwrap();
@@ -1332,11 +1341,9 @@ mod tests {
         state.status = Vdp1Status::IDLE;
         let res = execute_vdp1(&mut state, &ram);
         println!("execute_vdp1 returned {}, edsr: {}", res, state.edsr);
-        assert_eq!(
-            ram.vdp1_draw_end_pending
-                .load(std::sync::atomic::Ordering::Acquire),
-            true
-        );
+        assert!(ram
+            .vdp1_draw_end_pending
+            .load(std::sync::atomic::Ordering::Acquire));
         assert_eq!(state.edsr & 2, 2);
     }
 
@@ -1358,12 +1365,9 @@ mod tests {
         let mut state_locked = state_arc.lock().unwrap();
         execute_vdp1(&mut state_locked, &work_ram);
 
-        assert_eq!(
-            work_ram
-                .vdp1_draw_end_pending
-                .load(std::sync::atomic::Ordering::Acquire),
-            false
-        );
+        assert!(!work_ram
+            .vdp1_draw_end_pending
+            .load(std::sync::atomic::Ordering::Acquire));
     }
 
     #[test]
@@ -2094,7 +2098,7 @@ mod tests {
 
     #[test]
     fn back_screen_reads_the_colour_from_vram_not_the_register() {
-        let mut ram = WorkRam::new();
+        let ram = WorkRam::new();
         {
             let mut lines = ram.vdp2_lines.write().unwrap();
             let regs = &mut lines[0];
@@ -2206,7 +2210,7 @@ mod tests {
         // 0x0010 in bits 4-5
         sh2.write_word(0x05F80000, 0x0010);
 
-        let mut ram = work_ram.vdp2_regs.read().unwrap();
+        let ram = work_ram.vdp2_regs.read().unwrap();
         let tvmd = u16::from_be_bytes([ram[0], ram[1]]);
         assert_eq!((tvmd >> 4) & 0x3, 1);
         drop(ram);
@@ -2580,7 +2584,7 @@ mod tests {
         state.edsr = 0;
 
         let drew = execute_vdp1(&mut state, &ram);
-        assert_eq!(drew, false);
+        assert!(!drew);
         assert_eq!(state.status, Vdp1Status::IDLE);
         assert_eq!(state.edsr, 0); // Unchanged
     }
@@ -3046,7 +3050,7 @@ struct Point {
 
 fn read_pattern_16(vram: &[u8], base: usize, off: usize) -> u8 {
     let byte = vram[(base + (off >> 1)) & 0x7FFFF];
-    if off % 2 == 0 {
+    if off.is_multiple_of(2) {
         byte >> 4
     } else {
         byte & 0x0F
@@ -3238,7 +3242,7 @@ fn draw_line_impl(
             if color_calc_mode == 4 {
                 if ((g_val >> 5) & 0x1F) == 0x10 && ((g_val >> 10) & 0x1F) == 0x10 {
                     let r_val = g_val & 0x1F;
-                    let add = if r_val > 0x10 { r_val - 0x10 } else { 0 };
+                    let add = r_val.saturating_sub(0x10);
                     write_pixel = current_pixel + add;
                 } else {
                     write_pixel = gouraud_adjust(current_pixel, g_val);
@@ -3276,10 +3280,8 @@ fn draw_line_impl(
                             }
                         }
                         2 => write_pixel = ((current_pixel & !0x8421) >> 1) | 0x8000,
-                        3 => {
-                            if (bg_pixel & 0x8000) != 0 {
-                                write_pixel = alphablend16(bg_pixel, current_pixel, 128) | 0x8000;
-                            }
+                        3 if (bg_pixel & 0x8000) != 0 => {
+                            write_pixel = alphablend16(bg_pixel, current_pixel, 128) | 0x8000;
                         }
                         _ => {}
                     }
@@ -3684,13 +3686,13 @@ fn draw_quad(
                                         && ((g_val >> 10) & 0x1F) == 0x10
                                     {
                                         let r_val = g_val & 0x1F;
-                                        let add = if r_val > 0x10 { r_val - 0x10 } else { 0 };
+                                        let add = r_val.saturating_sub(0x10);
                                         write_pixel = current_pixel + add;
                                     } else {
                                         write_pixel = gouraud_adjust(current_pixel, g_val);
                                     }
                                 }
-                                5 | 6 | 7 => {
+                                5..=7 => {
                                     let g_val = ((row_r >> 16).clamp(0, 31) as u16)
                                         | (((row_g >> 16).clamp(0, 31) as u16) << 5)
                                         | (((row_b >> 16).clamp(0, 31) as u16) << 10);

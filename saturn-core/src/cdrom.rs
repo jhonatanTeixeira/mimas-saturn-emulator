@@ -70,7 +70,7 @@ impl Cdrom {
 
         // Fallback: If no metadata tracks were found, fabricate a single MODE1/2048 track from hunk count
         if raw_tracks.is_empty() {
-            let total_hunks = chd.header().hunk_count() as u32;
+            let total_hunks = chd.header().hunk_count();
             let total_bytes = total_hunks as usize * hunk_num_bytes;
             let total_frames = (total_bytes / 2448) as u32;
             raw_tracks.push(RawTrackMeta {
@@ -348,7 +348,7 @@ mod tests {
         assert_eq!(cdrom.tracks[0].ctl_addr, 0x41);
         assert_eq!(cdrom.tracks[1].track_num, 2);
         assert_eq!(cdrom.tracks[1].ctl_addr, 0x01);
-        assert_eq!(cdrom.tracks[1].is_audio, true);
+        assert!(cdrom.tracks[1].is_audio);
 
         assert_eq!(cdrom.toc[0], 0x41000096);
         assert_eq!(cdrom.toc[1], (0x01 << 24) | 166);

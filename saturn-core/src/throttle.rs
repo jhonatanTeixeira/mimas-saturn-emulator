@@ -37,6 +37,21 @@ pub const M68K_CLOCK_HZ: f64 = 44_100.0 * 256.0;
 /// for details on the M68K side.
 pub const M68K_NOMINAL_CYCLES_PER_INSTRUCTION: u64 = 8;
 
+/// SH-2 cycles per SCSP output sample, as an exact rational rather than a
+/// rounded constant: `SH2_CLOCK_28MHZ / SCSP_SAMPLE_RATE_HZ` is 649.35..., and
+/// rounding it to 649 drifts ~0.05% -- enough to desynchronise audio against
+/// video over a few minutes. Core 5 carries the remainder instead (see
+/// `SaturnSystem::start`).
+pub const SCSP_SAMPLE_CYCLES_NUM: u64 = 39_375_000 * 8;
+pub const SCSP_SAMPLE_CYCLES_DEN: u64 = 11 * 44_100;
+
+/// SH-2 cycles per M68K cycle, as an exact rational
+/// (`SH2_CLOCK_28MHZ / M68K_CLOCK_HZ` = 2.5365...). Core 4 reports its progress
+/// into `LockStepSync`, whose cycle domain is SH-2 cycles, so it has to convert
+/// rather than invent a number.
+pub const M68K_TO_SH2_NUM: u64 = 315_000_000;
+pub const M68K_TO_SH2_DEN: u64 = 11 * 11_289_600;
+
 /// Real SCSP output sample rate. Derived from `M68K_CLOCK_HZ` (not a second
 /// independent literal) since that constant's own citation already
 /// establishes it: `SCSP_CLOCK_FREQ` is "11.2896 MHz", and `256` output

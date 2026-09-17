@@ -25,8 +25,8 @@ fn main() {
         let offset = frame % 256;
         for y in 0..HEIGHT {
             for x in 0..WIDTH {
-                let r = ((x as u32 + offset) % 256) as u32;
-                let g = ((y as u32 + offset) % 256) as u32;
+                let r = (x as u32 + offset) % 256;
+                let g = (y as u32 + offset) % 256;
                 let b = 128u32;
                 buffer[y * WIDTH + x] = (r << 16) | (g << 8) | b;
             }

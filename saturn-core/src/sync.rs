@@ -51,7 +51,7 @@ impl LockStepSync {
         self.slack_limit
     }
 
-pub fn sync_core(&self, core_id: usize, current_cycles: u64) -> bool {
+    pub fn sync_core(&self, core_id: usize, current_cycles: u64) -> bool {
         let mut state = self.state.lock().unwrap();
         if state.shutdown {
             return false;
@@ -162,22 +162,22 @@ pub fn sync_core(&self, core_id: usize, current_cycles: u64) -> bool {
         !state.shutdown
     }
 
-    pub fn park_for_sleep(&self, events_any: &std::sync::atomic::AtomicBool) {
-        let mut state = self.state.lock().unwrap();
-        while !state.shutdown && !events_any.load(std::sync::atomic::Ordering::Relaxed) {
-            state = self.condvar.wait(state).unwrap();
-        }
-    }
-
     pub fn request_shutdown(&self) {
         let mut state = self.state.lock().unwrap();
         state.shutdown = true;
+        // Mirror into the lock-free flag `is_shutdown()` reads. Without this
+        // store the mirror stays false forever and every `is_shutdown()` check
+        // in the system is dead code -- including `PanicGuard`'s, whose entire
+        // purpose is to stop one core's panic from hanging the others.
+        self.shutdown_flag
+            .store(true, std::sync::atomic::Ordering::Release);
         self.condvar.notify_all();
         self.park_condvar.notify_all();
     }
 
     pub fn is_shutdown(&self) -> bool {
-        self.shutdown_flag.load(std::sync::atomic::Ordering::Relaxed)
+        self.shutdown_flag
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

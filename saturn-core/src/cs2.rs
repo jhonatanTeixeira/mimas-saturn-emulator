@@ -146,34 +146,24 @@ pub struct CdIpBin {
     pub firstprogsize: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DataTransferType {
+    #[default]
     Idle,
     GetSector,
     GetDeleteSector,
     PutSector,
 }
 
-impl Default for DataTransferType {
-    fn default() -> Self {
-        Self::Idle
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InfoTransferType {
+    #[default]
     Idle,
     Toc,
     SingleFile,
     AllFiles,
     SubQ,
     SubRw,
-}
-
-impl Default for InfoTransferType {
-    fn default() -> Self {
-        Self::Idle
-    }
 }
 
 pub struct Cs2 {
@@ -265,6 +255,12 @@ pub struct Cs2 {
     // Disc backend & SCU
     pub disc: Option<Cdrom>,
     pub scu: Option<Arc<Scu>>,
+}
+
+impl Default for Cs2 {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Cs2 {
@@ -1360,7 +1356,7 @@ impl Cs2 {
         if (fid as usize) < self.fileinfo.len() && filter_idx < MAX_FILTERS {
             let f = &self.fileinfo[fid as usize];
             self.filter[filter_idx].fad_start = f.lba;
-            self.filter[filter_idx].fad_range = (f.size + 2047) / 2048;
+            self.filter[filter_idx].fad_range = f.size.div_ceil(2048);
             self.play_start_fad = f.lba;
             self.play_end_fad = f.lba + self.filter[filter_idx].fad_range;
             self.fad = f.lba;
@@ -1476,9 +1472,7 @@ impl Cs2 {
     }
 
     pub fn get_ip(&mut self, autoregion: bool) -> Option<CdIpBin> {
-        if self.disc.is_none() {
-            return None;
-        }
+        self.disc.as_ref()?;
 
         let mut buf = [0u8; 2448];
         if self
@@ -1898,12 +1892,12 @@ mod tests {
         cs2.write_word(0x90018, 0x0100); // 0x01 Get HW Info
         cs2.write_word(0x90024, 0x0000); // CR4 write triggers command
 
-        assert_eq!(cs2.command_pending, true);
+        assert!(cs2.command_pending);
         assert_eq!(cs2.hirq & HIRQ_CMOK, 0);
 
         cs2.exec(60); // 60 µs elapsed
 
-        assert_eq!(cs2.command_pending, false);
+        assert!(!cs2.command_pending);
         assert_eq!(cs2.hirq & HIRQ_CMOK, HIRQ_CMOK);
         assert_eq!(cs2.cr1, 0x0700);
         assert_eq!(cs2.cr2, 0x0201);

@@ -832,9 +832,7 @@ impl M68k {
             return;
         }
         // MOVE An,USP / MOVE USP,An -- privileged, no real USP modeled; no-op read as 0.
-        if (opcode & 0xFFF0) == 0x4E60 || (opcode & 0xFFF0) == 0x4E68 {
-            return;
-        }
+        if (opcode & 0xFFF0) == 0x4E60 || (opcode & 0xFFF0) == 0x4E68 {}
         // Trap/illegal/stop/reset -- not needed by ordinary driver code paths; no-op.
     }
 
@@ -1002,7 +1000,7 @@ impl M68k {
                 let dividend = self.d[reg] as i32;
                 let quot = dividend / src;
                 let rem = dividend % src;
-                if quot >= -32768 && quot <= 32767 {
+                if (-32768..=32767).contains(&quot) {
                     self.d[reg] = ((rem as u32) << 16) | (quot as u32 & 0xFFFF);
                     self.set_nz16(quot as u16);
                     self.sr &= !SR_C;
@@ -1067,9 +1065,7 @@ impl M68k {
         }
         if (opcode & 0x01F0) == 0x0188 {
             // EXG Dx,Ay
-            let tmp = self.d[reg];
-            self.d[reg] = self.a[ea_reg];
-            self.a[ea_reg] = tmp;
+            std::mem::swap(&mut self.d[reg], &mut self.a[ea_reg]);
             return;
         }
         let size: u32 = match size_bits {

@@ -67,7 +67,7 @@ pub enum PeripheralKind {
     Mouse,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct PadState {
     pub up: bool,
     pub down: bool,
@@ -82,26 +82,6 @@ pub struct PadState {
     pub z: bool,
     pub l: bool,
     pub r: bool,
-}
-
-impl Default for PadState {
-    fn default() -> Self {
-        Self {
-            up: false,
-            down: false,
-            left: false,
-            right: false,
-            start: false,
-            a: false,
-            b: false,
-            c: false,
-            x: false,
-            y: false,
-            z: false,
-            l: false,
-            r: false,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -301,7 +281,7 @@ impl Default for TwinSticksState {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct GunState {
     pub trigger: bool,
     pub start: bool,
@@ -309,29 +289,12 @@ pub struct GunState {
     pub y: u16,
 }
 
-impl Default for GunState {
-    fn default() -> Self {
-        Self {
-            trigger: false,
-            start: false,
-            x: 0,
-            y: 0,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct KeyboardState {
     // Unimplemented in reference, keep it inert
 }
 
-impl Default for KeyboardState {
-    fn default() -> Self {
-        Self {}
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct MouseState {
     pub left: bool,
     pub right: bool,
@@ -345,25 +308,9 @@ pub struct MouseState {
     pub y_displacement: u8,
 }
 
-impl Default for MouseState {
-    fn default() -> Self {
-        Self {
-            left: false,
-            right: false,
-            middle: false,
-            start: false,
-            x_sign: false,
-            y_sign: false,
-            x_overflow: false,
-            y_overflow: false,
-            x_displacement: 0,
-            y_displacement: 0,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum PeripheralState {
+    #[default]
     Disconnected,
     Pad(PadState),
     Wheel(WheelState),
@@ -373,12 +320,6 @@ pub enum PeripheralState {
     Gun(GunState),
     Keyboard(KeyboardState),
     Mouse(MouseState),
-}
-
-impl Default for PeripheralState {
-    fn default() -> Self {
-        PeripheralState::Disconnected
-    }
 }
 
 impl PeripheralState {

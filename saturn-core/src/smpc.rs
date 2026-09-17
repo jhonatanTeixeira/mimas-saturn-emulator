@@ -13,7 +13,7 @@
 //! window -- closer to hardware intent (registers only ever live at odd
 //! addresses; the even-offset alias is a Yabause storage-layout artifact, not
 //! real hardware behavior) -- see `docs/hardware-reference/smpc-peripheral.md`
-//! §1.1. This is a deliberate divergence, not an oversight: keep it.
+//! > > §1.1. This is a deliberate divergence, not an oversight: keep it.
 //!
 //! **RTC is UTC, not host-local time.** Yabause reads the real-time clock via
 //! `localtime_r`, i.e. the host's configured timezone (§7.1). That makes any
@@ -120,9 +120,10 @@ pub struct SmpcEffects {
 /// Where INTBACK's RTC bytes (OREG1-7) come from. Mirrors §7.1's
 /// `clocksync` distinction but named for what each variant actually is,
 /// rather than transliterating Yabause's flag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClockSource {
     /// Re-read the host's wall clock (UTC) on every INTBACK status call.
+    #[default]
     HostWallClock,
     /// A fixed UNIX timestamp (UTC seconds) -- deterministic, for tests and
     /// future deterministic replay. Skips Yabause's
@@ -132,12 +133,6 @@ pub enum ClockSource {
     /// *advancing* clock, if wanted later, should derive from the real frame
     /// period for the active video mode instead.
     Fixed(u64),
-}
-
-impl Default for ClockSource {
-    fn default() -> Self {
-        ClockSource::HostWallClock
-    }
 }
 
 impl ClockSource {
@@ -554,10 +549,8 @@ impl Smpc {
                 true
             } else if ireg0 == 0x01 {
                 false
-            } else if ireg0 == 0x00 && (ireg1 & 0x08) != 0 {
-                true
             } else {
-                false
+                ireg0 == 0x00 && (ireg1 & 0x08) != 0
             }
         } else {
             false
@@ -1389,7 +1382,7 @@ mod tests {
         smpc.on_register_write(reg::PDR1, 0x7F, old, &work_ram);
         assert_eq!(
             work_ram.smpc_regs.read().unwrap()[reg::PDR1],
-            0xFF & !(1 << 4),
+            !(1 << 4),
             "trigger pressed must clear bit 4"
         );
     }

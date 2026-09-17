@@ -17,6 +17,12 @@ pub struct Vdp2State {
     pub planetbl: [u32; 4],
 }
 
+impl Default for Vdp2State {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Vdp2State {
     pub fn new() -> Self {
         Self {

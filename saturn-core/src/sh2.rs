@@ -24,6 +24,12 @@ pub struct InterruptQueue {
     pub pending: Vec<PendingInterrupt>,
 }
 
+impl Default for InterruptQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InterruptQueue {
     pub fn new() -> Self {
         Self {
@@ -351,7 +357,7 @@ fn lock_bus_miss_log() -> std::sync::MutexGuard<'static, Vec<String>> {
 }
 
 fn log_bus_miss_once(address: u32, is_write: bool, width: u8, pc: u32, info: &str) {
-    if std::env::var("MIMAS_BUS_TRACE").is_err() {
+    if !bus_trace_enabled() {
         return;
     }
     let area = address >> 29;
@@ -372,7 +378,7 @@ fn log_bus_miss_once(address: u32, is_write: bool, width: u8, pc: u32, info: &st
 
 impl Sh2 {
     fn check_bus_miss(&self, address: u32, is_write: bool, width: u8) {
-        if std::env::var("MIMAS_BUS_TRACE").is_err() {
+        if !bus_trace_enabled() {
             return;
         }
         let area = address >> 29;
@@ -421,35 +427,30 @@ impl Sh2 {
                 }
                 _ => {
                     let a = address & 0x0FFF_FFFF;
-                    if a < 0x0010_0000 && a >= 0x0008_0000 {
+                    if (0x0008_0000..0x0010_0000).contains(&a) {
                         is_miss = true;
                         info = "BIOS mirror offset";
-                    } else if a >= 0x0018_0000
-                        && a < 0x0020_0000
+                    } else if (0x0018_0000..0x0020_0000).contains(&a)
                         && (a - 0x0018_0000) >= 0x0001_0000
                     {
                         is_miss = true;
                         info = "Backup RAM mirror offset";
-                    } else if a >= 0x05D0_0000
-                        && a < 0x05D8_0000
+                    } else if (0x05D0_0000..0x05D8_0000).contains(&a)
                         && (a - 0x05D0_0000) >= 0x0000_0100
                     {
                         is_miss = true;
                         info = "VDP1 Regs mirror offset";
-                    } else if a >= 0x05F8_0000
-                        && a < 0x05FC_0000
+                    } else if (0x05F8_0000..0x05FC_0000).contains(&a)
                         && (a - 0x05F8_0000) >= 0x0000_0200
                     {
                         is_miss = true;
                         info = "VDP2 Regs mirror offset";
-                    } else if a >= 0x05FE_0000
-                        && a < 0x05FF_0000
+                    } else if (0x05FE_0000..0x05FF_0000).contains(&a)
                         && (a - 0x05FE_0000) >= 0x0000_0100
                     {
                         is_miss = true;
                         info = "SCU Regs mirror offset";
-                    } else if a >= 0x0600_0000
-                        && a < 0x0700_0000
+                    } else if (0x0600_0000..0x0700_0000).contains(&a)
                         && (a - 0x0600_0000) >= 0x0010_0000
                     {
                         is_miss = true;
@@ -578,7 +579,7 @@ impl Sh2 {
         self.pr = 0;
         self.cycles = 0;
 
-        self.pc = self.read_long(self.vbr + 0);
+        self.pc = self.read_long(self.vbr);
         self.registers[15] = self.read_long(self.vbr + 4);
 
         // Real SH-2 reset value: interrupt mask level 15 (I3-I0 = 1111)
@@ -780,21 +781,21 @@ impl Sh2 {
         let phys = addr & 0x1FFF_FFFF;
         if phys <= 0x000F_FFFF {
             16 // BIOS ROM
-        } else if phys >= 0x0010_0000 && phys <= 0x001F_FFFF {
+        } else if (0x0010_0000..=0x001F_FFFF).contains(&phys) {
             16 // Backup RAM
-        } else if phys >= 0x0020_0000 && phys <= 0x00FF_FFFF {
+        } else if (0x0020_0000..=0x00FF_FFFF).contains(&phys) {
             12 // Low Work RAM
-        } else if phys >= 0x0200_0000 && phys <= 0x03FF_FFFF {
+        } else if (0x0200_0000..=0x03FF_FFFF).contains(&phys) {
             24 // CS0
-        } else if phys >= 0x0580_0000 && phys <= 0x059F_FFFF {
+        } else if (0x0580_0000..=0x059F_FFFF).contains(&phys) {
             24 // CS2
-        } else if phys >= 0x05A0_0000 && phys <= 0x05AF_FFFF {
+        } else if (0x05A0_0000..=0x05AF_FFFF).contains(&phys) {
             50 // Sound RAM
-        } else if phys >= 0x05B0_0000 && phys <= 0x05BF_FFFF {
+        } else if (0x05B0_0000..=0x05BF_FFFF).contains(&phys) {
             50 // Sound regs
-        } else if phys >= 0x05C0_0000 && phys <= 0x05DF_FFFF {
+        } else if (0x05C0_0000..=0x05DF_FFFF).contains(&phys) {
             50 // VDP1 RAM
-        } else if phys >= 0x05E0_0000 && phys <= 0x05FF_FFFF {
+        } else if (0x05E0_0000..=0x05FF_FFFF).contains(&phys) {
             // PLACEHOLDER: until getVramCycle is implemented in VDP2
             2
         } else {
@@ -806,22 +807,22 @@ impl Sh2 {
         let phys = addr & 0x1FFF_FFFF;
         if phys <= 0x000F_FFFF {
             0 // BIOS ROM
-        } else if phys >= 0x0010_0000 && phys <= 0x001F_FFFF {
+        } else if (0x0010_0000..=0x001F_FFFF).contains(&phys) {
             0 // Backup RAM
-        } else if phys >= 0x0020_0000 && phys <= 0x00FF_FFFF {
+        } else if (0x0020_0000..=0x00FF_FFFF).contains(&phys) {
             7 // Low Work RAM
-        } else if phys >= 0x0200_0000 && phys <= 0x03FF_FFFF {
+        } else if (0x0200_0000..=0x03FF_FFFF).contains(&phys) {
             0 // CS0
-        } else if phys >= 0x0580_0000 && phys <= 0x059F_FFFF {
+        } else if (0x0580_0000..=0x059F_FFFF).contains(&phys) {
             0 // CS2
-        } else if phys >= 0x05A0_0000 && phys <= 0x05AF_FFFF {
+        } else if (0x05A0_0000..=0x05AF_FFFF).contains(&phys) {
             7 // Sound RAM only
-        } else if phys >= 0x05C0_0000 && phys <= 0x05DF_FFFF {
+        } else if (0x05C0_0000..=0x05DF_FFFF).contains(&phys) {
             2 // VDP1 RAM
-        } else if phys >= 0x05E0_0000 && phys <= 0x05FF_FFFF {
+        } else if (0x05E0_0000..=0x05FF_FFFF).contains(&phys) {
             // PLACEHOLDER: until getVramCycle is implemented in VDP2
             2
-        } else if phys >= 0x0600_0000 && phys <= 0x060F_FFFF {
+        } else if (0x0600_0000..=0x060F_FFFF).contains(&phys) {
             2 // High Work RAM
         } else {
             0
@@ -1180,7 +1181,7 @@ impl Sh2 {
     /// once per byte fetched.
     pub fn read_word(&mut self, address: u32) -> u16 {
         self.check_bus_miss(address, false, 2);
-        if address % 2 != 0 {
+        if !address.is_multiple_of(2) {
             self.unaligned_access_flag = true;
         }
         self.bus_wait();
@@ -1191,7 +1192,7 @@ impl Sh2 {
     /// Write 16-bit word to memory using the bus arbiter check
     pub fn write_word(&mut self, address: u32, val: u16) {
         self.check_bus_miss(address, true, 2);
-        if address % 2 != 0 {
+        if !address.is_multiple_of(2) {
             self.unaligned_access_flag = true;
         }
         self.bus_wait();
@@ -1202,7 +1203,7 @@ impl Sh2 {
     /// Read 32-bit long word (big-endian, matching real SH-2/Saturn wiring).
     pub fn read_long(&mut self, address: u32) -> u32 {
         self.check_bus_miss(address, false, 4);
-        if address % 4 != 0 {
+        if !address.is_multiple_of(4) {
             self.unaligned_access_flag = true;
         }
         self.bus_wait();
@@ -1213,7 +1214,7 @@ impl Sh2 {
     /// Write 32-bit long word (big-endian).
     pub fn write_long(&mut self, address: u32, val: u32) {
         self.check_bus_miss(address, true, 4);
-        if address % 4 != 0 {
+        if !address.is_multiple_of(4) {
             self.unaligned_access_flag = true;
         }
         self.bus_wait();
@@ -1651,13 +1652,13 @@ impl Sh2 {
                     match off {
                         0x00 => state.tvmr = val,
                         0x02 => {
-                            let old_fct = state.fbcr & 1;
-                            let new_fct = val & 1;
-                            let new_fcm = (val >> 1) & 1;
+                            let _old_fct = state.fbcr & 1;
+                            let _new_fct = val & 1;
+                            let _new_fcm = (val >> 1) & 1;
 
-                            let old_fbe = (state.fbcr >> 2) & 1;
-                            let new_fbe = (val >> 2) & 1;
-                            let new_fbm = (val >> 3) & 1;
+                            let _old_fbe = (state.fbcr >> 2) & 1;
+                            let _new_fbe = (val >> 2) & 1;
+                            let _new_fbm = (val >> 3) & 1;
 
                             state.fbcr = val;
 
@@ -2218,15 +2219,15 @@ impl Sh2 {
             || (0x05C0_0000..0x05D0_0000).contains(&d)
             || (0x05F8_0000..0x05FC_0000).contains(&d)
         {
-            return 14;
+            14
         } else if (0x05A0_0000..0x05C0_0000).contains(&d) {
-            return 20; // Sound RAM/regs
+            20 // Sound RAM/regs
         } else if (0x05D0_0000..0x05D8_0000).contains(&d) {
-            return 30; // VDP1 regs
+            30 // VDP1 regs
         } else if (0x05E0_0000..0x05F0_0000).contains(&d) {
-            return 82; // VDP2 RAM
+            82 // VDP2 RAM
         } else {
-            return 14;
+            14
         }
     }
 
@@ -2676,6 +2677,14 @@ impl Sh2 {
             if let Some(ref flag) = self.m68k_control {
                 flag.store(false, std::sync::atomic::Ordering::Release);
             }
+            // Core 4 stops by being deactivated in `LockStepSync` (its loop
+            // breaks when `sync_core` reports the core inactive), so SNDOFF has
+            // to do that here too. Storing only `m68k_control` -- which Core 4
+            // no longer reads -- left SNDOFF on this path unable to stop the
+            // sound CPU at all.
+            if let Some(ref sync) = self.sync {
+                sync.set_thread_active(4, false);
+            }
             return;
         }
         if command != SMPC_CMD_INTBACK {
@@ -2766,9 +2775,14 @@ impl Sh2 {
 
     fn service_pending_interrupt(&mut self) {
         if !self.is_slave {
-            if self.work_ram.hardware_events_any.load(std::sync::atomic::Ordering::Relaxed) {
-                self.work_ram.hardware_events_any.store(false, std::sync::atomic::Ordering::Relaxed);
-                
+            // §1.2b: exactly one shared-state access on the per-instruction
+            // path. `swap` (not load-then-store) so a producer publishing
+            // between the read and the clear cannot have its event erased.
+            if self
+                .work_ram
+                .hardware_events_any
+                .swap(false, std::sync::atomic::Ordering::Acquire)
+            {
                 if self
                     .work_ram
                     .smpc_sysres_pending
@@ -2949,9 +2963,16 @@ impl Sh2 {
                 // SLEEP: PC is not advanced, wait for interrupt.
                 // Since step() already advanced self.pc by 2, we rewind it.
                 self.pc = self.pc.wrapping_sub(2);
-                if let Some(ref sync) = self.sync {
-                    sync.park_for_sleep(&self.work_ram.hardware_events_any);
-                }
+                // Deliberately does NOT park. Master SH-2 is the system's only
+                // timing source -- V-Blank, H-Blank, the SCU timers and SMPC
+                // dispatch all advance from this very loop's cycle accounting
+                // (`Sh2::step`). A core parked here stops advancing cycles, so
+                // nothing can ever raise the event that would wake it: a hard
+                // deadlock, not a slow path. Re-executing `SLEEP` keeps cycles
+                // flowing, so the interrupt that ends the sleep actually
+                // arrives. This does burn host CPU and remains a real §1.5 gap
+                // (`.development/current_bugs.md`); closing it needs the timing
+                // generator moved off Master first, not a Condvar here.
                 return;
             }
             0x0023 => {
@@ -3915,7 +3936,7 @@ impl Sh2 {
     }
 
     fn get_onchip_32(&self, off: usize) -> Option<u32> {
-        let normalized = if off >= 0x120 && off <= 0x13F {
+        let normalized = if (0x120..=0x13F).contains(&off) {
             off - 0x20
         } else {
             off
@@ -4268,10 +4289,10 @@ impl Sh2 {
                 if divisor == 0 {
                     if (dividend_high & 0x80000000) != 0 {
                         self.onchip.dvdntl = 0x80000000;
-                        self.onchip.dvdnth = (self.onchip.dvdnth << 3) as u32;
+                        self.onchip.dvdnth <<= 3;
                     } else {
                         self.onchip.dvdntl = 0x7FFFFFFF;
-                        self.onchip.dvdnth = (self.onchip.dvdnth << 3) as u32;
+                        self.onchip.dvdnth <<= 3;
                     }
                     self.onchip.dvdntul = self.onchip.dvdntl;
                     self.onchip.dvdntuh = self.onchip.dvdnth;
@@ -4493,9 +4514,55 @@ impl Sh2 {
                     self.pending_sync = 0;
                 }
             }
-            std::thread::yield_now();
+            // No `thread::yield_now()` here, deliberately. It used to run on
+            // *every* emulated instruction (present since the initial commit,
+            // never justified), costing a `sched_yield` syscall per instruction
+            // on the one loop that is this emulator's actual critical path.
+            // Measured on a real BIOS boot: removing it cut the wall-clock time
+            // to reach the same settle PC (`0x06001694`, identical WRAM traffic
+            // either way) from 10.01s to 4.13s -- a 2.4x speedup. It was never
+            // load-bearing: `sync_core` above already blocks on a Condvar
+            // whenever this core has drifted past the slack limit, which is the
+            // only point at which yielding to another core is useful, and the
+            // rest of the system parks rather than spins
+            // (`docs/mimas-architecture-spec.md` 1.4/1.5). Notably the
+            // voluntary-context-switch *rate* was unchanged (213K/s -> 228K/s),
+            // confirming the cost was the syscall itself, not an actual
+            // reschedule. Don't reintroduce it.
         }
     }
+}
+
+/// Cached `MIMAS_BUS_TRACE` decision. `check_bus_miss` is reached by *every*
+/// memory access, and `std::env::var` scans the environment and allocates a
+/// `CString` per call -- it surfaced in a `perf` profile of a real BIOS boot as
+/// `CStr::from_bytes_with_nul`. One relaxed load replaces it.
+///
+/// Tri-state so it stays overridable: 0 = not yet resolved, 1 = off, 2 = on.
+/// `set_bus_trace` exists because resolving from the environment exactly once
+/// is not testable in a parallel test binary -- whichever test touched a bus
+/// first would win the race and pin the value for every other test.
+static BUS_TRACE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn bus_trace_enabled() -> bool {
+    match BUS_TRACE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let on = std::env::var("MIMAS_BUS_TRACE").is_ok();
+            BUS_TRACE.store(if on { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+/// Force the bus-trace decision, bypassing the environment lookup. For tests
+/// that need the trace on deterministically (see `BUS_TRACE`).
+pub fn set_bus_trace(enabled: bool) {
+    BUS_TRACE.store(
+        if enabled { 2 } else { 1 },
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 fn sign_extend8(d: u32) -> i32 {
@@ -4582,7 +4649,7 @@ mod opcode_tests {
         let mut cpu = make_cpu();
         cpu.registers[1] = 5;
         cpu.registers[2] = 5;
-        let op = 0x3000 | (1 << 8) | (2 << 4) | 0x0; // CMP/EQ Rm,Rn
+        let op = 0x3000 | (1 << 8) | (2 << 4); // CMP/EQ Rm,Rn
         cpu.execute(op);
         assert!(cpu.t());
         cpu.registers[2] = 6;
@@ -4611,7 +4678,7 @@ mod opcode_tests {
     fn shift_ops() {
         let mut cpu = make_cpu();
         cpu.registers[3] = 0b0001;
-        cpu.execute(0x4000 | (3 << 8) | 0x00); // SHLL
+        cpu.execute(0x4000 | (3 << 8)); // SHLL
         assert_eq!(cpu.registers[3], 0b0010);
         cpu.execute(0x4000 | (3 << 8) | 0x01); // SHLR
         assert_eq!(cpu.registers[3], 0b0001);
@@ -4939,10 +5006,7 @@ mod opcode_tests {
     fn draw_end_enters_through_vector_0x4d_at_level_2() {
         let mut cpu = make_cpu();
         cpu.scu.write_long(0xA0, 0x0000);
-        cpu.work_ram
-            .vdp1_draw_end_pending
-            .store(true, std::sync::atomic::Ordering::Release);
-        cpu.work_ram.hardware_events_any.store(true, std::sync::atomic::Ordering::Release);
+        cpu.work_ram.raise_vdp1_draw_end();
         cpu.sr = 0; // nothing masked
         cpu.vbr = 0x0601_0000;
         cpu.registers[15] = 0x0601_1000;
@@ -4974,10 +5038,7 @@ mod opcode_tests {
     fn draw_end_stays_pending_while_masked() {
         let mut cpu = make_cpu();
         cpu.scu.write_long(0xA0, 0x0000);
-        cpu.work_ram
-            .vdp1_draw_end_pending
-            .store(true, std::sync::atomic::Ordering::Release);
-        cpu.work_ram.hardware_events_any.store(true, std::sync::atomic::Ordering::Release);
+        cpu.work_ram.raise_vdp1_draw_end();
         cpu.sr = 0x0000_00F0; // mask level 15: everything blocked
         cpu.pc = 0x0600_0000;
         cpu.write_word(0x0600_0000, 0x0009); // NOP
@@ -4998,10 +5059,7 @@ mod opcode_tests {
     fn draw_end_yields_to_every_higher_interrupt() {
         let mut cpu = make_cpu();
         cpu.scu.write_long(0xA0, 0x0000);
-        cpu.work_ram
-            .vdp1_draw_end_pending
-            .store(true, std::sync::atomic::Ordering::Release);
-        cpu.work_ram.hardware_events_any.store(true, std::sync::atomic::Ordering::Release);
+        cpu.work_ram.raise_vdp1_draw_end();
         // VBLANK OUT is level 6
         cpu.scu.vblank_out();
 
@@ -5379,7 +5437,6 @@ mod opcode_tests {
         cpu.work_ram
             .vblank_active
             .store(true, std::sync::atomic::Ordering::Release);
-        cpu.work_ram.hardware_events_any.store(true, std::sync::atomic::Ordering::Release);
         assert_eq!(
             cpu.tvstat_word() & TVSTAT_VBLANK_BIT,
             TVSTAT_VBLANK_BIT,
@@ -5406,7 +5463,6 @@ mod opcode_tests {
         cpu.work_ram
             .vblank_active
             .store(true, std::sync::atomic::Ordering::Release);
-        cpu.work_ram.hardware_events_any.store(true, std::sync::atomic::Ordering::Release);
         assert_eq!(
             cpu.read_byte(0x25F8_0004),
             0x00,
@@ -5859,7 +5915,6 @@ mod opcode_tests {
         cpu.work_ram
             .vblank_active
             .store(true, std::sync::atomic::Ordering::Release);
-        cpu.work_ram.hardware_events_any.store(true, std::sync::atomic::Ordering::Release);
         assert_eq!(cpu.read_byte(0x05F8_0204), 0x00);
         assert_eq!(cpu.read_byte(0x05F8_0205), 0x08);
 
@@ -6155,7 +6210,9 @@ mod opcode_tests {
 
     #[test]
     fn test_bus_miss_logging() {
-        std::env::set_var("MIMAS_BUS_TRACE", "1");
+        // Deterministic: `std::env::set_var` races every other test in this
+        // binary (and is `unsafe` from edition 2024 on) -- see `BUS_TRACE`.
+        super::set_bus_trace(true);
 
         let mut cpu = make_cpu();
 
@@ -6207,7 +6264,7 @@ mod opcode_tests {
             assert_eq!(count, 1);
         }
 
-        std::env::remove_var("MIMAS_BUS_TRACE");
+        super::set_bus_trace(false);
     }
 
     #[test]
@@ -6239,16 +6296,10 @@ mod opcode_tests {
         cpu.pc = 0x0600_0100;
         cpu.write_word(0x0600_0100, 0x0009); // NOP
 
-        cpu.write_long(
-            cpu.vbr.wrapping_add(SMPC_IRQ_VECTOR as u32 * 4),
-            0x0600_2000,
-        );
+        cpu.write_long(cpu.vbr.wrapping_add(SMPC_IRQ_VECTOR * 4), 0x0600_2000);
         cpu.write_word(0x0600_2000, 0x0009);
 
-        cpu.write_long(
-            cpu.vbr.wrapping_add(SOUND_REQ_IRQ_VECTOR as u32 * 4),
-            0x0600_3000,
-        );
+        cpu.write_long(cpu.vbr.wrapping_add(SOUND_REQ_IRQ_VECTOR * 4), 0x0600_3000);
         cpu.write_word(0x0600_3000, 0x0009);
 
         cpu.queue_send(SMPC_IRQ_VECTOR as u8, SMPC_IRQ_LEVEL as u8); // level 8: must not deliver
@@ -6308,10 +6359,7 @@ mod opcode_tests {
         cpu.registers[15] = 0x0600_1000;
 
         // Interrupt vector points to 0x0600_2000
-        cpu.write_long(
-            cpu.vbr.wrapping_add(VBLANK_IN_VECTOR as u32 * 4),
-            0x0600_2000,
-        );
+        cpu.write_long(cpu.vbr.wrapping_add(VBLANK_IN_VECTOR * 4), 0x0600_2000);
         cpu.write_word(0x0600_2000, 0x0009);
 
         // Branch instruction: BRA 0x0600_0020
@@ -6837,7 +6885,7 @@ mod opcode_tests {
                     );
 
                     // Compute expected destination state locally
-                    let mut expected_dst = vec![0u8; 64];
+                    let mut expected_dst = [0u8; 64];
                     let mut temp_sar = sar;
                     let mut temp_dar = dar;
                     for _ in 0..count {

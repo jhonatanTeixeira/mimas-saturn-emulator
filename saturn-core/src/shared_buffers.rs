@@ -105,6 +105,61 @@ impl WorkRam {
         }
     }
 
+    /// Publish a cross-thread hardware event to Master SH-2's per-instruction
+    /// fast path (`Sh2::service_pending_interrupt`), which reads only
+    /// `hardware_events_any` per instruction and drains the individual flags
+    /// below only when it is set (`docs/mimas-architecture-spec.md` §1.2b).
+    ///
+    /// **Every producer of one of the five flags must go through one of these
+    /// methods.** Storing a flag directly leaves `hardware_events_any` false,
+    /// the gate never opens, and the event is dropped silently and forever --
+    /// which is exactly what shipped in `9354fd3` and stopped the BIOS booting
+    /// (see `docs/current_review.md`). The individual flag is published first
+    /// and the summary word second, both `Release`, so a consumer that sees the
+    /// summary word is guaranteed to see the flag behind it.
+    fn publish_hardware_event(&self) {
+        self.hardware_events_any
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// SMPC System Manager IRQ (level 8). Raised by Core 7.
+    pub fn raise_smpc_irq(&self) {
+        self.smpc_irq_pending
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.publish_hardware_event();
+    }
+
+    /// SMPC-requested NMI. Raised by Core 7.
+    pub fn raise_smpc_nmi(&self) {
+        self.smpc_nmi_pending
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.publish_hardware_event();
+    }
+
+    /// SMPC-requested system reset. Raised by Core 7.
+    pub fn raise_smpc_sysres(&self) {
+        self.smpc_sysres_pending
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.publish_hardware_event();
+    }
+
+    /// SMPC clock change: `true` selects 352-dot mode, `false` selects 320.
+    pub fn raise_smpc_clock_change(&self, is_352: bool) {
+        self.smpc_clock_change.store(
+            if is_352 { 2 } else { 1 },
+            std::sync::atomic::Ordering::Release,
+        );
+        self.publish_hardware_event();
+    }
+
+    /// VDP1 command-list completion (Sprite Draw End). Raised by the VDP1
+    /// executor.
+    pub fn raise_vdp1_draw_end(&self) {
+        self.vdp1_draw_end_pending
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.publish_hardware_event();
+    }
+
     /// Explicit clear of low work RAM (must be called via register write commands, never automatically on Drop)
     pub fn clear_low_ram(&mut self) {
         self.low_ram.get_mut().unwrap().fill(0);

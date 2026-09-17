@@ -105,7 +105,7 @@ fn main() {
             .update_with_buffer(&frame.pixels, win_w, win_h)
             .expect("failed to present frame");
         frames_presented += 1;
-        if frames_presented % 300 == 0 {
+        if frames_presented.is_multiple_of(300) {
             println!(
                 "Core 0 PC: {:#010X} -- {} frames presented",
                 system.cpu0_pc.load(std::sync::atomic::Ordering::Relaxed),
