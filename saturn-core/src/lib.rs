@@ -1,20 +1,3 @@
-#![allow(
-    clippy::unnecessary_unwrap,
-    clippy::bad_bit_mask,
-    clippy::if_same_then_else,
-    clippy::overly_complex_bool_expr,
-    clippy::too_many_arguments,
-    clippy::type_complexity,
-    clippy::needless_range_loop,
-    clippy::field_reassign_with_default,
-    clippy::assertions_on_constants,
-    clippy::erasing_op,
-    clippy::eq_op,
-    clippy::manual_clamp,
-    clippy::useless_vec,
-    clippy::bool_assert_comparison,
-    clippy::identity_op
-)]
 pub mod bus_arbiter;
 pub mod cdrom;
 pub mod cs2;
@@ -723,5 +706,7 @@ impl Drop for SaturnSystem {
         self.shutdown();
     }
 }
-pub mod integration_tests;
 pub mod vdp2;
+
+#[cfg(test)]
+mod integration_tests;

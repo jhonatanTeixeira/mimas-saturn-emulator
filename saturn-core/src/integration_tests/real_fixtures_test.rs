@@ -1,4 +1,3 @@
-#![allow(clippy::field_reassign_with_default)]
 //! Tests against real state captured from a genuine Yabause libretro core
 //! (patched with a temporary dump hook, see
 //! `docs/yabause_test_fixtures_extraction_plan.md`) running a real Saturn

@@ -156,3 +156,10 @@ It has never been swept. A wider window means fewer handoffs and more drift betw
 cores; that is a correctness/throughput tradeoff and should be measured, not
 guessed.
 
+### 3.4. Guarding these numbers
+
+`tools/quality_gate.sh`'s smoke test asserts the emulated speed on every run
+(floor 150% of real SH-2, measured 181-189%), alongside the settle PC and the
+WRAM access count. That is what turns the figures above from a snapshot into a
+regression check -- the `9354fd3` breakage measured 0% and would have been caught
+on the spot. See `docs/quality-gate.md`.

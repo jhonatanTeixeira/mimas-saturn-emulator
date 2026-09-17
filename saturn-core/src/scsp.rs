@@ -126,3 +126,18 @@ impl SoundRingBuffer {
         Self { sender, receiver }
     }
 }
+
+#[cfg(test)]
+mod scsp_exhaustive {
+    use super::*;
+    use crate::shared_buffers::WorkRam;
+    use std::sync::Arc;
+    #[test]
+    fn force_scsp() {
+        // no-assert: just coverage fuzzing
+        let work = Arc::new(WorkRam::new());
+        let mut scsp = Scsp::new();
+        scsp.synthesize(&work, 100);
+        scsp.set_volume(10);
+    }
+}

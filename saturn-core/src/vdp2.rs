@@ -590,6 +590,136 @@ mod tests {
         assert!(pixel.is_some() || pixel.is_none());
     }
 
+    // ---- 4bpp fetch_pixel, every value derived by hand ----
+    //
+    // Written after `cargo mutants` reported **121 of 159 mutants surviving** in
+    // `fetch_pixel`. Coverage called the function covered; the only test aiming at
+    // it was the tautology above, which passes for every possible return value.
+    // Replacing `&` with `|` in the nibble select, or `+` with `*` in the address
+    // arithmetic, changed nothing any test could see.
+    //
+    // The arithmetic is spelled out in each case rather than taken from a run, so
+    // a wrong implementation cannot make a test agree with it.
+
+    /// Builds a VRAM/CRAM pair for the 4bpp cases below.
+    ///
+    /// CRAM mode 2 on purpose: `cram_lookup` there is
+    /// `u32::from_be_bytes(cram[(index << 2) & 0xFFF ..][..4])` -- a flat
+    /// lookup, so the asserted colour pins the computed CRAM *index* exactly,
+    /// with no RGB555 conversion in between to blur a wrong index into a
+    /// plausible colour.
+    fn cram4(
+        vram_len: usize,
+        vram_at: &[(usize, u8)],
+        cram_at: &[(usize, [u8; 4])],
+    ) -> (Vec<u8>, Vec<u8>) {
+        let mut vram = vec![0u8; vram_len];
+        for (a, v) in vram_at {
+            vram[*a] = *v;
+        }
+        let mut cram = vec![0u8; 0x1000];
+        for (a, bytes) in cram_at {
+            cram[*a..*a + 4].copy_from_slice(bytes);
+        }
+        (vram, cram)
+    }
+
+    #[test]
+    fn fetch_pixel_4bpp_even_x_takes_the_high_nibble() {
+        // 8x8 cell, no flip. x=2, y=3, cellw=8:
+        //   byte offset = (y * cellw + x) / 2 = (3*8 + 2) / 2 = 26 / 2 = 13
+        //   vram address = charaddr + 13 = 0x100 + 13 = 0x10D
+        // x is even, so the dot is the HIGH nibble of 0x5A, i.e. 5.
+        //   CRAM index = coloroffset + paladdr + dot = 0 + 0x20 + 5 = 0x25
+        //   CRAM byte  = (0x25 << 2) & 0xFFF = 0x94
+        let (vram, cram) = cram4(
+            0x80000,
+            &[(0x10D, 0x5A)],
+            &[(0x94, [0xDE, 0xAD, 0xBE, 0xEF])],
+        );
+        let px = fetch_pixel(0x100, 0x20, 2, 3, 0, 1, 0, false, 0, 2, 8, &vram, &cram);
+        assert_eq!(px, Some(0xDEAD_BEEF));
+    }
+
+    #[test]
+    fn fetch_pixel_4bpp_odd_x_takes_the_low_nibble_of_the_same_byte() {
+        // x=3 instead of 2: (3*8 + 3) / 2 = 27 / 2 = 13 -- integer division puts
+        // this on the SAME byte 0x10D as the case above. Only the nibble differs.
+        // x is odd, so the dot is the LOW nibble of 0x5A, i.e. 0xA.
+        //   CRAM index = 0 + 0x20 + 0xA = 0x2A
+        //   CRAM byte  = (0x2A << 2) & 0xFFF = 0xA8
+        let (vram, cram) = cram4(
+            0x80000,
+            &[(0x10D, 0x5A)],
+            &[(0xA8, [0x01, 0x02, 0x03, 0x04])],
+        );
+        let px = fetch_pixel(0x100, 0x20, 3, 3, 0, 1, 0, false, 0, 2, 8, &vram, &cram);
+        assert_eq!(px, Some(0x0102_0304));
+    }
+
+    #[test]
+    fn fetch_pixel_4bpp_dot_zero_is_transparent_only_when_enabled() {
+        // Same address as above (x=2, y=3 -> 0x10D), but the byte is 0x00, so the
+        // high nibble -- and the dot -- is 0. Transparency is the only difference
+        // between the two calls.
+        //   CRAM index = 0 + 0x20 + 0 = 0x20, CRAM byte = (0x20 << 2) = 0x80
+        let (vram, cram) = cram4(
+            0x80000,
+            &[(0x10D, 0x00)],
+            &[(0x80, [0xCA, 0xFE, 0xBA, 0xBE])],
+        );
+        let transparent = fetch_pixel(0x100, 0x20, 2, 3, 0, 1, 0, true, 0, 2, 8, &vram, &cram);
+        assert_eq!(
+            transparent, None,
+            "dot 0 with transparency enabled is skipped"
+        );
+
+        let opaque = fetch_pixel(0x100, 0x20, 2, 3, 0, 1, 0, false, 0, 2, 8, &vram, &cram);
+        assert_eq!(
+            opaque,
+            Some(0xCAFE_BABE),
+            "dot 0 with transparency disabled still draws palette entry 0"
+        );
+    }
+
+    #[test]
+    fn fetch_pixel_4bpp_address_past_the_end_of_vram_is_none() {
+        // Same 0x10D address, against a 16-byte VRAM.
+        let (vram, cram) = cram4(16, &[], &[(0x94, [0xDE, 0xAD, 0xBE, 0xEF])]);
+        let px = fetch_pixel(0x100, 0x20, 2, 3, 0, 1, 0, false, 0, 2, 8, &vram, &cram);
+        assert_eq!(px, None);
+    }
+
+    #[test]
+    fn fetch_pixel_4bpp_coloroffset_and_paladdr_both_shift_the_cram_index() {
+        // Same dot (5) as the first case, but coloroffset 0x100 and paladdr 0x20:
+        //   CRAM index = 0x100 + 0x20 + 5 = 0x125
+        //   CRAM byte  = (0x125 << 2) & 0xFFF = 0x494
+        // Pins both terms of the sum: dropping either lands somewhere else.
+        let (vram, cram) = cram4(
+            0x80000,
+            &[(0x10D, 0x5A)],
+            &[(0x494, [0x11, 0x22, 0x33, 0x44])],
+        );
+        let px = fetch_pixel(0x100, 0x20, 2, 3, 0, 1, 0, false, 0x100, 2, 8, &vram, &cram);
+        assert_eq!(px, Some(0x1122_3344));
+    }
+
+    #[test]
+    fn fetch_pixel_4bpp_horizontal_flip_mirrors_x_within_the_cell() {
+        // flipfunction bit 0 flips X: x becomes 7 - x, so x=5 reads the byte for
+        // x=2 -- the same 0x10D, same high nibble -- while x=2 unflipped would
+        // read it directly. Same expected colour from two different inputs is the
+        // point: it pins the mirroring, not just the address.
+        let (vram, cram) = cram4(
+            0x80000,
+            &[(0x10D, 0x5A)],
+            &[(0x94, [0xDE, 0xAD, 0xBE, 0xEF])],
+        );
+        let flipped = fetch_pixel(0x100, 0x20, 5, 3, 1, 1, 0, false, 0, 2, 8, &vram, &cram);
+        assert_eq!(flipped, Some(0xDEAD_BEEF));
+    }
+
     #[test]
     fn two_word_pattern_name_decode_fields() {
         let (charaddr, paladdr, flip, sf, scf) = pattern_addr(

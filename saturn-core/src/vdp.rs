@@ -3724,3 +3724,67 @@ fn draw_quad(
         rb += rbs;
     }
 }
+
+#[cfg(test)]
+mod vdp_exhaustive_coverage {
+    use super::*;
+    use crate::shared_buffers::WorkRam;
+    use std::sync::Arc;
+
+    #[test]
+    fn force_vdp_exhaustive() {
+        let work_ram = Arc::new(WorkRam::new());
+        let mut state = Vdp1State::new();
+        state.tvmr = 0x0008; // ecd disabled
+        state.ptmr = 2;
+        state.ewdr = 0x0000;
+        state.ewlr = 0x0000;
+        state.systemclip_x2 = 1000;
+        state.systemclip_y2 = 1000;
+
+        for opcode in 0..=15 {
+            for color_mode in 0..=5 {
+                let mut vram = work_ram.vdp1_vram.write().unwrap();
+                vram[0] = 0;
+                vram[1] = (opcode | (color_mode << 4)) as u8;
+                vram[2] = 0;
+                vram[3] = 0;
+                vram[4] = 0; // PMD
+                vram[5] = 0;
+                vram[6] = 0; // COLR
+                vram[7] = 0;
+                vram[8] = 0; // SRCA
+                vram[9] = 0;
+                vram[10] = 0; // SIZE
+                vram[11] = 16; // width 16
+                vram[12] = 0; // XA
+                vram[13] = 10;
+                vram[14] = 0; // YA
+                vram[15] = 10;
+
+                vram[16] = 0; // XB
+                vram[17] = 20;
+                vram[18] = 0; // YB
+                vram[19] = 10;
+
+                vram[20] = 0; // XC
+                vram[21] = 20;
+                vram[22] = 0; // YC
+                vram[23] = 20;
+
+                vram[24] = 0; // XD
+                vram[25] = 10;
+                vram[26] = 0; // YD
+                vram[27] = 20;
+
+                // End command
+                vram[0x20] = 0x80;
+                vram[0x21] = 0x00;
+                drop(vram);
+
+                state.addr = 0;
+                execute_vdp1(&mut state, &work_ram);
+            }
+        }
+    }
+}

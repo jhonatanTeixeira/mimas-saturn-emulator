@@ -1,4 +1,3 @@
-#![allow(clippy::field_reassign_with_default)]
 use crate::{BusArbiter, LockStepSync, Sh2};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;

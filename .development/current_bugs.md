@@ -171,3 +171,34 @@ keeping them; writing them for real is VDP1 Phase 5 work.
 
 And one semantic tautology no structural tool catches: `vdp2.rs`'s
 `colornumber_2_ignores_paladdr` asserts `pixel.is_some() || pixel.is_none()`.
+
+## Open golden-rule violations (tools/golden_rules.py)
+
+Both are real and both stay red on purpose; neither is marked `golden-rule-ok`,
+because a known gap that has been silenced is just an unknown gap.
+
+- **`saturn-core/src/lib.rs` — Core 5 (SCSP) never parks.** `while
+  !shutdown_c5.load(...)` is a continuous loop on a component thread, which spec
+  §1.5 allows only for the two SH-2 cores. The spec itself records this as a
+  "Known gap, not a rule exception". Closing it means driving SCSP from an event
+  (a wake on sample-buffer demand) instead of a loop.
+- **`saturn-core/src/sync.rs:102` — `Instant::now()` on component threads.** Spec
+  §1.5: those threads "may not reference the host wall clock at all". It brackets
+  the Condvar wait to feed `telemetry::record_idle_time`. The instrumentation is
+  genuinely useful — it is what found the `yield_now` and Core 5 problems — so the
+  fix keeps the signal and drops the clock: a per-core *block counter* needs no
+  `Instant`.
+
+## How these are checked
+
+Most entries above now have a tool that reports them on every run, so this file
+records *why* they are open rather than serving as the only record that they are:
+
+- `bash tools/quality_gate.sh` — 9 steps. Currently red on clippy, golden rules
+  and coverage; all three are the entries above, not new problems.
+- `.venv/bin/python tools/antipattern_scan.py scan` — architectural patterns with
+  no fixed spelling. Review queue, not a verdict.
+
+`docs/quality-gate.md` explains each step and the one honest way to turn it green.
+Anything fixed here should stop being reported there; if it does not, the fix did
+not land.

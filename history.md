@@ -2620,3 +2620,170 @@ the genuine Core 0 <-> Core 5 handoff. Core 5 is still an *active* participant i
 the bounded-slack lockstep instead of a parked, event-driven component -- the gap
 §1.5 already records. Parking it removes the handoff rather than making it cheaper,
 and that is the next real step, not another micro-optimisation here.
+
+## Chapter 42 — Checking the golden rules, and checking the checks
+
+`docs/mimas-architecture-spec.md` states rules no compiler enforces. On
+2026-09-17 eight of them were broken across two agents in a single day, and every
+one got past `cargo build`, `cargo test` (396 green), `cargo clippy` and the
+coverage gate. One stopped the BIOS booting. They were found by hand-auditing the
+spec against the code — expensive, repeatable work, which is the definition of
+something a tool should do instead.
+
+`tools/golden_rules.py` now does it, with `tools/rustscan.py` underneath. Three
+things about how it got built are worth more than the rules themselves.
+
+**Regex was not enough, and the failure was specific.** The first version of the
+"atomic consumed but never raised" check **missed the bug it was written for**. It
+treated production code as everything before the first `#[cfg(test)]`, and
+`sh2.rs` has one at line 2576 — about 4,700 lines before the end of the file — so
+half the production code was silently discarded, including the consumer. Every
+rule here is about *scope* ("inside `step`", "outside test code", "in the spawn
+closure"), and regex does not know where a module begins or ends. Hence
+`rustscan.py`: strip literals and comments, then count braces. No new dependency,
+because the gate refuses to install tools behind the user's back and every
+dependency is one more way for it to be missing on the machine that needs it.
+
+**The self-test earned its place immediately.** `--self-test` replays each rule
+against the commits where the bug actually existed. It caught two wrong versions
+of the same check before either could ship:
+
+- v1 counted any `store` as production. The consumer clears the flag with
+  `store(false)`, so every flag looked produced. Found nothing.
+- v2 counted stores of truthy *literals*. It missed
+  `store(if is_352 { 2 } else { 1 }, ...)` and reported the healthy commit
+  `194572f` as broken.
+- v3 defines "raised" as the inverse of clearing — any store that is not literally
+  `false`/`0`. One precise hit on `9354fd3`, silence on `194572f`.
+
+A check nobody has watched fail is not a check.
+
+**The rule found code written the same day, and the fix was real.**
+`service_pending_interrupt` was reading the summary word with
+`swap(false, Acquire)` — one read-modify-write per instruction. §1.2b, written
+that morning, asks for a single *relaxed load*. The difference is not pedantry: a
+`swap` needs exclusive ownership of the cache line (a `lock xchg` on x86; on the
+Cortex-A53 this project targets, an `ldaxr`/`stlxr` retry loop plus a barrier that
+stalls an in-order pipeline), while a load needs only shared ownership. It is now
+`load(Relaxed) && swap(false, Acquire)`: the common case, where nothing is
+pending, is a plain load, and the RMW happens only when there is an event.
+
+**What stays red, deliberately:** Core 5 (SCSP) still never parks — the spec
+already records it as a known gap, and marking it `golden-rule-ok` would turn a
+known gap into a silent one. And `sync.rs` still calls `Instant::now()` around its
+Condvar wait, which §1.5 forbids on component threads. Earlier today this file
+wrongly recorded that as fixed, on the strength of a commit summary rather than a
+grep; the rule now states the truth every run.
+
+Also landed: loosening a gate threshold from the environment now **fails** unless
+`MIMAS_OVERRIDE_REASON` explains why (tightening stays free). Printing a warning
+was not enough — it made the weakening visible, and whoever reports "the gate
+passed" can leave that line out. Observed the same day as
+`MIMAS_COVERAGE_MIN=80 ./tools/quality_gate.sh`.
+
+## Chapter 43 — Building checks for the rules the compiler cannot see, and checking the checks
+
+`docs/mimas-architecture-spec.md` states six decisions. Nothing enforced any of
+them. On 2026-09-17 eight were broken across two agents in one day, one of them
+badly enough to stop the BIOS booting, and every one got past `cargo build`,
+`cargo test` (396 green), `cargo clippy` and the coverage gate. This chapter is
+about the tooling that now enforces them, and — more usefully — about the wrong
+turns taken building it, because each one cost a measurement to discover.
+
+Full operational detail is in `docs/quality-gate.md`. What follows is only what a
+future session would otherwise have to rediscover.
+
+**Loosening a threshold now fails.** `MIMAS_COVERAGE_MIN=80 ./tools/quality_gate.sh`
+was observed the same day the gate gained its config banner. The banner printed
+`⚠️ OVERRIDDEN` and the run went green anyway — visibility that depends on
+someone reading the whole log is not a defence, because whoever reports "the gate
+passed" can leave that line out. Tightening stays free; loosening needs
+`MIMAS_OVERRIDE_REASON`. The legitimate case still works — the R36S genuinely
+cannot hit the desktop speed floor — it just leaves a record.
+
+**Regex could not do the golden rules, and the failure was specific.** The first
+version of the "atomic consumed but never raised" check *missed the bug it was
+written for*. It treated production code as everything before the first
+`#[cfg(test)]`, and `sh2.rs` has one at line 2576 — roughly 4,700 lines before
+the end of the file — so half the production code, including the consumer, was
+silently discarded. Every rule here is about scope ("inside `step`", "outside
+test code", "in the spawn closure") and regex does not know where a module begins
+or ends. Hence `tools/rustscan.py`: strip literals and comments, count braces. No
+new dependency, because the gate refuses to install tools and each dependency is
+one more way for it to be missing on the machine that needs it.
+
+**The self-test earned its place immediately.** `golden_rules.py --self-test`
+replays each rule against the commits where the bug existed. It caught two wrong
+versions of the same check before either shipped: the first counted any `store`
+as production, but the consumer clears the flag with `store(false)`, so every
+flag looked produced and it found nothing; the second counted stores of truthy
+*literals* and missed `store(if is_352 { 2 } else { 1 }, …)`, reporting the
+healthy commit `194572f` as broken. A check nobody has watched fail is not a
+check.
+
+**A rule caught code written the same morning.** `service_pending_interrupt` read
+the summary word with `swap(false, Acquire)` — one read-modify-write per
+instruction, where §1.2b (written hours earlier) asks for a single *relaxed load*.
+The distinction is not pedantry: a `swap` needs exclusive ownership of the cache
+line — `lock xchg` on x86, an `ldaxr`/`stlxr` retry loop plus a barrier on the
+Cortex-A53 this project targets, which stalls an in-order pipeline. It is now
+`load(Relaxed) && swap(false, Acquire)`: the common case is a plain load, and the
+RMW happens only when an event is pending.
+
+### The semantic pass, and four measurements that redirected it
+
+`tools/antipattern_scan.py` searches for architectural violations by similarity
+to real examples. Getting it useful took six iterations, and the interesting part
+is that **every correction came from being told the tool was being used wrongly,
+not from replacing a component.**
+
+*The corpus was full of the wrong things.* It started with eight patterns, of
+which five — a dead opcode mask, `assert!(true)`, `env::var` on a hot path — are
+exactly what a regex or an AST check finds every time. Semantic retrieval was
+being spent on work `golden_rules.py` already did. The patterns that actually
+need it are the architectural ones, because they have **no fixed spelling**:
+"this thread polls instead of parking" can be a `while` on an atomic, a `loop`
+with a `yield_now`, a sleep-driven deadline, or a mutex retaken every iteration.
+The corpus now holds five, all real code pulled from the commit where it shipped.
+
+*The embeddings were anisotropic, not out-of-domain.* Raw GraphCodeBERT put
+unrelated Rust functions at p50 **0.882** — everything looked alike. That was read
+as evidence that Rust is outside CodeSearchNet's training data, and the embedder
+was swapped for a general-purpose one that scored 2.2x better on spread. Wrong
+diagnosis and wrong fix: GraphCodeBERT is pretrained with masked-LM and data-flow
+objectives, not a contrastive one, so its embeddings sit in a cone around a
+dominant common direction. **Subtracting the mean moves p50 to -0.026 and widens
+the usable range about sixfold.** The "better" model had only looked better
+because modern embedding models ship contrastively tuned — it compared a model
+used correctly against one used wrongly.
+
+*Whole functions are the wrong unit.* An embedding summarises everything it is
+given, so a 174-line decode function embeds as "a large decode function" and the
+two lines holding the defect contribute almost nothing. Comparison now happens in
+overlapping 12-line windows.
+
+*Prompt length, not model size, drove the false positives.* Asking a 0.8B model
+"does this contain the same defect?" got YES on 16 of 62 — the question invites
+agreement. Replacing it with three chained checks plus 30 words of reasoning got
+YES on **all 27**: more room to fill, more agreement. The fix was less prompt, not
+more structure. Each check is now one factual question per call with a one-token
+answer — recognition ("does this code call `env::var`?"), not judgement.
+
+**The limit, measured rather than assumed.** A controlled test asked whether the
+embedder ranks by meaning or by form. Against the dead-mask pattern,
+`(opcode & 0xFFF0) == 0x4E60` — one hex digit different, and *not* a defect —
+scored **0.994**, while the same defect written as a `match` scored 0.563. It
+ranks by form. That is why the output is a review queue and why `golden_rules.py`
+is the primary defence: a violation written in a genuinely novel shape will be
+missed.
+
+### What stays red, deliberately
+
+Core 5 (SCSP) still never parks, and `sync.rs` still calls `Instant::now()` around
+its Condvar wait. Neither is marked `// golden-rule-ok:` — a known gap that has
+been silenced is just an unknown gap. Coverage sits at 65.03% against a 90% bar
+with no exclusions, for the same reason.
+
+One correction to this file's own record, from earlier the same day: it reported
+the `sync.rs` wall-clock violation as fixed, on the strength of a commit summary
+rather than a grep. It was never fixed. The rule now states the truth on every run.

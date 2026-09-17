@@ -8,6 +8,21 @@ This document details the architectural design for the **Mimas** Sega Saturn emu
 
 ## 1. Architectural Core Decisions
 
+> **How these are enforced.** Until 2026-09-17 nothing checked any of them, and
+> eight were broken in a single day without `cargo build`, `cargo test`, `cargo
+> clippy` or the coverage gate noticing. Each decision below now names the tool
+> that guards it; `docs/quality-gate.md` has the detail.
+>
+> | § | enforced by |
+> |---|---|
+> | 1.1 | `tools/golden_rules.py` — `no-pool-or-async` |
+> | 1.2 | `golden_rules.py` — `no-atomic-poll-loop` · semantic pass — `component-thread-polls`, `mutex-polled-not-waited` |
+> | 1.2b | `golden_rules.py` — `thin-instruction-path`, `atomic-has-producer` |
+> | 1.3 | semantic pass — `single-global-lock` (no deterministic form) |
+> | 1.4 | `golden_rules.py` — `throttle-cpu-only` · semantic pass — `wallclock-drives-component-thread` |
+> | 1.5 | `golden_rules.py` — `no-wall-clock`, `no-yield-now`, `threads-park` · semantic pass — `timing-generator-on-wallclock` |
+
+
 ### 1.1. Native OS Threads (`std::thread`) per Hardware Subsystem
 * **Decision**: Every major hardware component on the Sega Saturn motherboard runs in its own dedicated, native OS thread (`std::thread`). 
 * **Details**: We reject arbitrary thread pools tied to host core count, `tokio`/async runtimes, or OS-level process isolation (`fork`). Each distinct piece of silicon on the physical Sega Saturn board runs concurrently in Mimas.

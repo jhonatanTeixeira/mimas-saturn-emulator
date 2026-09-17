@@ -116,3 +116,58 @@ This project's most important non-obvious practice: whenever implementing a new 
 - **`docs/current_review.md`**: whenever a review of recent/pending changes is requested (code review, self-review, etc.), write the full findings here — overwrite the previous contents each time, this is a snapshot of the *latest* review, not an accumulating log. Still summarize the findings in chat as usual; this file is so the next session (or agent) can pick up outstanding findings without re-running the review from scratch.
 
 Skipping these updates is how the next session ends up re-deriving knowledge that was already earned once.
+
+## The quality gate — run it before calling work done
+
+```bash
+bash tools/quality_gate.sh                              # 9 steps, ~6 min
+.venv/bin/python tools/antipattern_scan.py scan         # semantic pass, ~1 min
+```
+
+**Both are required.** Full detail, and the reasoning behind every threshold, in
+`docs/quality-gate.md`.
+
+The gate is deterministic and stdlib-only, so it always runs. The semantic pass
+needs local models and is separate for that reason -- it catches the
+architectural violations that have no fixed spelling ("this thread polls instead
+of parking" can be a `while` on an atomic, a `loop` with a `yield_now`, a
+sleep-driven deadline, or a mutex retaken every iteration), which is exactly what
+a grep cannot reach. Its output is a review queue, not a verdict: read the code
+before acting on it.
+
+This is not a formality. On 2026-09-17 two agents, in one day, broke the BIOS
+boot completely, left `is_shutdown()` returning `false` forever, reintroduced a
+`sched_yield` syscall per emulated instruction that had been measured and removed
+that same morning, and shipped four `assert!(true)` tests whose names claim the
+VDP1 framebuffer swap is verified. `cargo build`, `cargo test` (396 green),
+`cargo clippy` and the coverage step were happy through all of it.
+
+### A red step is a result, not an obstacle
+
+| step | the one honest fix |
+|---|---|
+| Formatting | `cargo fmt --all` |
+| Mess detect (clippy) | fix it, or `#[allow(...)]` **with a comment saying why clippy is wrong here**. **Never `cargo clippy --fix`** -- it was run once and turned an m68k opcode guard into a no-op while muting the warnings that flagged half-written VDP1 code |
+| Golden rules | fix the violation, or `// golden-rule-ok: <reason>` **on the offending line** |
+| Tests that assert nothing | write a real assertion, or `// no-assert: <reason>` if proving the absence of a panic genuinely is the point |
+| Coverage | write tests. Not `--exclude-files`, not a lower bar |
+| Smoke test | if boot got *further*, verify and update the expected PC. If it got *shorter*, that is a regression, not a stale constant |
+| Semantic pass | read each hit. Fix it, or record why it is not the pattern |
+
+### Thresholds
+
+Tightening is free. **Loosening fails the gate unless `MIMAS_OVERRIDE_REASON`
+says why:**
+
+```bash
+MIMAS_MIN_SPEED_PCT=15 MIMAS_OVERRIDE_REASON="measuring on R36S hardware" \
+    bash tools/quality_gate.sh
+```
+
+A green result under loosened thresholds is not the same result and must not be
+reported as one.
+
+### Reporting
+
+Say what actually happened. "8 of 12 passed, coverage and golden rules red" is
+useful. "The gate passed" when a threshold was lowered or a step skipped is not.

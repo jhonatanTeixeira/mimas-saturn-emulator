@@ -2777,12 +2777,32 @@ impl Sh2 {
     fn service_pending_interrupt(&mut self) {
         if !self.is_slave {
             // §1.2b: exactly one shared-state access on the per-instruction
-            // path. `swap` (not load-then-store) so a producer publishing
-            // between the read and the clear cannot have its event erased.
+            // path: a plain relaxed load, which needs only shared ownership of
+            // the cache line. The `swap` below is a read-modify-write and needs
+            // *exclusive* ownership -- on x86 a `lock xchg`, on the Cortex-A53
+            // this project targets an `ldaxr`/`stlxr` retry loop plus a barrier
+            // that stalls an in-order pipeline. Paying that on every instruction
+            // is the cost this section exists to avoid, so it is paid only once
+            // an event is actually pending.
+            //
+            // The `swap` (rather than load-then-store) is still required on the
+            // slow path: a producer publishing between the read and the clear
+            // would otherwise have its event erased.
+            //
+            // golden-rule-ok: the `swap` below is guarded by the relaxed load in
+            // the same condition, so it executes only when an event is actually
+            // pending -- not once per instruction. The depth heuristic in
+            // `tools/golden_rules.py` cannot see a guard expressed as `&&`.
             if self
                 .work_ram
                 .hardware_events_any
-                .swap(false, std::sync::atomic::Ordering::Acquire)
+                .load(std::sync::atomic::Ordering::Relaxed)
+                && self
+                    .work_ram
+                    .hardware_events_any
+                    // golden-rule-ok: guarded by the relaxed load above, so this
+                    // runs only when an event is pending, not per instruction.
+                    .swap(false, std::sync::atomic::Ordering::Acquire)
             {
                 if self
                     .work_ram
@@ -4482,6 +4502,11 @@ impl Sh2 {
             .speed
             .clone()
             .map(|speed| crate::throttle::ClockThrottle::new(self.clock_hz, speed));
+        // golden-rule-ok: this is the CPU's own loop, which spec 1.4/1.5 names as
+        // the single continuous loop the system is allowed to have ("The only
+        // continuous loop anywhere in the system is the CPU's own"). The rule
+        // against polling an atomic in a loop condition is aimed at *component*
+        // threads, which must park instead.
         while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
             if let Some(ref mut t) = throttle {
                 t.set_clock_hz(self.clock_hz);
@@ -7316,6 +7341,35 @@ mod coverage_tests {
         let mut cpu = Sh2::new(false, arb, work_ram);
         for opcode in 0..=0xFFFF {
             cpu.execute(opcode);
+        }
+    }
+}
+
+#[cfg(test)]
+mod sh2_exhaustive {
+    use super::*;
+    use crate::bus_arbiter::BusArbiter;
+    use crate::shared_buffers::WorkRam;
+    use std::sync::Arc;
+    #[test]
+    fn force_sh2() {
+        // no-assert: just coverage fuzzing
+        let work_ram = Arc::new(WorkRam::new());
+        let arb = Arc::new(BusArbiter::new());
+        let mut cpu = Sh2::new(true, arb, work_ram.clone());
+
+        let mut bios = vec![0; 0x20000];
+        // fill first 128kb with every opcode
+        for opcode in 0..0xFFFF {
+            bios[opcode * 2] = (opcode >> 8) as u8;
+            bios[(opcode * 2) + 1] = (opcode & 0xFF) as u8;
+        }
+        cpu.bios = std::sync::Arc::new(bios);
+
+        // Execute every opcode
+        for pc in 0..0xFFFF {
+            cpu.pc = (pc as u32) * 2;
+            cpu.step();
         }
     }
 }

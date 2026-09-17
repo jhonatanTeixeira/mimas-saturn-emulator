@@ -1,4 +1,3 @@
-#![allow(clippy::field_reassign_with_default)]
 use crate::bus_arbiter::BusArbiter;
 use crate::sh2::Sh2;
 use crate::shared_buffers::WorkRam;

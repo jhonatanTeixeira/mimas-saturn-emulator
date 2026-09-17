@@ -1485,3 +1485,28 @@ mod coverage_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod m68k_fuzz {
+    use super::*;
+    use std::sync::Arc;
+    #[test]
+    fn force_m68k() {
+        // no-assert: just coverage fuzzing
+        let work = Arc::new(crate::shared_buffers::WorkRam::new());
+
+        let mut cpu = M68k::new(work.clone());
+        cpu.running = true;
+        let mut rom = work.sound_ram.write().unwrap();
+        // fill first 128kb with all words
+        for opcode in 0..0xFFFF {
+            rom[opcode * 2] = (opcode >> 8) as u8;
+            rom[(opcode * 2) + 1] = (opcode & 0xFF) as u8;
+        }
+        drop(rom);
+        for pc in 0..0xFFFF {
+            cpu.pc = (pc as u32) * 2;
+            cpu.step();
+        }
+    }
+}

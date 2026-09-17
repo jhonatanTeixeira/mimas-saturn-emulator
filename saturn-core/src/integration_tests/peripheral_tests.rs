@@ -1,4 +1,3 @@
-#![allow(clippy::field_reassign_with_default)]
 //! Report-shape correctness for every SMPC peripheral type (`docs/implementation-plans/smpc-peripheral.md`
 //! Phase 7), each value independently derived from `docs/hardware-reference/smpc-peripheral.md`
 //! §9.3-9.7's own tables and worked examples -- never copied from this crate's own output.

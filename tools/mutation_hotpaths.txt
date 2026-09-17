@@ -1,0 +1,6 @@
+vdp2_regs\.rs
+vdp2\.rs.*(map_calc_xy|pattern_addr|fetch_pixel)
+peripheral\.rs
+smpc\.rs.*(execute_expired_command|on_register_write|apply)
+scu\.rs.*(step_dma_pass|dma|timer)
+m68k\.rs.*execute_group

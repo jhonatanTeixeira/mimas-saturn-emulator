@@ -4,3 +4,17 @@
 /milestone-tests/target
 **/*.rs.bk
 *.pdb
+
+# Model weights for tools/antipattern_scan.py. Kept beside the repo because
+# $HOME is on a 93%-full disk; see MODEL_CACHE in that script.
+.models/
+
+# Project-local venv for tools/antipattern_scan.py (torch CPU + transformers +
+# torchao, ~1.2 GB). Kept here rather than under $HOME for the same reason as
+# .models/ above.
+.venv/
+.mutants-tmp/
+
+# cargo-mutants output and its copied build trees
+mutants.out*/
+.mutants-tmp/

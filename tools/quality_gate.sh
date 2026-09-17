@@ -44,28 +44,81 @@ echo "============================================="
 #                        PC. If it got shorter, that is a regression, not a
 #                        stale constant.
 # -----------------------------------------------------------------------------
+# Tightening a threshold is free. *Loosening* one requires a written reason,
+# because a loosened threshold is how a red gate becomes green without anything
+# being fixed -- observed here as `MIMAS_COVERAGE_MIN=80 ./tools/quality_gate.sh`.
+#
+# Printing a warning was not enough: it only makes the weakening *visible*, and
+# whoever reports "the gate passed" can leave that line out. So a loosening with
+# no `MIMAS_OVERRIDE_REASON` now FAILS the gate.
+#
+# The legitimate case still works. On the R36S the speed floor genuinely has to
+# drop to ~15%; it just has to say so:
+#
+#   MIMAS_MIN_SPEED_PCT=15 MIMAS_OVERRIDE_REASON="measuring on R36S hardware" \
+#       ./tools/quality_gate.sh
+#
+# Same discipline as `// no-assert:` and `// golden-rule-ok:`: the exception is
+# allowed, the exception is justified where it is taken.
 OVERRIDDEN=()
-show_cfg() { # name value default
-    if [ "$2" != "$3" ]; then
-        OVERRIDDEN+=("$1: $2 (default $3)")
-        printf "  %-22s %-12s  ⚠️  OVERRIDDEN (default %s)\n" "$1" "$2" "$3"
+LOOSENED=()
+OVERRIDE_REASON="${MIMAS_OVERRIDE_REASON:-}"
+
+# show_cfg <name> <value> <default> <direction>
+#   direction: min  -> lower is looser (floors: coverage, speed, WRAM)
+#              max  -> higher is looser (ceilings: LOC, binary size)
+#              exact-> any change is looser (the expected boot PC: swapping it
+#                      for whatever a broken build produces is exactly how a
+#                      functional regression turns green)
+show_cfg() {
+    local name="$1" val="$2" def="$3" dir="$4" loose=0
+    if [ "$val" != "$def" ]; then
+        case "$dir" in
+            min)   awk -v v="$val" -v d="$def" 'BEGIN{exit !(v < d)}' && loose=1 ;;
+            max)   awk -v v="$val" -v d="$def" 'BEGIN{exit !(v > d)}' && loose=1 ;;
+            exact) loose=1 ;;
+        esac
+        OVERRIDDEN+=("$name: $val (default $def)")
+        if [ "$loose" -eq 1 ]; then
+            LOOSENED+=("$name: $val (default $def)")
+            printf "  %-22s %-12s  ⚠️  LOOSENED (default %s)\n" "$name" "$val" "$def"
+        else
+            printf "  %-22s %-12s  ↑  tightened (default %s)\n" "$name" "$val" "$def"
+        fi
     else
-        printf "  %-22s %-12s\n" "$1" "$2"
+        printf "  %-22s %-12s\n" "$name" "$val"
     fi
 }
 echo ""
 echo "Effective configuration:"
-show_cfg "coverage min %"   "${MIMAS_COVERAGE_MIN:-90}"      "90"
-show_cfg "speed floor %"    "${MIMAS_MIN_SPEED_PCT:-150}"    "150"
-show_cfg "speed warn %"     "${MIMAS_WARN_SPEED_PCT:-170}"   "170"
-show_cfg "expected boot PC" "${MIMAS_GATE_PC:-0x06001694}"   "0x06001694"
-show_cfg "min WRAM accesses" "${MIMAS_GATE_MIN_WRAM:-2000000}" "2000000"
-show_cfg "max source lines" "${MIMAS_LOC_MAX:-34000}"        "34000"
-show_cfg "max binary MB"    "${MIMAS_BIN_MAX_MB:-16}"        "16"
+show_cfg "coverage min %"   "${MIMAS_COVERAGE_MIN:-90}"      "90"          min
+show_cfg "speed floor %"    "${MIMAS_MIN_SPEED_PCT:-150}"    "150"         min
+show_cfg "speed warn %"     "${MIMAS_WARN_SPEED_PCT:-170}"   "170"         min
+show_cfg "expected boot PC" "${MIMAS_GATE_PC:-0x06001694}"   "0x06001694"  exact
+show_cfg "min WRAM accesses" "${MIMAS_GATE_MIN_WRAM:-2000000}" "2000000"   min
+show_cfg "max source lines" "${MIMAS_LOC_MAX:-34000}"        "34000"       max
+show_cfg "max binary MB"    "${MIMAS_BIN_MAX_MB:-16}"        "16"          max
+
+if [ ${#LOOSENED[@]} -ne 0 ] && [ -z "$OVERRIDE_REASON" ]; then
+    echo ""
+    echo "❌ ${#LOOSENED[@]} threshold(s) loosened with no reason given:"
+    for l in "${LOOSENED[@]}"; do echo "     $l"; done
+    echo ""
+    echo "   Loosening a threshold does not make the underlying problem go away,"
+    echo "   so it has to be stated. Re-run with, for example:"
+    echo "     MIMAS_OVERRIDE_REASON=\"why this is legitimate\" ./tools/quality_gate.sh"
+    echo ""
+    echo "   If the goal was to make a red step green: fix the step instead."
+    exit 1
+fi
+if [ -n "$OVERRIDE_REASON" ] && [ ${#LOOSENED[@]} -ne 0 ]; then
+    echo ""
+    echo "  Override reason: $OVERRIDE_REASON"
+fi
 
 # -----------------------------------------------------------------------------
 echo ""
-echo "1/8 🔨 Formatting"
+echo "1/9 🔨 Formatting"
 if cargo fmt --all -- --check; then
     pass "Formatting"
 else
@@ -74,7 +127,7 @@ fi
 
 # -----------------------------------------------------------------------------
 echo ""
-echo "2/8 🧹 Mess detect + complexity (clippy, READ-ONLY)"
+echo "2/9 🧹 Mess detect + complexity (clippy, READ-ONLY)"
 #
 # NEVER run `cargo clippy --fix` against this codebase from here or anywhere else.
 # It was run once and auto-committed (37c85d4). Most of it was harmless, but
@@ -102,7 +155,7 @@ fi
 
 # -----------------------------------------------------------------------------
 echo ""
-echo "3/8 🏗️  Compilation"
+echo "3/9 🏗️  Compilation"
 if cargo build --release --workspace; then
     pass "Compilation"
 else
@@ -111,7 +164,7 @@ fi
 
 # -----------------------------------------------------------------------------
 echo ""
-echo "4/8 🧪 Tests"
+echo "4/9 🧪 Tests"
 if cargo test --workspace; then
     pass "Tests"
 else
@@ -120,7 +173,28 @@ fi
 
 # -----------------------------------------------------------------------------
 echo ""
-echo "5/8 🕳️  Tests that assert nothing"
+echo "5/9 🏛️  Golden rules (architecture spec)"
+#
+# Checks the invariants `docs/mimas-architecture-spec.md` states and that no
+# compiler enforces. Every rule in `tools/golden_rules.py` was broken for real on
+# 2026-09-17, across two agents, in one day -- while `cargo build`, `cargo test`
+# (396 green), `cargo clippy` and the coverage step all stayed happy. One of the
+# breakages stopped the BIOS booting.
+#
+# `--self-test` first: it replays the rules against the commits where those bugs
+# existed and fails if a rule stopped catching the thing it was written for. A
+# check nobody has watched fail is not a check.
+if ! python3 tools/golden_rules.py --self-test; then
+    fail "Golden rules — SELF-TEST failed, the checks themselves are broken"
+elif python3 tools/golden_rules.py; then
+    pass "Golden rules"
+else
+    fail "Golden rules — see the spec section cited on each finding"
+fi
+
+# -----------------------------------------------------------------------------
+echo ""
+echo "6/9 🕳️  Tests that assert nothing"
 #
 # Deliberately separate from coverage, because coverage is blind to this: a test
 # that runs code and asserts nothing reports 100% coverage of that code. It is
@@ -139,7 +213,7 @@ fi
 
 # -----------------------------------------------------------------------------
 echo ""
-echo "6/8 📊 Coverage (target 90%)"
+echo "7/9 📊 Coverage (target 90%)"
 #
 # 90%, enforced, with NO --exclude-files. Adding exclusions until the number
 # reaches the target measures nothing except how many exclusions were added.
@@ -165,7 +239,7 @@ fi
 
 # -----------------------------------------------------------------------------
 echo ""
-echo "7/8 📏 Code size"
+echo "8/9 📏 Code size"
 #
 # The previous version of this step ran `find . -name "*.rs" | xargs wc -l`,
 # which walks target/ and reported 243,067 lines against a real source tree of
@@ -198,7 +272,7 @@ fi
 
 # -----------------------------------------------------------------------------
 echo ""
-echo "8/8 💨 Smoke test (real BIOS boot)"
+echo "9/9 💨 Smoke test (real BIOS boot)"
 #
 # The previous version ran the binary and checked only its exit code -- so when
 # 9354fd3 broke the emulator badly enough that Core 0 died at 0x2B0 after 4
@@ -289,11 +363,17 @@ echo "============================================="
 for p in "${PASSED[@]}"; do echo "  ✅ $p"; done
 for w in "${WARNED[@]}"; do echo "  ⚠️  $w"; done
 for f in "${FAILED[@]}"; do echo "  ❌ $f"; done
-if [ ${#OVERRIDDEN[@]} -ne 0 ]; then
+if [ ${#LOOSENED[@]} -ne 0 ]; then
     echo "---------------------------------------------"
-    echo "⚠️  ${#OVERRIDDEN[@]} threshold(s) overridden from the committed defaults:"
+    echo "⚠️  ${#LOOSENED[@]} threshold(s) LOOSENED from the committed defaults:"
+    for l in "${LOOSENED[@]}"; do echo "     $l"; done
+    echo "     reason: $OVERRIDE_REASON"
+    echo "   A green result under loosened thresholds is not the same result,"
+    echo "   and should not be reported as one."
+elif [ ${#OVERRIDDEN[@]} -ne 0 ]; then
+    echo "---------------------------------------------"
+    echo "↑  ${#OVERRIDDEN[@]} threshold(s) tightened from the committed defaults:"
     for o in "${OVERRIDDEN[@]}"; do echo "     $o"; done
-    echo "   A green result under lowered thresholds is not the same result."
 fi
 echo "---------------------------------------------"
 if [ ${#FAILED[@]} -eq 0 ]; then
