@@ -1,1 +1,0 @@
-sed -i '1i #![allow(clippy::too_many_arguments, clippy::eq_op, clippy::erasing_op, clippy::manual_clamp, clippy::needless_range_loop, clippy::type_complexity, clippy::overly_complex_bool_expr)]' saturn-core/src/lib.rs

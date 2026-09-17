@@ -1,5 +1,0 @@
-    Checking saturn-core v0.1.0 (/media/jhonatanteixeira/Novo volume/projects/jhon/dreams/retroarch-cores/mimas/saturn-core)
-    Checking e2e-tests v0.1.0 (/media/jhonatanteixeira/Novo volume/projects/jhon/dreams/retroarch-cores/mimas/e2e-tests)
-    Checking saturn-frontend-libretro v0.1.0 (/media/jhonatanteixeira/Novo volume/projects/jhon/dreams/retroarch-cores/mimas/saturn-frontend-libretro)
-    Checking saturn-frontend-native v0.1.0 (/media/jhonatanteixeira/Novo volume/projects/jhon/dreams/retroarch-cores/mimas/saturn-frontend-native)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.65s
