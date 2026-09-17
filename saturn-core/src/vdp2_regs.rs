@@ -1,4 +1,3 @@
-use crate::shared_buffers::WorkRam;
 
 pub struct Vdp2Registers {
     pub regs: [u16; 256], // 0x200 bytes = 256 words
@@ -9,11 +8,9 @@ impl Vdp2Registers {
         Self { regs: [0; 256] }
     }
 
-    pub fn snapshot(ram: &WorkRam) -> Self {
+    pub fn from_bytes(regs_bytes: &[u8; 0x200]) -> Self {
         let mut snapshot = Self::new();
-        let regs_bytes = ram.vdp2_regs.read().unwrap();
         for i in 0..0x100 {
-            // Copy all up to 0x200 bytes
             let offset = i * 2;
             snapshot.regs[i] = u16::from_be_bytes([regs_bytes[offset], regs_bytes[offset + 1]]);
         }
@@ -78,8 +75,92 @@ impl Vdp2Registers {
     pub fn craofb(&self) -> u16 {
         self.regs[0x0CA / 2]
     }
+    pub fn craofa(&self) -> u16 {
+        self.regs[0x0E4 / 2]
+    }
     pub fn spctl(&self) -> u16 {
         self.regs[0x0F0 / 2]
+    }
+    pub fn prinb(&self) -> u16 {
+        self.regs[0x0FA / 2]
+    }
+    pub fn chctlb(&self) -> u16 {
+        self.regs[0x02A / 2]
+    }
+    pub fn pncn3(&self) -> u16 {
+        self.regs[0x036 / 2]
+    }
+    pub fn plsz(&self) -> u16 {
+        self.regs[0x03A / 2]
+    }
+    pub fn mpofn(&self) -> u16 {
+        self.regs[0x03C / 2]
+    }
+    pub fn chctla(&self) -> u16 {
+        self.regs[0x028 / 2]
+    }
+    pub fn pncn0(&self) -> u16 {
+        self.regs[0x030 / 2]
+    }
+    pub fn pncn1(&self) -> u16 {
+        self.regs[0x032 / 2]
+    }
+    pub fn pncn2(&self) -> u16 {
+        self.regs[0x034 / 2]
+    }
+    pub fn mpabn0(&self) -> u16 {
+        self.regs[0x040 / 2]
+    }
+    pub fn mpcdn0(&self) -> u16 {
+        self.regs[0x042 / 2]
+    }
+    pub fn mpabn1(&self) -> u16 {
+        self.regs[0x044 / 2]
+    }
+    pub fn mpcdn1(&self) -> u16 {
+        self.regs[0x046 / 2]
+    }
+    pub fn mpabn2(&self) -> u16 {
+        self.regs[0x048 / 2]
+    }
+    pub fn mpcdn2(&self) -> u16 {
+        self.regs[0x04A / 2]
+    }
+    pub fn mpabn3(&self) -> u16 {
+        self.regs[0x04C / 2]
+    }
+    pub fn mpcdn3(&self) -> u16 {
+        self.regs[0x04E / 2]
+    }
+    pub fn scxn0(&self) -> u16 {
+        self.regs[0x070 / 2]
+    }
+    pub fn scyn0(&self) -> u16 {
+        self.regs[0x072 / 2]
+    }
+    pub fn scxn1(&self) -> u16 {
+        self.regs[0x080 / 2]
+    }
+    pub fn scyn1(&self) -> u16 {
+        self.regs[0x082 / 2]
+    }
+    pub fn scxn2(&self) -> u16 {
+        self.regs[0x090 / 2]
+    }
+    pub fn scyn2(&self) -> u16 {
+        self.regs[0x092 / 2]
+    }
+    pub fn scxn3(&self) -> u16 {
+        self.regs[0x094 / 2]
+    }
+    pub fn scyn3(&self) -> u16 {
+        self.regs[0x096 / 2]
+    }
+    pub fn prina(&self) -> u16 {
+        self.regs[0x0F8 / 2]
+    }
+    pub fn bmpna(&self) -> u16 {
+        self.regs[0x02C / 2]
     }
 
     // Decoded fields
@@ -122,6 +203,195 @@ impl Vdp2Registers {
     pub fn vram_8mbit(&self) -> bool {
         (self.vrsize() & 0x8000) != 0
     }
+
+    // Phase 2 Decoded Fields (NBG3)
+    pub fn n3on(&self) -> bool {
+        (self.bgon() & 0x0008) != 0
+    }
+    pub fn n3_transparency_enable(&self) -> bool {
+        (self.bgon() & 0x0800) == 0
+    }
+    pub fn n3chsz(&self) -> u16 {
+        (self.chctlb() >> 4) & 1
+    }
+    pub fn n3chcn(&self) -> u16 {
+        (self.chctlb() >> 5) & 1
+    }
+    pub fn pncn3_supplementary_char(&self) -> u16 {
+        self.pncn3() & 0x001F
+    }
+    pub fn pncn3_supplementary_palette(&self) -> u16 {
+        (self.pncn3() >> 5) & 0x7
+    }
+    pub fn pncn3_auxmode(&self) -> u16 {
+        (self.pncn3() >> 14) & 1
+    }
+    pub fn pncn3_patterndatasize(&self) -> u16 {
+        (self.pncn3() & 0x8000) >> 15
+    }
+
+    pub fn plsz_nbg3(&self) -> u16 {
+        (self.plsz() >> 6) & 0x3
+    }
+    pub fn mpofn_nbg3(&self) -> u16 {
+        (self.mpofn() & 0x7000) >> 6
+    }
+    pub fn craofa_nbg3(&self) -> u16 {
+        (self.craofa() & 0x7000) >> 4
+    }
+    pub fn prinb_nbg3(&self) -> u16 {
+        (self.prinb() >> 8) & 0x7
+    }
+
+    // NBG2 decoded fields
+    pub fn n2on(&self) -> bool {
+        (self.bgon() & 0x0004) != 0
+    }
+    pub fn n2_transparency_enable(&self) -> bool {
+        (self.bgon() & 0x0400) == 0
+    }
+    pub fn chctlb_nbg2_pattern_size(&self) -> u16 {
+        self.chctlb() & 1
+    }
+    pub fn n2chcn(&self) -> u16 {
+        (self.chctlb() >> 1) & 1
+    }
+    pub fn pncn2_supplementary_char(&self) -> u16 {
+        self.pncn2() & 0x001F
+    }
+    pub fn pncn2_supplementary_palette(&self) -> u16 {
+        (self.pncn2() >> 5) & 0x7
+    }
+    pub fn pncn2_auxmode(&self) -> u16 {
+        (self.pncn2() >> 14) & 1
+    }
+    pub fn pncn2_patterndatasize(&self) -> u16 {
+        (self.pncn2() & 0x8000) >> 15
+    }
+    pub fn plsz_nbg2(&self) -> u16 {
+        (self.plsz() >> 4) & 0x3
+    }
+    pub fn mpofn_nbg2(&self) -> u16 {
+        (self.mpofn() & 0x0700) >> 2
+    }
+    pub fn craofa_nbg2(&self) -> u16 {
+        self.craofa() & 0x0700
+    }
+    pub fn prinb_nbg2(&self) -> u16 {
+        self.prinb() & 0x7
+    }
+
+    // NBG1 decoded fields
+    pub fn n1on(&self) -> bool {
+        (self.bgon() & 0x0002) != 0
+    }
+    pub fn n1_transparency_enable(&self) -> bool {
+        (self.bgon() & 0x0200) == 0
+    }
+    pub fn chctla_nbg1_pattern_size(&self) -> u16 {
+        (self.chctla() >> 8) & 1
+    }
+    pub fn n1bmen(&self) -> bool {
+        (self.chctla() & 0x0200) != 0
+    }
+    pub fn n1bmsz(&self) -> u16 {
+        (self.chctla() >> 10) & 0x3
+    }
+    pub fn n1chcn(&self) -> u16 {
+        (self.chctla() >> 12) & 0x3
+    }
+    pub fn pncn1_supplementary_char(&self) -> u16 {
+        self.pncn1() & 0x001F
+    }
+    pub fn pncn1_supplementary_palette(&self) -> u16 {
+        (self.pncn1() >> 5) & 0x7
+    }
+    pub fn pncn1_auxmode(&self) -> u16 {
+        (self.pncn1() >> 14) & 1
+    }
+    pub fn pncn1_patterndatasize(&self) -> u16 {
+        (self.pncn1() & 0x8000) >> 15
+    }
+    pub fn plsz_nbg1(&self) -> u16 {
+        (self.plsz() >> 2) & 0x3
+    }
+    pub fn mpofn_nbg1(&self) -> u16 {
+        (self.mpofn() & 0x0070) << 2
+    }
+    pub fn craofa_nbg1(&self) -> u16 {
+        (self.craofa() & 0x0070) << 4
+    }
+    pub fn prina_nbg1(&self) -> u16 {
+        (self.prina() >> 8) & 0x7
+    }
+
+    // NBG0 decoded fields
+    pub fn n0on(&self) -> bool {
+        (self.bgon() & 0x0001) != 0
+    }
+    pub fn n0_transparency_enable(&self) -> bool {
+        (self.bgon() & 0x0100) == 0
+    }
+    pub fn chctla_nbg0_pattern_size(&self) -> u16 {
+        self.chctla() & 1
+    }
+    pub fn n0bmen(&self) -> bool {
+        (self.chctla() & 0x0002) != 0
+    }
+    pub fn n0bmsz(&self) -> u16 {
+        (self.chctla() >> 2) & 0x3
+    }
+    pub fn n0chcn(&self) -> u16 {
+        (self.chctla() >> 4) & 0x7
+    }
+    pub fn pncn0_supplementary_char(&self) -> u16 {
+        self.pncn0() & 0x001F
+    }
+    pub fn pncn0_supplementary_palette(&self) -> u16 {
+        (self.pncn0() >> 5) & 0x7
+    }
+    pub fn pncn0_auxmode(&self) -> u16 {
+        (self.pncn0() >> 14) & 1
+    }
+    pub fn pncn0_patterndatasize(&self) -> u16 {
+        (self.pncn0() & 0x8000) >> 15
+    }
+    pub fn plsz_nbg0(&self) -> u16 {
+        self.plsz() & 0x3
+    }
+    pub fn mpofn_nbg0(&self) -> u16 {
+        (self.mpofn() & 0x0007) << 6
+    }
+    pub fn craofa_nbg0(&self) -> u16 {
+        (self.craofa() & 0x0007) << 8
+    }
+    pub fn prina_nbg0(&self) -> u16 {
+        self.prina() & 0x7
+    }
+
+    pub fn bktau(&self) -> u16 {
+        self.regs[0xAC / 2]
+    }
+
+    pub fn bktal(&self) -> u16 {
+        self.regs[0xAE / 2]
+    }
+
+    /// Back screen setup: Address comes from `bktal` and `bktau`.
+    /// The bit width changes depending on VRSIZE (bit 15).
+    pub fn back_screen_addr(&self) -> u32 {
+        let addr = ((self.bktau() as u32) << 16) | (self.bktal() as u32);
+        if self.vram_8mbit() {
+            addr & 0x7FFFF
+        } else {
+            addr & 0x3FFFF
+        }
+    }
+
+    /// Whether back screen is enabled for the current line
+    pub fn back_screen_enabled(&self) -> bool {
+        (self.bktau() & 0x8000) != 0
+    }
 }
 
 impl Default for Vdp2Registers {
@@ -142,13 +412,7 @@ pub fn cram_lookup(index: u16, mode: u16, cram: &[u8]) -> u32 {
             let addr = ((index as usize) << 1) & 0xFFF;
             let val = u16::from_be_bytes([cram[addr], cram[addr + 1]]);
             let msb = (val >> 15) as u32;
-            let r5 = (val & 0x1F) as u32;
-            let g5 = ((val >> 5) & 0x1F) as u32;
-            let b5 = ((val >> 10) & 0x1F) as u32;
-            let r8 = (r5 << 3) | (r5 >> 2);
-            let g8 = (g5 << 3) | (g5 >> 2);
-            let b8 = (b5 << 3) | (b5 >> 2);
-            (msb << 31) | (r8 << 16) | (g8 << 8) | b8
+            (msb << 31) | crate::vdp::rgb555_to_xrgb8888(val)
         }
         2 => {
             let addr = ((index as usize) << 2) & 0xFFF;

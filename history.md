@@ -2384,3 +2384,14 @@ and testing section, item by item, `[x]`/`[ ]`/annotated per what's actually tru
 rather than left to memory), `.development/phased_development_plan.md` (Milestone 4's intro line
 and Phase 7's own line -- Milestone 4 is now fully landed modulo Phase 7's two named
 deferrals).
+
+## Chapter 38 — VDP2 Phase 2: One NBG layer, the simplest format, pixel-exact
+
+This chapter implements the core rendering loop for a single tile-mapped NBG layer (NBG3). The implementation provides a baseline correct mapping of coordinates, pattern indexing, and CRAM decoding.
+
+Key insights and corrections discovered during execution:
+1. **Coordinate Mapping Cell Width**: `map_calc_xy` properly processes `cellwh = 2 + patternwh`. An earlier bug flipped the pattern size bit check, leading to `patternwh = 0`, treating cells as 4x4 instead of 8x8, completely derailing `offset` computation.
+2. **Back Screen RGB Conversion Drops MSB**: The `rgb555_to_xrgb8888` function intentionally ignores bit 15 (MSB) as it converts RGB555 to XRGB8888 (24-bit RGB without transparency mask). Some tests mistakenly asserted that the returned value preserved bit 31 as `0x80FF0000`, when in reality it drops the bit and produces `0x00FF0000`. Tests were updated to reflect the exact behavior of `rgb555_to_xrgb8888`.
+3. **Transparency Handling**: A test validating transparency was failing because it fetched the back screen color when transparency was hit (`dot == 0`). `n3_transparency_enable` dynamically checks `BGON` bit 11; if transparent, `fetch_pixel` correctly returns `None`, leaving the frame buffer containing the back screen color.
+4. **VRAM 8MBit Decoder Masking**: The VRAM bank partition `addr` decode was missing the correct fallback multiplier. Verified it follows `(((bktau & 0x3) << 16) | bktal) * 2` properly and addresses VRAM cleanly.
+All tests passed successfully, setting a solid foundation for VDP2 Phase 3.

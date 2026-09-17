@@ -90,7 +90,7 @@ fn resolution_from_tvmd(tvmd: u16) -> (usize, usize) {
 /// this project's own tests have committed to since before this comment
 /// existed. Keep it; do not "fix" this back to Yabause's shift-only formula
 /// on a future pixel-for-pixel comparison against Yabause output.
-fn rgb555_to_xrgb8888(color: u16) -> u32 {
+pub(crate) fn rgb555_to_xrgb8888(color: u16) -> u32 {
     let r5 = (color & 0x1F) as u32;
     let g5 = ((color >> 5) & 0x1F) as u32;
     let b5 = ((color >> 10) & 0x1F) as u32;
@@ -242,7 +242,11 @@ impl Vdp1Geometry {
         } else {
             2
         };
-        Self { width, height, pixel_size }
+        Self {
+            width,
+            height,
+            pixel_size,
+        }
     }
 }
 
@@ -399,7 +403,8 @@ pub fn execute_vdp1(state: &mut Vdp1State, ram: &crate::shared_buffers::WorkRam)
                 return false;
             }
             state.edsr |= 2;
-            ram.vdp1_draw_end_pending.store(true, std::sync::atomic::Ordering::Release);
+            ram.vdp1_draw_end_pending
+                .store(true, std::sync::atomic::Ordering::Release);
             return true;
         }
 
@@ -707,15 +712,100 @@ pub fn execute_vdp1(state: &mut Vdp1State, ram: &crate::shared_buffers::WorkRam)
     false
 }
 
-pub fn render_back_screen(ram: &WorkRam) -> Framebuffer {
-    let mut regs = crate::vdp2_regs::Vdp2Registers::new();
-    {
-        let lines = ram.vdp2_lines.read().unwrap();
-        let line0 = &lines[0];
-        for i in 0..0x100 {
-            regs.regs[i] = u16::from_be_bytes([line0[i * 2], line0[i * 2 + 1]]);
+fn render_nbg3(
+    regs: &crate::vdp2_regs::Vdp2Registers,
+    frame: &mut Framebuffer,
+    width: usize,
+    height: usize,
+    vdp2_vram: &[u8],
+    vdp2_cram: &[u8],
+) {
+    let mut nbg3_state = crate::vdp2::Vdp2State::new();
+    let patternwh = if regs.n3chsz() == 0 { 1 } else { 2 };
+    let patterndatasize = if regs.pncn3_patterndatasize() != 0 {
+        1
+    } else {
+        2
+    };
+    let (planew, planeh) = match regs.plsz_nbg3() {
+        0 => (1, 1),
+        1 => (2, 1),
+        2 => (1, 1),
+        3 => (2, 2),
+        _ => (1, 1),
+    };
+    let mapwh = 2;
+    let colornumber = 0;
+    let screen_vars = crate::vdp2::setup_screen_vars(patternwh, planew, planeh, mapwh);
+
+    crate::vdp2::generate_plane_addr_table(
+        &mut nbg3_state.planetbl,
+        regs.mpofn_nbg3(),
+        regs.mpabn3(),
+        regs.mpcdn3(),
+        patterndatasize,
+        patternwh,
+        planew,
+        planeh,
+        regs.vram_8mbit(),
+    );
+
+    let scx = (regs.scxn3() & 0x7FF) as u32;
+    let scy = (regs.scyn3() & 0x7FF) as u32;
+    let supplementdata = regs.pncn3() & 0x3FF; // fixed supplementdata
+    let auxmode = regs.pncn3_auxmode();
+    let vram_8mbit = regs.vram_8mbit();
+    let coloroffset = regs.craofa_nbg3() as u32;
+    let transparency_enable = regs.n3_transparency_enable();
+    let cram_mode = regs.color_mode();
+
+    for y in 0..height {
+        let actual_y = (y as u32 + scy) & screen_vars.ymask;
+        for x in 0..width {
+            let actual_x = (x as u32 + scx) & screen_vars.xmask;
+
+            crate::vdp2::map_calc_xy(
+                &mut nbg3_state,
+                actual_x,
+                actual_y,
+                &screen_vars,
+                patternwh,
+                patterndatasize,
+                mapwh,
+                supplementdata,
+                auxmode,
+                colornumber,
+                vram_8mbit,
+                vdp2_vram,
+            );
+
+            let cell = nbg3_state.pipe[0];
+            if let Some(color) = crate::vdp2::fetch_pixel(
+                cell.charaddr,
+                cell.paladdr,
+                actual_x,
+                actual_y,
+                cell.flipfunction,
+                patternwh,
+                colornumber,
+                transparency_enable,
+                coloroffset,
+                cram_mode,
+                8,
+                vdp2_vram,
+                vdp2_cram,
+            ) {
+                frame.pixels[y * width + x] = color;
+            }
         }
     }
+}
+
+pub fn render_back_screen(ram: &WorkRam) -> Framebuffer {
+    let regs = {
+        let lines = ram.vdp2_lines.read().unwrap();
+        crate::vdp2_regs::Vdp2Registers::from_bytes(&lines[0])
+    };
     let tvmd = regs.tvmd();
     let (width, height) = resolution_from_tvmd(tvmd);
     let disp_enabled = regs.disp() == 1;
@@ -758,6 +848,14 @@ pub fn render_back_screen(ram: &WorkRam) -> Framebuffer {
         }
     }
 
+    let vdp2_vram = ram.vdp2_vram.read().unwrap();
+    let vdp2_cram = ram.vdp2_cram.read().unwrap();
+
+    // Phase 4 will replace this with real priority resolution.
+    if disp_enabled && regs.n3on() {
+        render_nbg3(&regs, &mut frame, width, height, &vdp2_vram[..], &vdp2_cram[..]);
+    }
+
     // Overlay VDP1 Framebuffer if active
     let vdp1_regs = ram.vdp1_regs.read().unwrap();
     let tvmr = u16::from_be_bytes([vdp1_regs[0], vdp1_regs[1]]);
@@ -769,7 +867,6 @@ pub fn render_back_screen(ram: &WorkRam) -> Framebuffer {
     let craofb = regs.craofb();
     let is_rgb_mode = (spctl & 0x20) != 0;
     let color_bank_offset = ((craofb & 0x70) as usize) << 4;
-    let vdp2_cram = ram.vdp2_cram.read().unwrap();
 
     let back = ram
         .vdp1_framebuffers
@@ -789,7 +886,11 @@ pub fn render_back_screen(ram: &WorkRam) -> Framebuffer {
                         } else {
                             // Colour bank index
                             let index = (color16 & 0x7FFF) as usize + color_bank_offset;
-                            frame.pixels[pixel_idx] = crate::vdp2_regs::cram_lookup(index as u16, regs.color_mode(), &vdp2_cram[..]);
+                            frame.pixels[pixel_idx] = crate::vdp2_regs::cram_lookup(
+                                index as u16,
+                                regs.color_mode(),
+                                &vdp2_cram[..],
+                            );
                         }
                     }
                 }
@@ -924,7 +1025,7 @@ mod tests {
         let mut state = Vdp1State::new();
         state.edsr = 2;
         let ram = WorkRam::new();
-        
+
         state.swap_frame_buffer = true;
         vdp1_swap_frame_buffers(&mut state, &ram);
         // During swap, edsr is shifted!
@@ -937,7 +1038,7 @@ mod tests {
         state.tvmr = 0x0008; // Disp ON
         state.ptmr = 1; // trigger
         let ram = WorkRam::new();
-        
+
         {
             let mut vram = ram.vdp1_vram.write().unwrap();
             vram[0] = 0x80; // END code
@@ -945,8 +1046,12 @@ mod tests {
         }
         execute_vdp1(&mut state, &ram);
         // First command is End Code! It should NOT raise Draw End!
-        assert_eq!(ram.vdp1_draw_end_pending.load(std::sync::atomic::Ordering::Acquire), false);
-        
+        assert_eq!(
+            ram.vdp1_draw_end_pending
+                .load(std::sync::atomic::Ordering::Acquire),
+            false
+        );
+
         {
             let mut vram = ram.vdp1_vram.write().unwrap();
             vram[0] = 0x00; // Normal command
@@ -954,11 +1059,15 @@ mod tests {
             vram[0x20] = 0x80; // END code
             vram[0x21] = 0x00;
         }
-        
+
         state.status = Vdp1Status::IDLE;
         let res = execute_vdp1(&mut state, &ram);
         println!("execute_vdp1 returned {}, edsr: {}", res, state.edsr);
-        assert_eq!(ram.vdp1_draw_end_pending.load(std::sync::atomic::Ordering::Acquire), true);
+        assert_eq!(
+            ram.vdp1_draw_end_pending
+                .load(std::sync::atomic::Ordering::Acquire),
+            true
+        );
         assert_eq!(state.edsr & 2, 2);
     }
 
@@ -967,20 +1076,25 @@ mod tests {
         let mut state = Vdp1State::new();
         state.ptmr = 1;
         state.tvmr = 0x0008;
-        
+
         let arbiter = std::sync::Arc::new(crate::BusArbiter::new());
         let work_ram = std::sync::Arc::new(WorkRam::new());
         let mut sh2 = crate::sh2::Sh2::new(false, arbiter, work_ram.clone());
         sh2.vdp1 = Some(std::sync::Arc::new(std::sync::Mutex::new(state)));
 
         // Write ENDR to force IDLE
-        sh2.write_word(0x05D0000C, 0xFFFF); 
-        
+        sh2.write_word(0x05D0000C, 0xFFFF);
+
         let state_arc = sh2.vdp1.unwrap();
         let mut state_locked = state_arc.lock().unwrap();
         execute_vdp1(&mut state_locked, &work_ram);
-        
-        assert_eq!(work_ram.vdp1_draw_end_pending.load(std::sync::atomic::Ordering::Acquire), false);
+
+        assert_eq!(
+            work_ram
+                .vdp1_draw_end_pending
+                .load(std::sync::atomic::Ordering::Acquire),
+            false
+        );
     }
 
     #[test]
@@ -2230,14 +2344,16 @@ mod tests {
         state.ewdr = 0x8000;
 
         let ram = WorkRam::new();
-        ram.vdp1_framebuffers.back.store(0, std::sync::atomic::Ordering::Relaxed);
+        ram.vdp1_framebuffers
+            .back
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         vdp1_erase_framebuffer(&state, &ram, 0);
 
         let fb = ram.vdp1_framebuffers.banks[0].read().unwrap();
         let end_idx = (223 * 512 + 319) * 2;
         assert_eq!(fb[end_idx], 0x80);
         assert_eq!(fb[end_idx + 1], 0x00);
-        
+
         let out_idx = (224 * 512 + 320) * 2;
         assert_eq!(fb[out_idx], 0);
     }
@@ -2250,7 +2366,9 @@ mod tests {
         state.ewrr = 0xFFFF; // large enough to cover
 
         let ram = WorkRam::new();
-        ram.vdp1_framebuffers.back.store(1, std::sync::atomic::Ordering::Relaxed);
+        ram.vdp1_framebuffers
+            .back
+            .store(1, std::sync::atomic::Ordering::Relaxed);
         vdp1_erase_framebuffer(&state, &ram, 1);
 
         let fb0 = ram.vdp1_framebuffers.banks[0].read().unwrap();
@@ -2259,7 +2377,6 @@ mod tests {
         assert_eq!(fb0[0], 0);
         assert_eq!(fb1[0], 0xFF);
     }
-
 
     #[test]
     fn vdp1_erase_start_coordinate() {
@@ -2298,159 +2415,218 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn vdp1_colour_mode_0_index_zero_is_transparent() {
         let mut state = Vdp1State::new();
-        state.tvmr = 0x0008; state.ptmr = 1;
+        state.tvmr = 0x0008;
+        state.ptmr = 1;
         let ram = WorkRam::new();
         {
             let mut vram = ram.vdp1_vram.write().unwrap();
-            vram[4] = 0x00; vram[5] = 0x00; // CMDPMOD
-            vram[6] = 0x01; vram[7] = 0x20; // CMDCOLR
-            vram[8] = 0x00; vram[9] = 0x10; // CMDSRCA
-            vram[10] = 0x01; vram[11] = 0x01; // CMDSIZE
+            vram[4] = 0x00;
+            vram[5] = 0x00; // CMDPMOD
+            vram[6] = 0x01;
+            vram[7] = 0x20; // CMDCOLR
+            vram[8] = 0x00;
+            vram[9] = 0x10; // CMDSRCA
+            vram[10] = 0x01;
+            vram[11] = 0x01; // CMDSIZE
             vram[0x80] = 0x07;
-            vram[0x20] = 0x80; vram[0x21] = 0x00;
+            vram[0x20] = 0x80;
+            vram[0x21] = 0x00;
         }
         {
             let mut fb = ram.vdp1_framebuffers.banks[0].write().unwrap();
-            fb[0] = 0xEF; fb[1] = 0xBE;
-            fb[2] = 0xEF; fb[3] = 0xBE;
+            fb[0] = 0xEF;
+            fb[1] = 0xBE;
+            fb[2] = 0xEF;
+            fb[3] = 0xBE;
         }
         execute_vdp1(&mut state, &ram);
         let fb = ram.vdp1_framebuffers.banks[0].read().unwrap();
-        assert_eq!(fb[0], 0xEF); assert_eq!(fb[1], 0xBE);
-        assert_eq!(fb[2], 0x01); assert_eq!(fb[3], 0x27);
+        assert_eq!(fb[0], 0xEF);
+        assert_eq!(fb[1], 0xBE);
+        assert_eq!(fb[2], 0x01);
+        assert_eq!(fb[3], 0x27);
     }
 
     #[test]
     fn vdp1_colour_mode_1_lut() {
         let mut state = Vdp1State::new();
-        state.tvmr = 0x0008; state.ptmr = 1;
+        state.tvmr = 0x0008;
+        state.ptmr = 1;
         let ram = WorkRam::new();
         {
             let mut vram = ram.vdp1_vram.write().unwrap();
-            vram[4] = 0x00; vram[5] = 0x08; // CMDPMOD 0x0008
-            vram[6] = 0x01; vram[7] = 0x00; // CMDCOLR 0x0100 -> 0x800
-            vram[8] = 0x00; vram[9] = 0x10; // CMDSRCA 0x10 -> 0x80
-            vram[10] = 0x01; vram[11] = 0x01;
+            vram[4] = 0x00;
+            vram[5] = 0x08; // CMDPMOD 0x0008
+            vram[6] = 0x01;
+            vram[7] = 0x00; // CMDCOLR 0x0100 -> 0x800
+            vram[8] = 0x00;
+            vram[9] = 0x10; // CMDSRCA 0x10 -> 0x80
+            vram[10] = 0x01;
+            vram[11] = 0x01;
             vram[0x80] = 0x30;
-            vram[0x806] = 0x12; vram[0x807] = 0x34;
-            vram[0x20] = 0x80; vram[0x21] = 0x00;
+            vram[0x806] = 0x12;
+            vram[0x807] = 0x34;
+            vram[0x20] = 0x80;
+            vram[0x21] = 0x00;
         }
         execute_vdp1(&mut state, &ram);
         let fb = ram.vdp1_framebuffers.banks[0].read().unwrap();
-        assert_eq!(fb[0], 0x12); assert_eq!(fb[1], 0x34);
+        assert_eq!(fb[0], 0x12);
+        assert_eq!(fb[1], 0x34);
     }
 
     #[test]
     fn vdp1_colour_mode_2_64_colour() {
         let mut state = Vdp1State::new();
-        state.tvmr = 0x0008; state.ptmr = 1;
+        state.tvmr = 0x0008;
+        state.ptmr = 1;
         let ram = WorkRam::new();
         {
             let mut vram = ram.vdp1_vram.write().unwrap();
-            vram[4] = 0x00; vram[5] = 0x10;
-            vram[6] = 0x0A; vram[7] = 0x3F;
-            vram[8] = 0x00; vram[9] = 0x10;
-            vram[10] = 0x01; vram[11] = 0x01;
+            vram[4] = 0x00;
+            vram[5] = 0x10;
+            vram[6] = 0x0A;
+            vram[7] = 0x3F;
+            vram[8] = 0x00;
+            vram[9] = 0x10;
+            vram[10] = 0x01;
+            vram[11] = 0x01;
             vram[0x80] = 0xC5;
-            vram[0x20] = 0x80; vram[0x21] = 0x00;
+            vram[0x20] = 0x80;
+            vram[0x21] = 0x00;
         }
         execute_vdp1(&mut state, &ram);
         let fb = ram.vdp1_framebuffers.banks[0].read().unwrap();
-        assert_eq!(fb[0], 0x0A); assert_eq!(fb[1], 0x05);
+        assert_eq!(fb[0], 0x0A);
+        assert_eq!(fb[1], 0x05);
     }
 
     #[test]
     fn vdp1_colour_mode_3_128_colour() {
         let mut state = Vdp1State::new();
-        state.tvmr = 0x0008; state.ptmr = 1;
+        state.tvmr = 0x0008;
+        state.ptmr = 1;
         let ram = WorkRam::new();
         {
             let mut vram = ram.vdp1_vram.write().unwrap();
-            vram[4] = 0x00; vram[5] = 0x18;
-            vram[6] = 0x0A; vram[7] = 0x3F;
-            vram[8] = 0x00; vram[9] = 0x10;
-            vram[10] = 0x01; vram[11] = 0x01;
+            vram[4] = 0x00;
+            vram[5] = 0x18;
+            vram[6] = 0x0A;
+            vram[7] = 0x3F;
+            vram[8] = 0x00;
+            vram[9] = 0x10;
+            vram[10] = 0x01;
+            vram[11] = 0x01;
             vram[0x80] = 0xC5;
-            vram[0x20] = 0x80; vram[0x21] = 0x00;
+            vram[0x20] = 0x80;
+            vram[0x21] = 0x00;
         }
         execute_vdp1(&mut state, &ram);
         let fb = ram.vdp1_framebuffers.banks[0].read().unwrap();
-        assert_eq!(fb[0], 0x0A); assert_eq!(fb[1], 0x45);
+        assert_eq!(fb[0], 0x0A);
+        assert_eq!(fb[1], 0x45);
     }
 
     #[test]
     fn vdp1_colour_mode_4_256_colour() {
         let mut state = Vdp1State::new();
-        state.tvmr = 0x0008; state.ptmr = 1;
+        state.tvmr = 0x0008;
+        state.ptmr = 1;
         let ram = WorkRam::new();
         {
             let mut vram = ram.vdp1_vram.write().unwrap();
-            vram[4] = 0x00; vram[5] = 0x20;
-            vram[6] = 0x0A; vram[7] = 0x3F;
-            vram[8] = 0x00; vram[9] = 0x10;
-            vram[10] = 0x01; vram[11] = 0x01;
+            vram[4] = 0x00;
+            vram[5] = 0x20;
+            vram[6] = 0x0A;
+            vram[7] = 0x3F;
+            vram[8] = 0x00;
+            vram[9] = 0x10;
+            vram[10] = 0x01;
+            vram[11] = 0x01;
             vram[0x80] = 0xC5;
-            vram[0x20] = 0x80; vram[0x21] = 0x00;
+            vram[0x20] = 0x80;
+            vram[0x21] = 0x00;
         }
         execute_vdp1(&mut state, &ram);
         let fb = ram.vdp1_framebuffers.banks[0].read().unwrap();
-        assert_eq!(fb[0], 0x0A); assert_eq!(fb[1], 0xC5);
+        assert_eq!(fb[0], 0x0A);
+        assert_eq!(fb[1], 0xC5);
     }
 
     #[test]
     fn vdp1_colour_mode_5_rgb() {
         let mut state = Vdp1State::new();
-        state.tvmr = 0x0008; state.ptmr = 1;
+        state.tvmr = 0x0008;
+        state.ptmr = 1;
         let ram = WorkRam::new();
         {
             let mut vram = ram.vdp1_vram.write().unwrap();
-            vram[4] = 0x00; vram[5] = 0x28; // CMDPMOD
-            vram[8] = 0x00; vram[9] = 0x10;
-            vram[10] = 0x01; vram[11] = 0x01;
-            vram[0x80] = 0x8A; vram[0x81] = 0xBC; // 0x8ABC
-            vram[0x20] = 0x80; vram[0x21] = 0x00;
+            vram[4] = 0x00;
+            vram[5] = 0x28; // CMDPMOD
+            vram[8] = 0x00;
+            vram[9] = 0x10;
+            vram[10] = 0x01;
+            vram[11] = 0x01;
+            vram[0x80] = 0x8A;
+            vram[0x81] = 0xBC; // 0x8ABC
+            vram[0x20] = 0x80;
+            vram[0x21] = 0x00;
         }
         execute_vdp1(&mut state, &ram);
         let fb = ram.vdp1_framebuffers.banks[0].read().unwrap();
-        assert_eq!(fb[0], 0x8A); assert_eq!(fb[1], 0xBC);
+        assert_eq!(fb[0], 0x8A);
+        assert_eq!(fb[1], 0xBC);
     }
 
     #[test]
     fn vdp1_4bpp_is_high_nibble_first() {
         let mut state = Vdp1State::new();
-        state.tvmr = 0x0008; state.ptmr = 1;
+        state.tvmr = 0x0008;
+        state.ptmr = 1;
         let ram = WorkRam::new();
         {
             let mut vram = ram.vdp1_vram.write().unwrap();
-            vram[4] = 0x00; vram[5] = 0x00;
-            vram[6] = 0x00; vram[7] = 0x00;
-            vram[8] = 0x00; vram[9] = 0x10;
-            vram[10] = 0x01; vram[11] = 0x01;
+            vram[4] = 0x00;
+            vram[5] = 0x00;
+            vram[6] = 0x00;
+            vram[7] = 0x00;
+            vram[8] = 0x00;
+            vram[9] = 0x10;
+            vram[10] = 0x01;
+            vram[11] = 0x01;
             vram[0x80] = 0x37;
-            vram[0x20] = 0x80; vram[0x21] = 0x00;
+            vram[0x20] = 0x80;
+            vram[0x21] = 0x00;
         }
         execute_vdp1(&mut state, &ram);
         let fb = ram.vdp1_framebuffers.banks[0].read().unwrap();
-        assert_eq!(fb[0], 0x00); assert_eq!(fb[1], 0x03);
-        assert_eq!(fb[2], 0x00); assert_eq!(fb[3], 0x07);
+        assert_eq!(fb[0], 0x00);
+        assert_eq!(fb[1], 0x03);
+        assert_eq!(fb[2], 0x00);
+        assert_eq!(fb[3], 0x07);
     }
 
     #[test]
     fn vdp1_row_stride_per_colour_mode() {
         let mut state = Vdp1State::new();
-        state.tvmr = 0x0008; state.ptmr = 1;
+        state.tvmr = 0x0008;
+        state.ptmr = 1;
         let ram = WorkRam::new();
         {
             let mut vram = ram.vdp1_vram.write().unwrap();
-            vram[4] = 0x00; vram[5] = 0x20; // Mode 4 (256 color) -> stride is width
-            vram[6] = 0x00; vram[7] = 0x00; // CMDCOLR
-            vram[8] = 0x00; vram[9] = 0x10; // CMDSRCA
-            vram[10] = 0x01; vram[11] = 0x02; // 8x2
+            vram[4] = 0x00;
+            vram[5] = 0x20; // Mode 4 (256 color) -> stride is width
+            vram[6] = 0x00;
+            vram[7] = 0x00; // CMDCOLR
+            vram[8] = 0x00;
+            vram[9] = 0x10; // CMDSRCA
+            vram[10] = 0x01;
+            vram[11] = 0x02; // 8x2
             vram[0x88] = 0x12; // row 1, index 0
-            vram[0x20] = 0x80; vram[0x21] = 0x00;
+            vram[0x20] = 0x80;
+            vram[0x21] = 0x00;
         }
         execute_vdp1(&mut state, &ram);
         let fb = ram.vdp1_framebuffers.banks[0].read().unwrap();
@@ -2460,23 +2636,35 @@ mod tests {
     #[test]
     fn vdp1_system_clip_is_inclusive() {
         let mut state = Vdp1State::new();
-        state.tvmr = 0x0008; state.ptmr = 1;
+        state.tvmr = 0x0008;
+        state.ptmr = 1;
         state.systemclip_x2 = 100;
         state.systemclip_y2 = 50;
         let ram = WorkRam::new();
         {
             let mut vram = ram.vdp1_vram.write().unwrap();
-            vram[0] = 0x00; vram[1] = 0x04; // Polygon
-            vram[6] = 0xFF; vram[7] = 0xFF; // Color 0xFFFF
-            vram[12] = 0x00; vram[13] = 0x64; // X=100
-            vram[14] = 0x00; vram[15] = 0x32; // Y=50
-            vram[16] = 0x00; vram[17] = 0x65; // X=101
-            vram[18] = 0x00; vram[19] = 0x32; // Y=50
-            vram[20] = 0x00; vram[21] = 0x65; // X=101
-            vram[22] = 0x00; vram[23] = 0x33; // Y=51
-            vram[24] = 0x00; vram[25] = 0x64; // X=100
-            vram[26] = 0x00; vram[27] = 0x33; // Y=51
-            vram[0x20] = 0x80; vram[0x21] = 0x00;
+            vram[0] = 0x00;
+            vram[1] = 0x04; // Polygon
+            vram[6] = 0xFF;
+            vram[7] = 0xFF; // Color 0xFFFF
+            vram[12] = 0x00;
+            vram[13] = 0x64; // X=100
+            vram[14] = 0x00;
+            vram[15] = 0x32; // Y=50
+            vram[16] = 0x00;
+            vram[17] = 0x65; // X=101
+            vram[18] = 0x00;
+            vram[19] = 0x32; // Y=50
+            vram[20] = 0x00;
+            vram[21] = 0x65; // X=101
+            vram[22] = 0x00;
+            vram[23] = 0x33; // Y=51
+            vram[24] = 0x00;
+            vram[25] = 0x64; // X=100
+            vram[26] = 0x00;
+            vram[27] = 0x33; // Y=51
+            vram[0x20] = 0x80;
+            vram[0x21] = 0x00;
         }
         execute_vdp1(&mut state, &ram);
         let fb = ram.vdp1_framebuffers.banks[0].read().unwrap();
@@ -2488,24 +2676,39 @@ mod tests {
     #[test]
     fn vdp1_user_clip_inside() {
         let mut state = Vdp1State::new();
-        state.tvmr = 0x0008; state.ptmr = 1;
-        state.userclip_x1 = 20; state.userclip_y1 = 20;
-        state.userclip_x2 = 30; state.userclip_y2 = 30;
+        state.tvmr = 0x0008;
+        state.ptmr = 1;
+        state.userclip_x1 = 20;
+        state.userclip_y1 = 20;
+        state.userclip_x2 = 30;
+        state.userclip_y2 = 30;
         let ram = WorkRam::new();
         {
             let mut vram = ram.vdp1_vram.write().unwrap();
-            vram[0] = 0x00; vram[1] = 0x04;
-            vram[4] = 0x04; vram[5] = 0x00; // User clip inside
-            vram[6] = 0xFF; vram[7] = 0xFF;
-            vram[12] = 0x00; vram[13] = 0x0A; // (10, 10)
-            vram[14] = 0x00; vram[15] = 0x0A;
-            vram[16] = 0x00; vram[17] = 0x28; // (40, 10)
-            vram[18] = 0x00; vram[19] = 0x0A;
-            vram[20] = 0x00; vram[21] = 0x28; // (40, 40)
-            vram[22] = 0x00; vram[23] = 0x28;
-            vram[24] = 0x00; vram[25] = 0x0A; // (10, 40)
-            vram[26] = 0x00; vram[27] = 0x28;
-            vram[0x20] = 0x80; vram[0x21] = 0x00;
+            vram[0] = 0x00;
+            vram[1] = 0x04;
+            vram[4] = 0x04;
+            vram[5] = 0x00; // User clip inside
+            vram[6] = 0xFF;
+            vram[7] = 0xFF;
+            vram[12] = 0x00;
+            vram[13] = 0x0A; // (10, 10)
+            vram[14] = 0x00;
+            vram[15] = 0x0A;
+            vram[16] = 0x00;
+            vram[17] = 0x28; // (40, 10)
+            vram[18] = 0x00;
+            vram[19] = 0x0A;
+            vram[20] = 0x00;
+            vram[21] = 0x28; // (40, 40)
+            vram[22] = 0x00;
+            vram[23] = 0x28;
+            vram[24] = 0x00;
+            vram[25] = 0x0A; // (10, 40)
+            vram[26] = 0x00;
+            vram[27] = 0x28;
+            vram[0x20] = 0x80;
+            vram[0x21] = 0x00;
         }
         execute_vdp1(&mut state, &ram);
         let fb = ram.vdp1_framebuffers.banks[0].read().unwrap();
@@ -2518,24 +2721,39 @@ mod tests {
     #[test]
     fn vdp1_user_clip_outside() {
         let mut state = Vdp1State::new();
-        state.tvmr = 0x0008; state.ptmr = 1;
-        state.userclip_x1 = 20; state.userclip_y1 = 20;
-        state.userclip_x2 = 30; state.userclip_y2 = 30;
+        state.tvmr = 0x0008;
+        state.ptmr = 1;
+        state.userclip_x1 = 20;
+        state.userclip_y1 = 20;
+        state.userclip_x2 = 30;
+        state.userclip_y2 = 30;
         let ram = WorkRam::new();
         {
             let mut vram = ram.vdp1_vram.write().unwrap();
-            vram[0] = 0x00; vram[1] = 0x04;
-            vram[4] = 0x06; vram[5] = 0x00; // User clip outside
-            vram[6] = 0xFF; vram[7] = 0xFF;
-            vram[12] = 0x00; vram[13] = 0x0A; // (10, 10)
-            vram[14] = 0x00; vram[15] = 0x0A;
-            vram[16] = 0x00; vram[17] = 0x28; // (40, 10)
-            vram[18] = 0x00; vram[19] = 0x0A;
-            vram[20] = 0x00; vram[21] = 0x28; // (40, 40)
-            vram[22] = 0x00; vram[23] = 0x28;
-            vram[24] = 0x00; vram[25] = 0x0A; // (10, 40)
-            vram[26] = 0x00; vram[27] = 0x28;
-            vram[0x20] = 0x80; vram[0x21] = 0x00;
+            vram[0] = 0x00;
+            vram[1] = 0x04;
+            vram[4] = 0x06;
+            vram[5] = 0x00; // User clip outside
+            vram[6] = 0xFF;
+            vram[7] = 0xFF;
+            vram[12] = 0x00;
+            vram[13] = 0x0A; // (10, 10)
+            vram[14] = 0x00;
+            vram[15] = 0x0A;
+            vram[16] = 0x00;
+            vram[17] = 0x28; // (40, 10)
+            vram[18] = 0x00;
+            vram[19] = 0x0A;
+            vram[20] = 0x00;
+            vram[21] = 0x28; // (40, 40)
+            vram[22] = 0x00;
+            vram[23] = 0x28;
+            vram[24] = 0x00;
+            vram[25] = 0x0A; // (10, 40)
+            vram[26] = 0x00;
+            vram[27] = 0x28;
+            vram[0x20] = 0x80;
+            vram[0x21] = 0x00;
         }
         execute_vdp1(&mut state, &ram);
         let fb = ram.vdp1_framebuffers.banks[0].read().unwrap();

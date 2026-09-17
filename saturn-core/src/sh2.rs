@@ -2465,7 +2465,8 @@ impl Sh2 {
 
                         let fcm = (state.fbcr >> 1) & 1;
                         let fct = state.fbcr & 1;
-                        if fcm == 0 && (fct == 0 || fct == 1) { // 0x01 is Sonic R workaround
+                        if fcm == 0 && (fct == 0 || fct == 1) {
+                            // 0x01 is Sonic R workaround
                             state.swap_frame_buffer = true;
                         }
                         if (state.tvmr & 8) != 0 || fcm == 0 {
@@ -4941,7 +4942,9 @@ mod opcode_tests {
     fn draw_end_enters_through_vector_0x4d_at_level_2() {
         let mut cpu = make_cpu();
         cpu.scu.write_long(0xA0, 0x0000);
-        cpu.work_ram.vdp1_draw_end_pending.store(true, std::sync::atomic::Ordering::Release);
+        cpu.work_ram
+            .vdp1_draw_end_pending
+            .store(true, std::sync::atomic::Ordering::Release);
         cpu.sr = 0; // nothing masked
         cpu.vbr = 0x0601_0000;
         cpu.registers[15] = 0x0601_1000;
@@ -4951,9 +4954,9 @@ mod opcode_tests {
         cpu.write_word(0x0600_4000, 0x0009); // handler entry
 
         cpu.step(); // This step will process the pending flag and call scu.draw_end(), and then service it!
-        // Wait, step() does: 1) service_pending_interrupt, 2) check queue, 3) execute
-        // So during 1), draw_end_pending flag is cleared, and scu.draw_end() is called, which queues it.
-        // Then 2) check queue -> takes it! So pc will be 0x0600_4002!
+                    // Wait, step() does: 1) service_pending_interrupt, 2) check queue, 3) execute
+                    // So during 1), draw_end_pending flag is cleared, and scu.draw_end() is called, which queues it.
+                    // Then 2) check queue -> takes it! So pc will be 0x0600_4002!
         assert_eq!(
             cpu.pc, 0x0600_4002,
             "did not jump through the Draw End vector"
@@ -4973,7 +4976,9 @@ mod opcode_tests {
     fn draw_end_stays_pending_while_masked() {
         let mut cpu = make_cpu();
         cpu.scu.write_long(0xA0, 0x0000);
-        cpu.work_ram.vdp1_draw_end_pending.store(true, std::sync::atomic::Ordering::Release);
+        cpu.work_ram
+            .vdp1_draw_end_pending
+            .store(true, std::sync::atomic::Ordering::Release);
         cpu.sr = 0x0000_00F0; // mask level 15: everything blocked
         cpu.pc = 0x0600_0000;
         cpu.write_word(0x0600_0000, 0x0009); // NOP
@@ -4994,24 +4999,27 @@ mod opcode_tests {
     fn draw_end_yields_to_every_higher_interrupt() {
         let mut cpu = make_cpu();
         cpu.scu.write_long(0xA0, 0x0000);
-        cpu.work_ram.vdp1_draw_end_pending.store(true, std::sync::atomic::Ordering::Release);
+        cpu.work_ram
+            .vdp1_draw_end_pending
+            .store(true, std::sync::atomic::Ordering::Release);
         // VBLANK OUT is level 6
         cpu.scu.vblank_out();
-        
+
         cpu.sr = 0;
         cpu.vbr = 0x0601_0000;
         cpu.registers[15] = 0x0601_1000;
         cpu.pc = 0x0600_0000;
         cpu.write_word(0x0600_0000, 0x0009);
-        
+
         // Setup handler for VBlank Out (Vector 0x41)
         cpu.write_long(cpu.vbr.wrapping_add(0x41 * 4), 0x0600_2000);
         cpu.write_word(0x0600_2000, 0x0009);
-        
+
         cpu.step();
         assert_eq!(cpu.pc, 0x0600_2002, "must take the higher level interrupt");
         assert!(
-            cpu.queue_peek().is_some_and(|p| p.vector == DRAW_END_IRQ_VECTOR as u8),
+            cpu.queue_peek()
+                .is_some_and(|p| p.vector == DRAW_END_IRQ_VECTOR as u8),
             "draw end must stay queued behind the higher priority one"
         );
     }
@@ -7177,14 +7185,14 @@ mod opcode_tests {
         cpu.registers[15] = 0x0601_0000; // safe stack
         cpu.sr = 0x0000_00F0; // Mask all interrupts
         cpu.vdp1 = Some(Arc::new(Mutex::new(crate::vdp::Vdp1State::new())));
-        
+
         {
             let mut state = cpu.vdp1.as_ref().unwrap().lock().unwrap();
             state.tvmr = 0; // Clear default VBE bit
         }
 
         // Test FCM=0, FCT=1 (Sonic R workaround)
-        cpu.write_word(0x25D00002, 0x0001); 
+        cpu.write_word(0x25D00002, 0x0001);
         // Advance SCU to VBlank IN by stepping CPU
         for _ in 0..500000 {
             cpu.step();
@@ -7194,7 +7202,7 @@ mod opcode_tests {
                 break;
             }
         }
-        
+
         {
             let state = cpu.vdp1.as_ref().unwrap().lock().unwrap();
             assert!(state.swap_frame_buffer, "FCM=0, FCT=1 should auto-swap");
@@ -7211,7 +7219,10 @@ mod opcode_tests {
         cpu.write_word(0x25D00002, 0x0003);
         {
             let state = cpu.vdp1.as_ref().unwrap().lock().unwrap();
-            assert_eq!(state.fbcr, 0x0003, "FBCR should be 0x0003 immediately after write");
+            assert_eq!(
+                state.fbcr, 0x0003,
+                "FBCR should be 0x0003 immediately after write"
+            );
         }
         for _ in 0..500000 {
             cpu.step();
@@ -7222,7 +7233,7 @@ mod opcode_tests {
                 break;
             }
         }
-        
+
         {
             let state = cpu.vdp1.as_ref().unwrap().lock().unwrap();
             assert!(state.swap_frame_buffer, "manualchange should trigger swap");

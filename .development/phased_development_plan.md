@@ -177,7 +177,7 @@ not twice.
 - [x] `vdp1.md` Phase 2 — Framebuffer geometry, two banks, erase and swap
 - [x] `vdp1.md` Phase 3 — Draw End status and interrupt (needs `scu.md` Phase 6)
 - [x] `vdp1.md` Phase 4 — The rasteriser, Normal Sprite, and colour-mode decode
-- [ ] `vdp2.md` Phase 2 — One NBG layer, the simplest format, pixel-exact
+- [x] `vdp2.md` Phase 2 — One NBG layer, the simplest format, pixel-exact
 - [ ] `vdp1.md` Phase 5 — The remaining textured shape commands
 - [ ] `vdp2.md` Phase 3 — Remaining NBG layers and every character/bitmap format
 - [ ] `vdp1.md` Phase 6 — Colour calculation, gouraud, mesh, MSB

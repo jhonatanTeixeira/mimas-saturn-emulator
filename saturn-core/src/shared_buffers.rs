@@ -98,7 +98,7 @@ impl WorkRam {
             smpc_nmi_pending: std::sync::atomic::AtomicBool::new(false),
             smpc_sysres_pending: std::sync::atomic::AtomicBool::new(false),
             smpc_clock_change: std::sync::atomic::AtomicU8::new(0),
-            
+
             vdp1_draw_end_pending: std::sync::atomic::AtomicBool::new(false),
         }
     }

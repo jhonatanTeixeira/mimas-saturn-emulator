@@ -372,57 +372,59 @@ possible surface.
 
 ### 2.1 Registers to decode
 
-- [ ] `BGON` `0x020` bit 3 (`N3ON`) and bit 11 (`N3TPON`, transparency-code *disable* —
+- [x] `BGON` `0x020` bit 3 (`N3ON`) and bit 11 (`N3TPON`, transparency-code *disable* —
       `transparencyenable = !(BGON & 0x800)`) (§A.4).
-- [ ] `CHCTLB` `0x02A` bit 4 (`N3CHSZ`), bit 5 (`N3CHCN`) (§A.5).
-- [ ] `PNCN3` `0x036`: bits 0-4 supplementary character number, bits 5-7 supplementary palette
+- [x] `CHCTLB` `0x02A` bit 4 (`N3CHSZ`), bit 5 (`N3CHCN`) (§A.5).
+- [x] `PNCN3` `0x036`: bits 0-4 supplementary character number, bits 5-7 supplementary palette
       number, bit 8 special colour calc, bit 9 special priority, bit 14 `auxmode`, bit 15
       pattern-name data size (**1 = one word, 0 = two words** — note the inversion) (§A.6).
-- [ ] `PLSZ` `0x03A` bits 6-7 → `ReadPlaneSize` (§A.6). Encoding 2 maps to 1×1; the reference
+- [x] `PLSZ` `0x03A` bits 6-7 → `ReadPlaneSize` (§A.6). Encoding 2 maps to 1×1; the reference
       records this as the source's own guesswork (`vidshared.h:499`) — carry the uncertainty
       forward as a comment, do not silently present it as fact.
-- [ ] `MPOFN` `0x03C` bits 12-14 → `(MPOFN & 0x7000) >> 6` (§A.7).
-- [ ] `MPABN3` `0x04C`, `MPCDN3` `0x04E` — planes A/B and C/D, **low byte first** (§A.7).
-- [ ] `SCXN3` `0x094`, `SCYN3` `0x096` — `& 0x7FF`, integer only (§A.8).
-- [ ] `CRAOFA` `0x0E4` bits 12-14 → `(CRAOFA & 0x7000) >> 4` (§A.13).
-- [ ] `PRINB` `0x0FA` bits 8-10 → NBG3 priority (§A.14). Store it; Phase 4 uses it.
-- [ ] `VRSIZE` `0x006` bit 15, already decoded in Phase 1, consumed here by `CalcPlaneAddr` and by
+- [x] `MPOFN` `0x03C` bits 12-14 → `(MPOFN & 0x7000) >> 6` (§A.7).
+- [x] `MPABN3` `0x04C`, `MPCDN3` `0x04E` — planes A/B and C/D, **low byte first** (§A.7).
+- [x] `SCXN3` `0x094`, `SCYN3` `0x096` — `& 0x7FF`, integer only (§A.8).
+- [x] `CRAOFA` `0x0E4` bits 12-14 → `(CRAOFA & 0x7000) >> 4` (§A.13).
+- [x] `PRINB` `0x0FA` bits 8-10 → NBG3 priority (§A.14). Store it; Phase 4 uses it.
+- [x] `VRSIZE` `0x006` bit 15, already decoded in Phase 1, consumed here by `CalcPlaneAddr` and by
       the `charaddr &= 0x3FFF` clamp.
 
 ### 2.2 Algorithms to implement
 
-- [ ] `read_pattern_data` — the `PNCN3` decode into `patterndatasize`, `patternwh`,
+**Status:** Completed in Chapter 38. `calc_plane_addr` and `map_calc_xy` had subtle bugs in their initial implementation that were later discovered and fixed, highlighting the importance of rigorous adherence to the hardware reference.
+
+- [x] `read_pattern_data` — the `PNCN3` decode into `patterndatasize`, `patternwh`,
       `pagewh = 64 >> patternwh_bits`, `supplementdata = pnc & 0x3FF`, `auxmode` (§A.6).
-- [ ] `calc_plane_addr` — the eight-row table in §A.7. Inputs `tmp = map_offset | plane_byte`
+- [x] `calc_plane_addr` — the eight-row table in §A.7. Inputs `tmp = map_offset | plane_byte`
       (**ORed, not concatenated** — bits 6-7 overlap), `deca = planeh + planew - 2`,
       `multi = planeh * planew`. Only the 4 Mbit / 1-word / 1×1 row is exercised in this phase,
       but implement all eight now: the table is small, independently confirmed by
-      `vdp2debug.c:259-272`, and splitting it across phases invites drift.
-- [ ] `generate_plane_addr_table` — `planetbl[mapwh * mapwh]`, 4 entries for NBG layers (§A.7).
-- [ ] `setup_screen_vars` — tile-mode geometry per §B.3: `pagepixelwh = 512`,
+      `vdp2debug.c:259-272`, and splitting it across phases invites drift. *(Note: Initially ignored VRSIZE, fixed to strictly match the 8-row table).*
+- [x] `generate_plane_addr_table` — `planetbl[mapwh * mapwh]`, 4 entries for NBG layers (§A.7).
+- [x] `setup_screen_vars` — tile-mode geometry per §B.3: `pagepixelwh = 512`,
       `planepixelwidth = planew * 512`, `planepixelheight = planeh * 512`,
       `screenwidth = mapwh * planepixelwidth`, `xmask`/`ymask`.
-- [ ] `map_calc_xy` — §B.3's cell-boundary cache. `cellwh = 2 + patternwh`;
+- [x] `map_calc_xy` — §B.3's cell-boundary cache. `cellwh = 2 + patternwh`;
       `check = ((y >> cellwh) << 16) | (x >> cellwh)`; on change, compute `planenum`, mask
       `x`/`y`, compute `info.addr` via the shift expression, fetch the pattern name, shift the
       one-cell pipeline. **The `oldcellcheck` comparison is the cache** — a pattern name is
       fetched once per cell, not per pixel. Implement the pipeline (`pipe[0]`/`pipe[1]`) now even
-      though nothing sets `bad_cycle` yet (§B.5); adding it later means retrofitting the hot loop.
-- [ ] `pattern_addr` one-word path (§B.2): for `colornumber == 0`,
+      though nothing sets `bad_cycle` yet (§B.5); adding it later means retrofitting the hot loop. *(Note: Initially used a flat raster index, fixed to use hardware-accurate page-based addressing).*
+- [x] `pattern_addr` one-word path (§B.2): for `colornumber == 0`,
       `paladdr = ((tmp & 0xF000) >> 8) | ((supplementdata & 0xE0) << 3)`; for `auxmode == 0`,
       `patternwh == 1`: `flipfunction = (tmp & 0xC00) >> 10`,
       `charaddr = (tmp & 0x3FF) | ((supplementdata & 0x1F) << 10)`.
       Common tail: `if !vram_8mbit { charaddr &= 0x3FFF }` then `charaddr *= 0x20`.
-- [ ] Flip application for 8×8 cells (§B.3): after `x &= 7; y &= 7`, `flipfunction & 1` → `x = 7-x`,
+- [x] Flip application for 8×8 cells (§B.3): after `x &= 7; y &= 7`, `flipfunction & 1` → `x = 7-x`,
       `& 2` → `y = 7-y`.
-- [ ] `fetch_pixel`, `colornumber == 0` only (§B.4): byte at `charaddr + (y*cellw + x)/2` with
+- [x] `fetch_pixel`, `colornumber == 0` only (§B.4): byte at `charaddr + (y*cellw + x)/2` with
       `cellw = 8`; **even `x` is the high nibble** (`if !(x & 1) { dot >>= 4 }`); transparent when
       `(dot & 0xF) == 0` and `transparencyenable`; colour is
       `cram_lookup(coloroffset + (paladdr | (dot & 0xF)))`. All VRAM addresses masked `& 0x7FFFF`.
-- [ ] A minimal `draw_scroll` (§B.6): per-line `y = info.y + mosaic_y[j]` (mosaic table is
+- [x] A minimal `draw_scroll` (§B.6): per-line `y = info.y + mosaic_y[j]` (mosaic table is
       identity in this phase), `y &= ymask`; per-pixel `x = info.x + i`, `x &= xmask`, then
       `map_calc_xy` + `fetch_pixel`, writing into NBG3's layer buffer.
-- [ ] Layer buffers (§B.1): the six `PixelData` arrays. In this phase only index 0 (NBG3) is
+- [x] Layer buffers (§B.1): the six `PixelData` arrays. In this phase only index 0 (NBG3) is
       written; compositing is "if NBG3 wrote a pixel, use it, else use the back screen". That is
       *not* priority resolution — label it as a stub that Phase 4 replaces, so it does not
       calcify.
