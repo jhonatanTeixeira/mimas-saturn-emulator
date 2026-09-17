@@ -22,6 +22,48 @@ echo "🚀 Mimas Quality Gate"
 echo "============================================="
 
 # -----------------------------------------------------------------------------
+# Effective configuration, printed every run.
+#
+# Every threshold below can be overridden from the environment, and that is a
+# legitimate thing to do -- on the R36S the speed floor *must* be lowered, for
+# instance. What is not legitimate is lowering a bar to turn a red check green
+# and saying nothing. So the gate prints what it is actually enforcing, and
+# marks anything that is not the committed default, which means a weakened run
+# is visible in the log output itself rather than only in a diff nobody reads.
+#
+# There is exactly one honest way to turn each red check green:
+#   coverage          -> write tests. Not --exclude-files, not a lower bar.
+#   assert-nothing    -> write a real assertion, or justify it with
+#                        `// no-assert: <reason>` at the test.
+#   mess detect       -> fix the finding, or `#[allow(...)]` it *with a comment
+#                        saying why clippy is wrong here*. NEVER `clippy --fix`:
+#                        it was run once (37c85d4) and silently turned an m68k
+#                        opcode guard into a no-op and muted the warnings that
+#                        were flagging half-written VDP1 framebuffer code.
+#   smoke test PC     -> if boot got *further*, verify and update the expected
+#                        PC. If it got shorter, that is a regression, not a
+#                        stale constant.
+# -----------------------------------------------------------------------------
+OVERRIDDEN=()
+show_cfg() { # name value default
+    if [ "$2" != "$3" ]; then
+        OVERRIDDEN+=("$1: $2 (default $3)")
+        printf "  %-22s %-12s  ⚠️  OVERRIDDEN (default %s)\n" "$1" "$2" "$3"
+    else
+        printf "  %-22s %-12s\n" "$1" "$2"
+    fi
+}
+echo ""
+echo "Effective configuration:"
+show_cfg "coverage min %"   "${MIMAS_COVERAGE_MIN:-90}"      "90"
+show_cfg "speed floor %"    "${MIMAS_MIN_SPEED_PCT:-150}"    "150"
+show_cfg "speed warn %"     "${MIMAS_WARN_SPEED_PCT:-170}"   "170"
+show_cfg "expected boot PC" "${MIMAS_GATE_PC:-0x06001694}"   "0x06001694"
+show_cfg "min WRAM accesses" "${MIMAS_GATE_MIN_WRAM:-2000000}" "2000000"
+show_cfg "max source lines" "${MIMAS_LOC_MAX:-34000}"        "34000"
+show_cfg "max binary MB"    "${MIMAS_BIN_MAX_MB:-16}"        "16"
+
+# -----------------------------------------------------------------------------
 echo ""
 echo "1/8 🔨 Formatting"
 if cargo fmt --all -- --check; then
@@ -247,6 +289,12 @@ echo "============================================="
 for p in "${PASSED[@]}"; do echo "  ✅ $p"; done
 for w in "${WARNED[@]}"; do echo "  ⚠️  $w"; done
 for f in "${FAILED[@]}"; do echo "  ❌ $f"; done
+if [ ${#OVERRIDDEN[@]} -ne 0 ]; then
+    echo "---------------------------------------------"
+    echo "⚠️  ${#OVERRIDDEN[@]} threshold(s) overridden from the committed defaults:"
+    for o in "${OVERRIDDEN[@]}"; do echo "     $o"; done
+    echo "   A green result under lowered thresholds is not the same result."
+fi
 echo "---------------------------------------------"
 if [ ${#FAILED[@]} -eq 0 ]; then
     echo "🎉 Quality Gate passed (${#PASSED[@]} checks)"

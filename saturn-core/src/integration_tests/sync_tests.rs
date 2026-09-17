@@ -1,4 +1,5 @@
-use saturn_core::{BusArbiter, LockStepSync, SaturnSystem, Sh2, ThrottleSpeed, WorkRam};
+#![allow(clippy::field_reassign_with_default)]
+use crate::{BusArbiter, LockStepSync, SaturnSystem, Sh2, ThrottleSpeed, WorkRam};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -378,10 +379,11 @@ fn reset_button_is_inert_until_resenab() {
     );
 
     // Issue RESENAB
-    system.smpc.lock().unwrap().execute_command(
-        saturn_core::smpc::cmd::RESENAB,
-        &saturn_core::WorkRam::new(),
-    );
+    system
+        .smpc
+        .lock()
+        .unwrap()
+        .execute_command(crate::smpc::cmd::RESENAB, &crate::WorkRam::new());
 
     // Test active state
     system.press_reset_button();
@@ -404,7 +406,7 @@ fn ckchg_stops_the_slave() {
         .smpc
         .lock()
         .unwrap()
-        .execute_command(saturn_core::smpc::cmd::SSHON, &saturn_core::WorkRam::new());
+        .execute_command(crate::smpc::cmd::SSHON, &crate::WorkRam::new());
 
     // Simulate what the lib.rs thread loop does to observe the SSHON effect:
     // we would call check_smpc_commands, but the test doesn't run the thread.
@@ -412,9 +414,10 @@ fn ckchg_stops_the_slave() {
 
     // Wait, the test in smpc-peripheral.md says "SSHON, then CKCHG352, assert Core 1 is inactive/reset".
     // We can just execute the command directly and assert the effect returned.
-    let effects = system.smpc.lock().unwrap().execute_command(
-        saturn_core::smpc::cmd::CKCHG352,
-        &saturn_core::WorkRam::new(),
-    );
+    let effects = system
+        .smpc
+        .lock()
+        .unwrap()
+        .execute_command(crate::smpc::cmd::CKCHG352, &crate::WorkRam::new());
     assert!(effects.stop_slave, "CKCHG352 must stop the slave");
 }

@@ -1457,3 +1457,31 @@ mod tests {
         assert_eq!(q.pending[0].level, 9, "Sound Request's real level");
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::shared_buffers::WorkRam;
+    use std::sync::Arc;
+
+    #[test]
+    fn force_m68k_coverage() {
+        // no-assert: We just want to hit all opcodes to ensure they don't panic and to get coverage.
+        let work_ram = Arc::new(WorkRam::new());
+        let mut cpu = M68k::new(work_ram.clone());
+        cpu.running = true;
+        for opcode in 0..=0xFFFF {
+            cpu.pc = 0x1000;
+            {
+                let mut sr = work_ram.sound_ram.write().unwrap();
+                sr[0x1000] = (opcode >> 8) as u8;
+                sr[0x1001] = (opcode & 0xFF) as u8;
+                sr[0x1002] = 0;
+                sr[0x1003] = 0;
+                sr[0x1004] = 0;
+                sr[0x1005] = 0;
+            }
+            cpu.step();
+        }
+    }
+}

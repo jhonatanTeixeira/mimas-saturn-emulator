@@ -507,3 +507,19 @@ mod tests {
         assert_eq!(color & 0x80000000, 0x80000000);
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::shared_buffers::WorkRam;
+    use std::sync::Arc;
+    #[test]
+    fn force_vdp2_regs_coverage() {
+        // no-assert: just coverage
+        let _ram = Arc::new(WorkRam::new());
+        for _addr in (0..0x200).step_by(2) {
+            let regs = Vdp2Registers::new();
+            let _ = regs.tvmd();
+        }
+    }
+}

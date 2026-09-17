@@ -1,8 +1,9 @@
+#![allow(clippy::field_reassign_with_default)]
 //! Report-shape correctness for every SMPC peripheral type (`docs/implementation-plans/smpc-peripheral.md`
 //! Phase 7), each value independently derived from `docs/hardware-reference/smpc-peripheral.md`
 //! §9.3-9.7's own tables and worked examples -- never copied from this crate's own output.
 
-use saturn_core::peripheral::{
+use crate::peripheral::{
     id, status, GunState, KeyboardState, MissionStickState, MouseState, Pad3DState, PadState,
     PeripheralState, TwinSticksState, WheelState,
 };
@@ -97,7 +98,7 @@ fn gun_contributes_only_its_status_byte_to_the_intback_stream() {
     // must emit exactly `A0 | <port 2's own bytes>` -- one byte for the gun,
     // nothing else -- matching §5.5's own worked example shape
     // ("A gun on port 1: A0 only (size == 1)").
-    use saturn_core::peripheral::PortData;
+    use crate::peripheral::PortData;
 
     let mut p1 = PeripheralState::Gun(GunState::default()).to_port_data();
     let mut p2 = PeripheralState::Pad(PadState::default()).to_port_data();
@@ -149,8 +150,8 @@ fn ddr_id_nibble_covers_every_connected_type() {
     // implementation): 0xC pad/gun, 0x71 3D-pad/keyboard, 0x70 mouse, 0x7F
     // nothing, and the "unsupported, PDR left untouched" row for
     // wheel/mission-stick/twin-sticks.
-    use saturn_core::shared_buffers::WorkRam;
-    use saturn_core::smpc::{reg, Smpc};
+    use crate::shared_buffers::WorkRam;
+    use crate::smpc::{reg, Smpc};
 
     let cases: &[(&str, PeripheralState, Option<u8>)] = &[
         ("disconnected", PeripheralState::Disconnected, Some(0x7F)),

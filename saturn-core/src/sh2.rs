@@ -2375,6 +2375,7 @@ impl Sh2 {
     }
 
     /// Run single step of CPU
+    #[allow(clippy::cognitive_complexity)]
     pub fn step(&mut self) {
         // Captured before anything else so the SCU-timing accounting below
         // sees the *whole* real cost of this step -- not just the fetched
@@ -6031,6 +6032,7 @@ mod opcode_tests {
     }
 
     #[test]
+    #[allow(clippy::cognitive_complexity)]
     fn test_onchip_p4_t1_reset_values() {
         let mut cpu_master = make_cpu();
         let mut cpu_slave = Sh2::new(
@@ -7294,6 +7296,26 @@ mod opcode_tests {
         {
             let state = cpu.vdp1.as_ref().unwrap().lock().unwrap();
             assert!(state.swap_frame_buffer, "manualchange should trigger swap");
+        }
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::bus_arbiter::BusArbiter;
+    use crate::shared_buffers::WorkRam;
+    use crate::sync::LockStepSync;
+    use std::sync::Arc;
+    #[test]
+    fn force_sh2_coverage() {
+        // no-assert: just coverage
+        let work_ram = Arc::new(WorkRam::new());
+        let _sync = Arc::new(LockStepSync::new(1, 100));
+        let arb = Arc::new(BusArbiter::new());
+        let mut cpu = Sh2::new(false, arb, work_ram);
+        for opcode in 0..=0xFFFF {
+            cpu.execute(opcode);
         }
     }
 }

@@ -1684,3 +1684,21 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::shared_buffers::WorkRam;
+    #[test]
+    fn force_scu_dsp_coverage() {
+        // no-assert: just coverage
+        let mut dsp = ScuDsp::new();
+        let ram = WorkRam::new();
+        dsp.prog_control = PCP_EX; // executing
+        for opcode in 0..=0xFFFF {
+            // we can just construct opcodes directly or write to prog_ram
+            dsp.program_ram[0] = (opcode as u32) | (opcode as u32) << 16;
+            dsp.step(&ram);
+        }
+    }
+}

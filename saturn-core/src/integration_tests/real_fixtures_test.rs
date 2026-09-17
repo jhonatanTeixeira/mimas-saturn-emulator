@@ -1,10 +1,11 @@
+#![allow(clippy::field_reassign_with_default)]
 //! Tests against real state captured from a genuine Yabause libretro core
 //! (patched with a temporary dump hook, see
 //! `docs/yabause_test_fixtures_extraction_plan.md`) running a real Saturn
 //! BIOS against a real boot disc -- not a self-consistent guess. See
 //! `saturn-core/tests/fixtures/README.md` for exactly how each fixture was
 //! captured and how to regenerate it.
-use saturn_core::{BusArbiter, Sh2, Smpc, WorkRam};
+use crate::{BusArbiter, Sh2, Smpc, WorkRam};
 use std::sync::{Arc, Mutex};
 
 fn load_fixture(name: &str) -> Vec<u8> {

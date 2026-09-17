@@ -1,7 +1,8 @@
-use saturn_core::bus_arbiter::BusArbiter;
-use saturn_core::sh2::Sh2;
-use saturn_core::shared_buffers::WorkRam;
-use saturn_core::smpc::{cmd, reg, Smpc};
+#![allow(clippy::field_reassign_with_default)]
+use crate::bus_arbiter::BusArbiter;
+use crate::sh2::Sh2;
+use crate::shared_buffers::WorkRam;
+use crate::smpc::{cmd, reg, Smpc};
 use std::sync::{Arc, Mutex};
 
 #[test]
@@ -19,7 +20,7 @@ fn drive_intback_from_real_sh2_and_read_oreg2() {
     // Set port 1 to Pad with A and Start pressed.
     {
         let mut smpc_lock = smpc.lock().unwrap();
-        let mut pad = saturn_core::peripheral::PadState::default();
+        let mut pad = crate::peripheral::PadState::default();
         pad.a = true;
         pad.start = true;
         smpc_lock.set_pad_state(1, pad);

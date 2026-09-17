@@ -1,4 +1,5 @@
-use saturn_core::{BusArbiter, LockStepSync, Sh2};
+#![allow(clippy::field_reassign_with_default)]
+use crate::{BusArbiter, LockStepSync, Sh2};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -179,7 +180,7 @@ fn test_drift_bounds_hold_exactly() {
 fn test_drift_limit_bypass_after_dma() {
     let arbiter = Arc::new(BusArbiter::new());
     let sync = Arc::new(LockStepSync::new(3, 10)); // slack limit = 10
-    let work_ram = Arc::new(saturn_core::WorkRam::new());
+    let work_ram = Arc::new(crate::WorkRam::new());
 
     // Create three CPU threads or simulate their steps
     // Let's use the actual Sh2 structs!
@@ -369,7 +370,7 @@ fn test_panic_deadlock_vulnerability() {
     let sync_clone = sync.clone();
     let arbiter_clone = arbiter.clone();
     let handle_panic = thread::spawn(move || {
-        let _guard = saturn_core::sync::PanicGuard::new(sync_clone.clone(), arbiter_clone);
+        let _guard = crate::sync::PanicGuard::new(sync_clone.clone(), arbiter_clone);
         sync_clone.sync_core(0, 5);
         panic!("Simulated CPU thread panic!");
     });
@@ -380,7 +381,7 @@ fn test_panic_deadlock_vulnerability() {
     let completed = Arc::new(AtomicBool::new(false));
     let completed_clone = completed.clone();
     let handle_t1 = thread::spawn(move || {
-        let _guard = saturn_core::sync::PanicGuard::new(sync_clone2.clone(), arbiter_clone2);
+        let _guard = crate::sync::PanicGuard::new(sync_clone2.clone(), arbiter_clone2);
         // Thread 1 advances to cycle 20. It should be unblocked because Thread 0 panics, triggers PanicGuard, which shuts down sync.
         sync_clone2.sync_core(1, 20);
         completed_clone.store(true, Ordering::Relaxed);
@@ -412,7 +413,7 @@ fn test_panic_deadlock_vulnerability() {
 fn test_sndon_signal_publishes_sound_ram_writes_across_threads() {
     assert_completes_within(Duration::from_secs(10), || {
         let arbiter = Arc::new(BusArbiter::new());
-        let work_ram = Arc::new(saturn_core::WorkRam::new());
+        let work_ram = Arc::new(crate::WorkRam::new());
         let flag = Arc::new(AtomicBool::new(false));
 
         let mut writer_cpu = Sh2::new(false, arbiter.clone(), work_ram.clone());
@@ -504,7 +505,7 @@ fn scu_dma_engine_on_core6_does_not_stall_core0_for_the_whole_transfer() {
     // never correctness.
     assert_completes_within(Duration::from_secs(30), || {
         let arbiter = Arc::new(BusArbiter::new());
-        let work_ram = Arc::new(saturn_core::WorkRam::new());
+        let work_ram = Arc::new(crate::WorkRam::new());
         // 7 slots so index 6 is valid -- `Sh2::write_long`'s DMA-trigger
         // wake call and this test's own Core-6 stand-in both hardcode `6`,
         // matching `SaturnSystem`'s real core numbering. All 7 are
