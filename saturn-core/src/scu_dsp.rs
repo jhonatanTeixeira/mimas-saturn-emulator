@@ -1713,7 +1713,7 @@ mod dsp_fuzz {
         let mut dsp = ScuDsp::new();
         let work = Arc::new(crate::shared_buffers::WorkRam::new());
         for opcode in 0..=0xFFFF {
-            let instr = (opcode * 12345) & 0xFFFFFFFFu32;
+            let instr = (opcode * 12345);
             dsp.program_ram[0] = instr;
             dsp.pc = 0;
             dsp.step(&work);

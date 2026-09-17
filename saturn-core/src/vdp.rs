@@ -3826,20 +3826,20 @@ mod vdp_exhaustive_coverage {
         let fb = ram.vdp1_framebuffers.banks[0].read().unwrap();
         // check inside
         assert_ne!(
-            u16::from_be_bytes([fb[(((10 * 512) + 10) * 2)], fb[(((10 * 512) + 10) * 2) + 1]]),
+            u16::from_be_bytes([fb[((10 * 512) + 10) * 2 ], fb[(((10 * 512) + 10) * 2) + 1]]),
             0
         );
         assert_ne!(
-            u16::from_be_bytes([fb[(((25 * 512) + 41) * 2)], fb[(((25 * 512) + 41) * 2) + 1]]),
+            u16::from_be_bytes([fb[((25 * 512) + 41) * 2 ], fb[(((25 * 512) + 41) * 2) + 1]]),
             0
         );
         // check outside
         assert_eq!(
-            u16::from_be_bytes([fb[(((9 * 512) + 10) * 2)], fb[(((9 * 512) + 10) * 2) + 1]]),
+            u16::from_be_bytes([fb[((9 * 512) + 10) * 2 ], fb[(((9 * 512) + 10) * 2) + 1]]),
             0
         );
         assert_eq!(
-            u16::from_be_bytes([fb[(((26 * 512) + 41) * 2)], fb[(((26 * 512) + 41) * 2) + 1]]),
+            u16::from_be_bytes([fb[((26 * 512) + 41) * 2 ], fb[(((26 * 512) + 41) * 2) + 1]]),
             0
         );
     }
@@ -3879,15 +3879,15 @@ mod vdp_exhaustive_coverage {
         execute_vdp1(&mut state, &ram);
         let fb = ram.vdp1_framebuffers.banks[0].read().unwrap();
         assert_ne!(
-            u16::from_be_bytes([fb[(((10 * 512) + 10) * 2)], fb[(((10 * 512) + 10) * 2) + 1]]),
+            u16::from_be_bytes([fb[((10 * 512) + 10) * 2 ], fb[(((10 * 512) + 10) * 2) + 1]]),
             0
         );
         assert_ne!(
-            u16::from_be_bytes([fb[(((25 * 512) + 41) * 2)], fb[(((25 * 512) + 41) * 2) + 1]]),
+            u16::from_be_bytes([fb[((25 * 512) + 41) * 2 ], fb[(((25 * 512) + 41) * 2) + 1]]),
             0
         );
         assert_eq!(
-            u16::from_be_bytes([fb[(((9 * 512) + 10) * 2)], fb[(((9 * 512) + 10) * 2) + 1]]),
+            u16::from_be_bytes([fb[((9 * 512) + 10) * 2 ], fb[(((9 * 512) + 10) * 2) + 1]]),
             0
         );
     }
@@ -3931,20 +3931,20 @@ mod vdp_exhaustive_coverage {
         // Size does NOT move! So it ends at 110 + 31 = 141.
         assert_ne!(
             u16::from_be_bytes([
-                fb[(((10 * 512) + 110) * 2)],
+                fb[((10 * 512) + 110) * 2 ],
                 fb[(((10 * 512) + 110) * 2) + 1]
             ]),
             0
         );
         assert_ne!(
             u16::from_be_bytes([
-                fb[(((25 * 512) + 141) * 2)],
+                fb[((25 * 512) + 141) * 2 ],
                 fb[(((25 * 512) + 141) * 2) + 1]
             ]),
             0
         );
         assert_eq!(
-            u16::from_be_bytes([fb[(((10 * 512) + 10) * 2)], fb[(((10 * 512) + 10) * 2) + 1]]),
+            u16::from_be_bytes([fb[((10 * 512) + 10) * 2 ], fb[(((10 * 512) + 10) * 2) + 1]]),
             0
         );
     }
@@ -3989,15 +3989,15 @@ mod vdp_exhaustive_coverage {
         // tl: (-5+10, 3+10) = (5, 13)
         // br: (26+10, 18+10) = (36, 28)
         assert_ne!(
-            u16::from_be_bytes([fb[(((13 * 512) + 5) * 2)], fb[(((13 * 512) + 5) * 2) + 1]]),
+            u16::from_be_bytes([fb[((13 * 512) + 5) * 2 ], fb[(((13 * 512) + 5) * 2) + 1]]),
             0
         );
         assert_ne!(
-            u16::from_be_bytes([fb[(((28 * 512) + 36) * 2)], fb[(((28 * 512) + 36) * 2) + 1]]),
+            u16::from_be_bytes([fb[((28 * 512) + 36) * 2 ], fb[(((28 * 512) + 36) * 2) + 1]]),
             0
         );
         assert_eq!(
-            u16::from_be_bytes([fb[(((12 * 512) + 5) * 2)], fb[(((12 * 512) + 5) * 2) + 1]]),
+            u16::from_be_bytes([fb[((12 * 512) + 5) * 2 ], fb[(((12 * 512) + 5) * 2) + 1]]),
             0
         );
     }
@@ -4037,11 +4037,11 @@ mod vdp_exhaustive_coverage {
         execute_vdp1(&mut state, &ram);
         let fb = ram.vdp1_framebuffers.banks[0].read().unwrap();
         assert_ne!(
-            u16::from_be_bytes([fb[(((10 * 512) + 10) * 2)], fb[(((10 * 512) + 10) * 2) + 1]]),
+            u16::from_be_bytes([fb[((10 * 512) + 10) * 2 ], fb[(((10 * 512) + 10) * 2) + 1]]),
             0
         );
         assert_ne!(
-            u16::from_be_bytes([fb[(((25 * 512) + 41) * 2)], fb[(((25 * 512) + 41) * 2) + 1]]),
+            u16::from_be_bytes([fb[((25 * 512) + 41) * 2 ], fb[(((25 * 512) + 41) * 2) + 1]]),
             0
         );
     }
@@ -4091,7 +4091,7 @@ mod vdp_exhaustive_coverage {
         let fb = ram.vdp1_framebuffers.banks[0].read().unwrap();
         // pixel at (20, 20) should be drawn inside quad
         assert_ne!(
-            u16::from_be_bytes([fb[(((20 * 512) + 20) * 2)], fb[(((20 * 512) + 20) * 2) + 1]]),
+            u16::from_be_bytes([fb[((20 * 512) + 20) * 2 ], fb[(((20 * 512) + 20) * 2) + 1]]),
             0
         );
     }
@@ -4172,8 +4172,8 @@ mod vdp_exhaustive_coverage {
         for i in 0..fb1.len() {
             // Note: color might differ slightly if polygon uses CMDCOLR exactly,
             // and sprite uses texture + palette. But we are checking geometry mask.
-            let a = fb1[i] != 0;
-            let b = fb2[i] != 0;
+            let _a = fb1[i] != 0;
+            let _b = fb2[i] != 0;
             // assert_eq!(a, b);
         }
     }
@@ -4342,7 +4342,9 @@ mod vdp_exhaustive_coverage {
             vram[7] = 0x23; // CMDCOLR raw 0x0123
             vram[10] = 0x01;
             vram[11] = 0x02;
-            vram[8] = 0x00; vram[9] = 0x20; vram[28] = 0x00;
+            vram[8] = 0x00;
+            vram[9] = 0x20;
+            vram[28] = 0x00;
             vram[29] = 0x10;
 
             // 0x4218: r=0x18, g=0x10, b=0x10
@@ -4351,7 +4353,10 @@ mod vdp_exhaustive_coverage {
                 vram[0x80 + i * 2 + 1] = 0x18;
             }
             vram[0x20] = 0x80;
-            vram[0x21] = 0x00; for i in 0x100..0x120 { vram[i] = 0xFF; }
+            vram[0x21] = 0x00;
+            for i in 0x100..0x120 {
+                vram[i] = 0xFF;
+            }
 
             for i in 0x80..0xC0 {
                 vram[i] = 0xFF;
@@ -4628,11 +4633,11 @@ mod vdp_exhaustive_coverage {
         let fb = ram.vdp1_framebuffers.banks[0].read().unwrap();
         // Edge drawn, so (15,10) is drawn. (15,15) is interior, not drawn.
         assert_ne!(
-            u16::from_be_bytes([fb[(((10 * 512) + 15) * 2)], fb[(((10 * 512) + 15) * 2) + 1]]),
+            u16::from_be_bytes([fb[((10 * 512) + 15) * 2 ], fb[(((10 * 512) + 15) * 2) + 1]]),
             0
         );
         assert_eq!(
-            u16::from_be_bytes([fb[(((15 * 512) + 15) * 2)], fb[(((15 * 512) + 15) * 2) + 1]]),
+            u16::from_be_bytes([fb[((15 * 512) + 15) * 2 ], fb[(((15 * 512) + 15) * 2) + 1]]),
             0
         );
     }
@@ -4687,7 +4692,7 @@ mod vdp_exhaustive_coverage {
         // Since CMDCOLR = FFFF, it draws.
         // We aren't fully asserting gradient, just coverage that it executes the loop for C->D
         assert_ne!(
-            u16::from_be_bytes([fb[(((5 * 512) + 0) * 2)], fb[(((5 * 512) + 0) * 2) + 1]]),
+            u16::from_be_bytes([fb[((5 * 512)) * 2 ], fb[(((5 * 512)) * 2) + 1]]),
             0
         );
     }
@@ -4722,7 +4727,7 @@ mod vdp_exhaustive_coverage {
         let fb = ram.vdp1_framebuffers.banks[0].read().unwrap();
         // Mode 3 is 128 colors, masks 0xFF to 0x7F. So not an end code. Span continues!
         assert_ne!(
-            u16::from_be_bytes([fb[(((0 * 512) + 6) * 2)], fb[(((0 * 512) + 6) * 2) + 1]]),
+            u16::from_be_bytes([fb[6 * 2 ], fb[(6 * 2) + 1]]),
             0
         );
     }
