@@ -71,6 +71,7 @@ pub struct WorkRam {
     pub smpc_clock_change: std::sync::atomic::AtomicU8, // 0 = None, 1 = 320, 2 = 352
 
     pub vdp1_draw_end_pending: std::sync::atomic::AtomicBool,
+    pub hardware_events_any: std::sync::atomic::AtomicBool,
 }
 
 impl WorkRam {
@@ -100,6 +101,7 @@ impl WorkRam {
             smpc_clock_change: std::sync::atomic::AtomicU8::new(0),
 
             vdp1_draw_end_pending: std::sync::atomic::AtomicBool::new(false),
+            hardware_events_any: std::sync::atomic::AtomicBool::new(false),
         }
     }
 

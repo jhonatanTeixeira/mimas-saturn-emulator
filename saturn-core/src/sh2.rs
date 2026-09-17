@@ -2584,23 +2584,13 @@ impl Sh2 {
             }
         }
         if effects.sound_on {
-            if let Some(ref flag) = self.m68k_control {
-                // Release: publishes every Sound RAM write this thread made
-                // before this point (the uploaded driver) to Core 4's
-                // subsequent Acquire load -- see `m68k_control`'s field doc
-                // comment.
-                flag.store(true, std::sync::atomic::Ordering::Release);
-            }
-            // Core 4 parks while SNDOFF (see `lib.rs`'s Core 4 spawn) --
-            // wake it now, exactly like SSHON already does for Core 1 just
-            // above.
             if let Some(ref sync) = self.sync {
                 sync.set_thread_active(4, true);
             }
         }
         if effects.sound_off {
-            if let Some(ref flag) = self.m68k_control {
-                flag.store(false, std::sync::atomic::Ordering::Release);
+            if let Some(ref sync) = self.sync {
+                sync.set_thread_active(4, false);
             }
         }
         if effects.system_manager_irq {
@@ -2776,48 +2766,52 @@ impl Sh2 {
 
     fn service_pending_interrupt(&mut self) {
         if !self.is_slave {
-            if self
-                .work_ram
-                .smpc_sysres_pending
-                .swap(false, std::sync::atomic::Ordering::Acquire)
-            {
-                self.reset();
-            }
-            if self
-                .work_ram
-                .smpc_nmi_pending
-                .swap(false, std::sync::atomic::Ordering::Acquire)
-            {
-                self.nmi_pending = true;
-                // §4.13: Real hardware's NMI sets ICR bit 15 (unlike Yabause).
-                self.onchip.icr |= 0x8000;
-            }
-            let clk = self
-                .work_ram
-                .smpc_clock_change
-                .swap(0, std::sync::atomic::Ordering::Acquire);
-            if clk != 0 {
-                // clk == 2 -> 352, clk == 1 -> 320
-                self.clock_hz = if clk == 2 {
-                    crate::throttle::SH2_CLOCK_28MHZ
-                } else {
-                    crate::throttle::SH2_CLOCK_26MHZ
-                };
-                self.cycles_per_line = (self.clock_hz / 60.0 / 263.0) as u32;
-            }
-            if self
-                .work_ram
-                .smpc_irq_pending
-                .swap(false, std::sync::atomic::Ordering::Acquire)
-            {
-                self.scu.system_manager();
-            }
-            if self
-                .work_ram
-                .vdp1_draw_end_pending
-                .swap(false, std::sync::atomic::Ordering::Acquire)
-            {
-                self.scu.draw_end();
+            if self.work_ram.hardware_events_any.load(std::sync::atomic::Ordering::Relaxed) {
+                self.work_ram.hardware_events_any.store(false, std::sync::atomic::Ordering::Relaxed);
+                
+                if self
+                    .work_ram
+                    .smpc_sysres_pending
+                    .swap(false, std::sync::atomic::Ordering::Acquire)
+                {
+                    self.reset();
+                }
+                if self
+                    .work_ram
+                    .smpc_nmi_pending
+                    .swap(false, std::sync::atomic::Ordering::Acquire)
+                {
+                    self.nmi_pending = true;
+                    // §4.13: Real hardware's NMI sets ICR bit 15 (unlike Yabause).
+                    self.onchip.icr |= 0x8000;
+                }
+                let clk = self
+                    .work_ram
+                    .smpc_clock_change
+                    .swap(0, std::sync::atomic::Ordering::Acquire);
+                if clk != 0 {
+                    // clk == 2 -> 352, clk == 1 -> 320
+                    self.clock_hz = if clk == 2 {
+                        crate::throttle::SH2_CLOCK_28MHZ
+                    } else {
+                        crate::throttle::SH2_CLOCK_26MHZ
+                    };
+                    self.cycles_per_line = (self.clock_hz / 60.0 / 263.0) as u32;
+                }
+                if self
+                    .work_ram
+                    .smpc_irq_pending
+                    .swap(false, std::sync::atomic::Ordering::Acquire)
+                {
+                    self.scu.system_manager();
+                }
+                if self
+                    .work_ram
+                    .vdp1_draw_end_pending
+                    .swap(false, std::sync::atomic::Ordering::Acquire)
+                {
+                    self.scu.draw_end();
+                }
             }
         }
 
@@ -2955,6 +2949,9 @@ impl Sh2 {
                 // SLEEP: PC is not advanced, wait for interrupt.
                 // Since step() already advanced self.pc by 2, we rewind it.
                 self.pc = self.pc.wrapping_sub(2);
+                if let Some(ref sync) = self.sync {
+                    sync.park_for_sleep(&self.work_ram.hardware_events_any);
+                }
                 return;
             }
             0x0023 => {
@@ -4945,6 +4942,7 @@ mod opcode_tests {
         cpu.work_ram
             .vdp1_draw_end_pending
             .store(true, std::sync::atomic::Ordering::Release);
+        cpu.work_ram.hardware_events_any.store(true, std::sync::atomic::Ordering::Release);
         cpu.sr = 0; // nothing masked
         cpu.vbr = 0x0601_0000;
         cpu.registers[15] = 0x0601_1000;
@@ -4979,6 +4977,7 @@ mod opcode_tests {
         cpu.work_ram
             .vdp1_draw_end_pending
             .store(true, std::sync::atomic::Ordering::Release);
+        cpu.work_ram.hardware_events_any.store(true, std::sync::atomic::Ordering::Release);
         cpu.sr = 0x0000_00F0; // mask level 15: everything blocked
         cpu.pc = 0x0600_0000;
         cpu.write_word(0x0600_0000, 0x0009); // NOP
@@ -5002,6 +5001,7 @@ mod opcode_tests {
         cpu.work_ram
             .vdp1_draw_end_pending
             .store(true, std::sync::atomic::Ordering::Release);
+        cpu.work_ram.hardware_events_any.store(true, std::sync::atomic::Ordering::Release);
         // VBLANK OUT is level 6
         cpu.scu.vblank_out();
 
@@ -5379,6 +5379,7 @@ mod opcode_tests {
         cpu.work_ram
             .vblank_active
             .store(true, std::sync::atomic::Ordering::Release);
+        cpu.work_ram.hardware_events_any.store(true, std::sync::atomic::Ordering::Release);
         assert_eq!(
             cpu.tvstat_word() & TVSTAT_VBLANK_BIT,
             TVSTAT_VBLANK_BIT,
@@ -5405,6 +5406,7 @@ mod opcode_tests {
         cpu.work_ram
             .vblank_active
             .store(true, std::sync::atomic::Ordering::Release);
+        cpu.work_ram.hardware_events_any.store(true, std::sync::atomic::Ordering::Release);
         assert_eq!(
             cpu.read_byte(0x25F8_0004),
             0x00,
@@ -5857,6 +5859,7 @@ mod opcode_tests {
         cpu.work_ram
             .vblank_active
             .store(true, std::sync::atomic::Ordering::Release);
+        cpu.work_ram.hardware_events_any.store(true, std::sync::atomic::Ordering::Release);
         assert_eq!(cpu.read_byte(0x05F8_0204), 0x00);
         assert_eq!(cpu.read_byte(0x05F8_0205), 0x08);
 

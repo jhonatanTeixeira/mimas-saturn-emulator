@@ -76,7 +76,7 @@ Mimas's target design decouples geometry drawing from screen composition:
 
 ### 2.3. Lock Striping and Lockless Channels
 * **Lock Striping**: High WRAM is split into 32 independent memory blocks, each protected by its own `RwLock`. If the Master SH-2 accesses variables in block 0 while the SCU DMA writes to block 15, both transactions execute in parallel without lock contention.
-* **Lockless SPSC Queues**: Hardware signals (such as DMA triggers or interrupt flags) are pushed onto lockless ring buffers, eliminating the overhead of mutex-protected system buses.
+* **Lockless SPSC Queues (Aspirational)**: Hardware signals (such as DMA triggers or interrupt flags) currently use `Arc<Mutex<InterruptQueue>>` (e.g., `Sh2::irq_in`), not yet lockless ring buffers. Moving them to lockless SPSC queues is a planned optimization to eliminate the overhead of mutex-protected system buses.
 
 ---
 

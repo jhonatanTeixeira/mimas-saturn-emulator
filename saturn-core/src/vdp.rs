@@ -743,19 +743,34 @@ fn render_nbg_layer(
         bitmap_size,
     ) = match layer {
         0 => {
-            let pwh = if regs.chctla_nbg0_pattern_size() == 0 { 1 } else { 2 };
+            let pwh = if regs.chctla_nbg0_pattern_size() == 0 {
+                1
+            } else {
+                2
+            };
             let (pw, ph) = match regs.plsz_nbg0() {
-                0 => (1, 1), 1 => (2, 1), 2 => (1, 1), 3 => (2, 2), _ => (1, 1),
+                0 => (1, 1),
+                1 => (2, 1),
+                2 => (1, 1),
+                3 => (2, 2),
+                _ => (1, 1),
             };
             (
                 pwh,
-                if regs.pncn0_patterndatasize() != 0 { 1 } else { 2 },
-                pw, ph, 2,
+                if regs.pncn0_patterndatasize() != 0 {
+                    1
+                } else {
+                    2
+                },
+                pw,
+                ph,
+                2,
                 regs.n0chcn(),
                 regs.mpofn_nbg0(),
                 regs.mpabn0(),
                 regs.mpcdn0(),
-                regs.scxn0(), regs.scyn0(),
+                regs.scxn0(),
+                regs.scyn0(),
                 regs.pncn0_supplementary_char(), // was & 0x3FF
                 regs.pncn0_auxmode(),
                 regs.craofa_nbg0(),
@@ -765,19 +780,34 @@ fn render_nbg_layer(
             )
         }
         1 => {
-            let pwh = if regs.chctla_nbg1_pattern_size() == 0 { 1 } else { 2 };
+            let pwh = if regs.chctla_nbg1_pattern_size() == 0 {
+                1
+            } else {
+                2
+            };
             let (pw, ph) = match regs.plsz_nbg1() {
-                0 => (1, 1), 1 => (2, 1), 2 => (1, 1), 3 => (2, 2), _ => (1, 1),
+                0 => (1, 1),
+                1 => (2, 1),
+                2 => (1, 1),
+                3 => (2, 2),
+                _ => (1, 1),
             };
             (
                 pwh,
-                if regs.pncn1_patterndatasize() != 0 { 1 } else { 2 },
-                pw, ph, 2,
+                if regs.pncn1_patterndatasize() != 0 {
+                    1
+                } else {
+                    2
+                },
+                pw,
+                ph,
+                2,
                 regs.n1chcn(),
                 regs.mpofn_nbg1(),
                 regs.mpabn1(),
                 regs.mpcdn1(),
-                regs.scxn1(), regs.scyn1(),
+                regs.scxn1(),
+                regs.scyn1(),
                 regs.pncn1_supplementary_char(),
                 regs.pncn1_auxmode(),
                 regs.craofa_nbg1(),
@@ -787,45 +817,73 @@ fn render_nbg_layer(
             )
         }
         2 => {
-            let pwh = if regs.chctlb_nbg2_pattern_size() == 0 { 1 } else { 2 };
+            let pwh = if regs.chctlb_nbg2_pattern_size() == 0 {
+                1
+            } else {
+                2
+            };
             let (pw, ph) = match regs.plsz_nbg2() {
-                0 => (1, 1), 1 => (2, 1), 2 => (1, 1), 3 => (2, 2), _ => (1, 1),
+                0 => (1, 1),
+                1 => (2, 1),
+                2 => (1, 1),
+                3 => (2, 2),
+                _ => (1, 1),
             };
             (
                 pwh,
-                if regs.pncn2_patterndatasize() != 0 { 1 } else { 2 },
-                pw, ph, 2,
+                if regs.pncn2_patterndatasize() != 0 {
+                    1
+                } else {
+                    2
+                },
+                pw,
+                ph,
+                2,
                 regs.n2chcn(),
                 regs.mpofn_nbg2(),
                 regs.mpabn2(),
                 regs.mpcdn2(),
-                regs.scxn2(), regs.scyn2(),
+                regs.scxn2(),
+                regs.scyn2(),
                 regs.pncn2_supplementary_char(),
                 regs.pncn2_auxmode(),
                 regs.craofa_nbg2(),
                 regs.n2_transparency_enable(),
-                false, 0,
+                false,
+                0,
             )
         }
         3 => {
             let pwh = if regs.n3chsz() == 0 { 1 } else { 2 };
             let (pw, ph) = match regs.plsz_nbg3() {
-                0 => (1, 1), 1 => (2, 1), 2 => (1, 1), 3 => (2, 2), _ => (1, 1),
+                0 => (1, 1),
+                1 => (2, 1),
+                2 => (1, 1),
+                3 => (2, 2),
+                _ => (1, 1),
             };
             (
                 pwh,
-                if regs.pncn3_patterndatasize() != 0 { 1 } else { 2 },
-                pw, ph, 2,
+                if regs.pncn3_patterndatasize() != 0 {
+                    1
+                } else {
+                    2
+                },
+                pw,
+                ph,
+                2,
                 regs.n3chcn(), // fixes colornumber=0 hardcode
                 regs.mpofn_nbg3(),
                 regs.mpabn3(),
                 regs.mpcdn3(),
-                regs.scxn3(), regs.scyn3(),
+                regs.scxn3(),
+                regs.scyn3(),
                 regs.pncn3_supplementary_char(),
                 regs.pncn3_auxmode(),
                 regs.craofa_nbg3(),
                 regs.n3_transparency_enable(),
-                false, 0,
+                false,
+                0,
             )
         }
         _ => unreachable!(),
@@ -840,18 +898,34 @@ fn render_nbg_layer(
     let mut bmp_height = 256;
     if is_bitmap {
         match bitmap_size {
-            0 => { bmp_width = 512; bmp_height = 256; }
-            1 => { bmp_width = 512; bmp_height = 512; }
-            2 => { bmp_width = 1024; bmp_height = 256; }
-            3 => { bmp_width = 1024; bmp_height = 512; }
+            0 => {
+                bmp_width = 512;
+                bmp_height = 256;
+            }
+            1 => {
+                bmp_width = 512;
+                bmp_height = 512;
+            }
+            2 => {
+                bmp_width = 1024;
+                bmp_height = 256;
+            }
+            3 => {
+                bmp_width = 1024;
+                bmp_height = 512;
+            }
             _ => {}
         }
     }
 
     let screen_vars = if is_bitmap {
         crate::vdp2::ScreenVars {
-            pagepixelwh: 0, planepixelwidth: 0, planepixelheight: 0, screenwidth: 0,
-            xmask: bmp_width - 1, ymask: bmp_height - 1,
+            pagepixelwh: 0,
+            planepixelwidth: 0,
+            planepixelheight: 0,
+            screenwidth: 0,
+            xmask: bmp_width - 1,
+            ymask: bmp_height - 1,
         }
     } else {
         crate::vdp2::setup_screen_vars(patternwh, planew, planeh, mapwh)
@@ -859,7 +933,15 @@ fn render_nbg_layer(
 
     if !is_bitmap {
         crate::vdp2::generate_plane_addr_table(
-            &mut state.planetbl, mpofn, mpab, mpcd, patterndatasize, patternwh, planew, planeh, vram_8mbit,
+            &mut state.planetbl,
+            mpofn,
+            mpab,
+            mpcd,
+            patterndatasize,
+            patternwh,
+            planew,
+            planeh,
+            vram_8mbit,
         );
     }
 
@@ -887,14 +969,37 @@ fn render_nbg_layer(
                 (base, pal, 0, bmp_width)
             } else {
                 crate::vdp2::map_calc_xy(
-                    &mut state, actual_x, actual_y, &screen_vars, patternwh, patterndatasize, mapwh, supplementdata, auxmode, colornumber, vram_8mbit, vdp2_vram,
+                    &mut state,
+                    actual_x,
+                    actual_y,
+                    &screen_vars,
+                    patternwh,
+                    patterndatasize,
+                    mapwh,
+                    supplementdata,
+                    auxmode,
+                    colornumber,
+                    vram_8mbit,
+                    vdp2_vram,
                 );
                 let cell = state.pipe[0];
                 (cell.charaddr, cell.paladdr, cell.flipfunction, 8)
             };
 
             if let Some(color) = crate::vdp2::fetch_pixel(
-                charaddr, paladdr, actual_x, actual_y, flipfunction, patternwh, colornumber, transparency_enable, coloroffset as u32, cram_mode, cellw, vdp2_vram, vdp2_cram,
+                charaddr,
+                paladdr,
+                actual_x,
+                actual_y,
+                flipfunction,
+                patternwh,
+                colornumber,
+                transparency_enable,
+                coloroffset as u32,
+                cram_mode,
+                cellw,
+                vdp2_vram,
+                vdp2_cram,
             ) {
                 frame.pixels[y * width + x] = color;
             }
@@ -956,7 +1061,7 @@ pub fn render_back_screen(ram: &WorkRam) -> Framebuffer {
     if disp_enabled {
         let n0chcn = regs.n0chcn();
         let n1chcn = regs.n1chcn();
-        
+
         let mut n1_suppressed = false;
         let mut n2_suppressed = false;
         let mut n3_suppressed = false;
@@ -973,18 +1078,50 @@ pub fn render_back_screen(ram: &WorkRam) -> Framebuffer {
         if (nbg0_enabled && n0chcn == 4) || (nbg1_enabled && n1chcn >= 2) {
             n3_suppressed = true;
         }
-        
+
         if nbg0_enabled {
-            render_nbg_layer(&regs, &mut frame, width, height, &vdp2_vram[..], &vdp2_cram[..], 0);
+            render_nbg_layer(
+                &regs,
+                &mut frame,
+                width,
+                height,
+                &vdp2_vram[..],
+                &vdp2_cram[..],
+                0,
+            );
         }
         if nbg1_enabled && !n1_suppressed {
-            render_nbg_layer(&regs, &mut frame, width, height, &vdp2_vram[..], &vdp2_cram[..], 1);
+            render_nbg_layer(
+                &regs,
+                &mut frame,
+                width,
+                height,
+                &vdp2_vram[..],
+                &vdp2_cram[..],
+                1,
+            );
         }
         if regs.n2on() && !n2_suppressed {
-            render_nbg_layer(&regs, &mut frame, width, height, &vdp2_vram[..], &vdp2_cram[..], 2);
+            render_nbg_layer(
+                &regs,
+                &mut frame,
+                width,
+                height,
+                &vdp2_vram[..],
+                &vdp2_cram[..],
+                2,
+            );
         }
         if regs.n3on() && !n3_suppressed {
-            render_nbg_layer(&regs, &mut frame, width, height, &vdp2_vram[..], &vdp2_cram[..], 3);
+            render_nbg_layer(
+                &regs,
+                &mut frame,
+                width,
+                height,
+                &vdp2_vram[..],
+                &vdp2_cram[..],
+                3,
+            );
         }
     }
 

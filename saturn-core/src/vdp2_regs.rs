@@ -1,4 +1,3 @@
-
 pub struct Vdp2Registers {
     pub regs: [u16; 256], // 0x200 bytes = 256 words
 }

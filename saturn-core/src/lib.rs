@@ -423,7 +423,7 @@ impl SaturnSystem {
                             &ram[0..16]
                         );
                     }
-                    while m68k_control_c4.load(Ordering::Acquire) {
+                    loop {
                         if sync_c4.is_shutdown() {
                             return;
                         }
@@ -433,12 +433,13 @@ impl SaturnSystem {
                                 .advance(crate::throttle::M68K_NOMINAL_CYCLES_PER_INSTRUCTION);
                         }
                         cycles = cycles.wrapping_add(2);
-                        sync_c4.sync_core(4, cycles);
-                        thread::yield_now();
+                        if !sync_c4.sync_core(4, cycles) {
+                            break;
+                        }
                     }
                     // SNDOFF fired -- stop and re-park.
                     m68k.stop();
-                    sync_c4.set_thread_active(4, false);
+                    // Already inactive (set by SH-2/SMPC), just go back to park
                 }
             })
             .expect("failed to spawn Core 4 (MC68000 Sound CPU) thread");
@@ -466,21 +467,20 @@ impl SaturnSystem {
             .spawn(move || {
                 let _guard = PanicGuard::new(sync_c5.clone(), arbiter_c5);
                 let mut cycles = 0u64;
-                let mut scsp_throttle = crate::throttle::ClockThrottle::new(
-                    crate::throttle::SCSP_SAMPLE_RATE_HZ,
-                    speed_c5,
-                );
                 while !shutdown_c5.load(Ordering::Relaxed) {
                     if sync_c5.is_shutdown() {
                         break;
                     }
                     // Synthesize 128 audio samples per step
                     scsp_c5.lock().unwrap().synthesize(&work_ram_c5, 128);
-                    scsp_throttle.advance(128);
-                    let step = (sync_c5.slack_limit() / 2).max(2).min(500);
+                    // 28.6364 MHz / 44100 Hz = ~649.35 CPU cycles per sample
+                    let step = (128 * 649) as u64;
                     cycles = cycles.wrapping_add(step);
+                    // No `thread::yield_now()` after this: `sync_core` already
+                    // Condvar-blocks whenever this core has drifted past the slack
+                    // limit, so the yield was a bare syscall per iteration. See
+                    // `Sh2::run_loop`'s comment for the measured cost.
                     sync_c5.sync_core(5, cycles);
-                    thread::yield_now();
                 }
             })
             .expect("failed to spawn Core 5 (SCSP Sound Synthesizer) thread");
@@ -531,8 +531,11 @@ impl SaturnSystem {
                         }
                         let step = (sync_c6.slack_limit() / 2).max(2).min(500);
                         cycles = cycles.wrapping_add(step);
+                        // No `thread::yield_now()` after this: `sync_core` already
+                        // Condvar-blocks whenever this core has drifted past the slack
+                        // limit, so the yield was a bare syscall per iteration. See
+                        // `Sh2::run_loop`'s comment for the measured cost.
                         sync_c6.sync_core(6, cycles);
-                        thread::yield_now();
                     }
                     sync_c6.set_thread_active(6, false);
                 }
@@ -601,11 +604,11 @@ impl SaturnSystem {
                             sync_c7.set_thread_active(1, false);
                         }
                         if effects.sound_on {
-                            m68k_control_c7.store(true, std::sync::atomic::Ordering::Release);
+                            sync_c7.set_thread_active(4, true);
                             sync_c7.set_thread_active(4, true);
                         }
                         if effects.sound_off {
-                            m68k_control_c7.store(false, std::sync::atomic::Ordering::Release);
+                            sync_c7.set_thread_active(4, false);
                         }
                         did_work = true;
                     }

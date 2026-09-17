@@ -1,6 +1,7 @@
 use std::sync::{Arc, Condvar, Mutex};
 
 pub struct LockStepSync {
+    shutdown_flag: std::sync::atomic::AtomicBool,
     num_threads: usize,
     slack_limit: u64,
     state: Mutex<SyncState>,
@@ -33,6 +34,7 @@ impl LockStepSync {
             panic!("Invalid thread count: {}", num_threads);
         }
         Self {
+            shutdown_flag: std::sync::atomic::AtomicBool::new(false),
             num_threads,
             slack_limit,
             state: Mutex::new(SyncState {
@@ -49,14 +51,18 @@ impl LockStepSync {
         self.slack_limit
     }
 
-    pub fn sync_core(&self, core_id: usize, current_cycles: u64) {
+pub fn sync_core(&self, core_id: usize, current_cycles: u64) -> bool {
         let mut state = self.state.lock().unwrap();
         if state.shutdown {
-            return;
+            return false;
         }
 
         if core_id >= self.num_threads {
             panic!("Invalid core ID: {}", core_id);
+        }
+
+        if !state.active[core_id] {
+            return false;
         }
 
         state.cycles[core_id] = current_cycles;
@@ -94,6 +100,7 @@ impl LockStepSync {
 
         // Notify other threads because we have updated cycles or woke up
         self.condvar.notify_all();
+        true
     }
 
     pub fn set_thread_active(&self, core_id: usize, active: bool) -> u64 {
@@ -155,6 +162,13 @@ impl LockStepSync {
         !state.shutdown
     }
 
+    pub fn park_for_sleep(&self, events_any: &std::sync::atomic::AtomicBool) {
+        let mut state = self.state.lock().unwrap();
+        while !state.shutdown && !events_any.load(std::sync::atomic::Ordering::Relaxed) {
+            state = self.condvar.wait(state).unwrap();
+        }
+    }
+
     pub fn request_shutdown(&self) {
         let mut state = self.state.lock().unwrap();
         state.shutdown = true;
@@ -163,8 +177,7 @@ impl LockStepSync {
     }
 
     pub fn is_shutdown(&self) -> bool {
-        let state = self.state.lock().unwrap();
-        state.shutdown
+        self.shutdown_flag.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

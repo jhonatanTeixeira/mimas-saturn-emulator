@@ -185,29 +185,30 @@ pub fn map_calc_xy(
         let multiplier = if patterndatasize == 1 { 2 } else { 4 };
         let pipe_addr = plane_addr + (offset * multiplier);
 
-        let (charaddr, paladdr, flipfunction, specialfunction, specialcolorfunction) = if (pipe_addr as usize) + 1 < vram.len() {
-            let tmp1 =
-                u16::from_be_bytes([vram[pipe_addr as usize], vram[(pipe_addr as usize) + 1]]);
-            let mut tmp2 = 0;
-            if patterndatasize == 2 && (pipe_addr as usize) + 3 < vram.len() {
-                tmp2 = u16::from_be_bytes([
-                    vram[(pipe_addr as usize) + 2],
-                    vram[(pipe_addr as usize) + 3],
-                ]);
-            }
-            pattern_addr(
-                tmp1,
-                tmp2,
-                supplementdata,
-                auxmode,
-                patternwh,
-                patterndatasize,
-                colornumber,
-                vram_8mbit,
-            )
-        } else {
-            (0, 0, 0, 0, 0)
-        };
+        let (charaddr, paladdr, flipfunction, specialfunction, specialcolorfunction) =
+            if (pipe_addr as usize) + 1 < vram.len() {
+                let tmp1 =
+                    u16::from_be_bytes([vram[pipe_addr as usize], vram[(pipe_addr as usize) + 1]]);
+                let mut tmp2 = 0;
+                if patterndatasize == 2 && (pipe_addr as usize) + 3 < vram.len() {
+                    tmp2 = u16::from_be_bytes([
+                        vram[(pipe_addr as usize) + 2],
+                        vram[(pipe_addr as usize) + 3],
+                    ]);
+                }
+                pattern_addr(
+                    tmp1,
+                    tmp2,
+                    supplementdata,
+                    auxmode,
+                    patternwh,
+                    patterndatasize,
+                    colornumber,
+                    vram_8mbit,
+                )
+            } else {
+                (0, 0, 0, 0, 0)
+            };
 
         state.pipe[0] = Vdp2CellInfo {
             addr: pipe_addr,
@@ -286,7 +287,13 @@ pub fn pattern_addr(
     }
     charaddr *= 0x20;
 
-    (charaddr, paladdr, flipfunction, specialfunction, specialcolorfunction)
+    (
+        charaddr,
+        paladdr,
+        flipfunction,
+        specialfunction,
+        specialcolorfunction,
+    )
 }
 
 pub fn fetch_pixel(
@@ -571,7 +578,8 @@ mod tests {
     fn colornumber_2_ignores_paladdr() {
         let cram = vec![0u8; 0x1000];
         let mut vram = vec![0u8; 0x80000];
-        vram[0] = 0x12; vram[1] = 0x34;
+        vram[0] = 0x12;
+        vram[1] = 0x34;
         let pixel = fetch_pixel(0, 0x9999, 0, 0, 0, 1, 2, false, 0, 0, 8, &vram, &cram);
         assert!(pixel.is_some() || pixel.is_none());
     }
@@ -581,7 +589,12 @@ mod tests {
         let (charaddr, paladdr, flip, sf, scf) = pattern_addr(
             0xC000 | 0x7F, // flip=3, paladdr=0x7F
             0x7FFF,
-            0, 0, 1, 2, 0, true
+            0,
+            0,
+            1,
+            2,
+            0,
+            true,
         );
         assert_eq!(charaddr, 0x7FFF * 0x20);
         assert_eq!(flip, 3);

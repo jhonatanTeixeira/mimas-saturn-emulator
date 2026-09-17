@@ -31,6 +31,17 @@ This document details the architectural design for the **Mimas** Sega Saturn emu
 
 ---
 
+---
+
+### 1.2b. Active IRQ Sampling via Single `Relaxed` Load
+* **Decision**: For sampling hardware signals *within* a CPU's execution loop (where parking on a `Condvar` is impossible because the CPU is actively executing instructions), polling is restricted to a maximum of one `Relaxed` load per instruction.
+* **Details**:
+  * Real hardware samples the IRQ lines (like the SH-2's IRL pins) at instruction boundaries. A CPU cannot park while it is running code.
+  * To model this without violating the spirit of §1.2 or destroying performance, the CPU loop may read a single summary word (e.g., an `AtomicU8` representing the highest pending interrupt level) using `Ordering::Relaxed` exactly once per instruction.
+  * Read-Modify-Write (RMW) operations, locking, or notifying must only occur *after* this relaxed load indicates actionable work. This serves as a low-overhead, honest representation of a physical pin check, complementing §1.2's rule for thread-to-thread wakeup.
+
+---
+
 ### 1.3. Region-Granular Shared Memory via `Arc<RwLock<T>>`
 * **Decision**: We forbid a single global system lock.
 * **Details**: Memory is divided into isolated physical regions. A thread must only lock the specific memory region it accesses.
@@ -58,7 +69,8 @@ This document details the architectural design for the **Mimas** Sega Saturn emu
   * If a CPU core executes a `SLEEP` opcode or spins on a peripheral flag (e.g., waiting for CD-ROM read), it yields execution.
   * When a thread has no active work (e.g., the Slave SH-2 is parked, or the SCU DSP is idle), it is parked on a `Condvar` or blocks on a channel. It remains suspended until an external hardware event (an interrupt or write) wakes it up.
   * **Timing-generator components (VDP2's H-Blank/V-Blank, SCU timers) are driven by real Master SH-2 cycles, never a wall clock.** This mirrors the reference emulator's own architecture exactly, not a Mimas invention: Yabause's main loop ties `yabsys.LineCount`/VBlank generation and even SCSP/SMPC/CD-block pacing to `sh2cycles` (real executed CPU cycles per batch), with no independent host-clock timer anywhere (`yabause/src/yabause.c:762-810`). Mimas's Master SH-2 (`Sh2::step`) batches its own real executed cycles (`SH2_CYCLES_PER_LINE`, `SCU_TIMER_BATCH_CYCLES`) and calls into `Scu::advance_video_line`/`Scu::timer1_tick` directly -- the *event* that wakes a parked component (e.g. Core 3, for the actual VDP2 frame render) is Master SH-2 crossing a cycle threshold, not a fixed real-time interval. A wall-clock-timed version of this was tried and measured as a real regression (see `history.md`, the chapter on Core 3's redesign): it broke the bounded-slack lockstep model in §1.4, silently throttling Master SH-2 down to the timer thread's own wall-clock cadence.
-  * **Known gap, not a rule exception**: Core 5 (SCSP) still runs a continuous loop today, because real hardware's audio synthesizer genuinely never stops regardless of what any CPU is doing -- this is tracked as follow-up work (moving its own pacing onto the same cycle-batched model, or an equivalent), not treated as satisfying this section's decision. See `CLAUDE.md`'s "Known architecture debt" for the current, honest state of every component thread against this rule.
+  * **Known gap, not a rule exception**: Core 5 (SCSP) still runs a continuous loop today...
+  * **Known violations**: `SLEEP` opcodes currently spin without parking, and Core 1 fails to park correctly after an `SSHOFF` command. See `CLAUDE.md`'s "Known architecture debt" for the current, honest state of every component thread against this rule.
 
 ---
 
