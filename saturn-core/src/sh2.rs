@@ -2457,6 +2457,7 @@ impl Sh2 {
                     }
                     if let Some(ref sync) = self.sync {
                         sync.set_thread_active(3, true);
+                        sync.set_thread_active(5, true);
                         if let Some(ref cs2) = self.cs2 {
                             cs2.lock().unwrap().vblank_pending = true;
                             sync.set_thread_active(7, true);

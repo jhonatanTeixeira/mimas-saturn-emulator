@@ -599,13 +599,13 @@ def self_test() -> int:
     answer taken from `history.md` / `docs/current_review.md`.
     """
     cases = [
-        ("9354fd3", "atomic-has-producer", True,
+        ("079738b", "atomic-has-producer", True,
          "summary word never raised in production -- this broke the BIOS boot"),
-        ("9354fd3", "field-is-written", True,
+        ("079738b", "field-is-written", True,
          "LockStepSync::shutdown_flag declared, read, never stored"),
-        ("194572f", "atomic-has-producer", False,
+        ("8025948", "atomic-has-producer", False,
          "the commit before -- boot worked, so the rule must stay quiet"),
-        ("194572f", "thin-instruction-path", True,
+        ("8025948", "thin-instruction-path", True,
          "five unconditional swap() calls per instruction in service_pending_interrupt"),
     ]
     # Cases with no commit to point at: the shapes a rule must not be blind to.

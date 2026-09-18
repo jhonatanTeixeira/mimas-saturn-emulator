@@ -563,66 +563,66 @@ explicitly labelled as one.
 
 ### 4.1 Priority
 
-- [ ] Read `PRINA` `0x0F8` (NBG0 bits 0-2, NBG1 bits 8-10), `PRINB` `0x0FA` (NBG2, NBG3),
+- [x] Read `PRINA` `0x0F8` (NBG0 bits 0-2, NBG1 bits 8-10), `PRINB` `0x0FA` (NBG2, NBG3),
       `PRIR` `0x0FC` (RBG0) (§A.14).
-- [ ] **Priority 0 means "do not display."** A pixel with priority 0 is never stored; the
+- [x] **Priority 0 means "do not display."** A pixel with priority 0 is never stored; the
       resolution scan runs 7 down to 1 (§A.14, §B.9). Get this right at the *store* site, not the
       scan site, so an untouched buffer slot and a priority-0 pixel are indistinguishable — which
       is exactly the invariant §B.9 relies on.
-- [ ] `dig_pixel` (§B.9): for `priority` 7→1, for `layer` from `SPRITE` down to `NBG3`, collect
+- [x] `dig_pixel` (§B.9): for `priority` 7→1, for `layer` from `SPRITE` down to `NBG3`, collect
       matching pixels until two are found. Layer indices are `NBG3=0, NBG2=1, NBG1=2, NBG0=3,
       RBG0=4, SPRITE=5`, so the equal-priority tie-break is
       **sprite > RBG0 > NBG0 > NBG1 > NBG2 > NBG3**. Only the top two are ever needed, because
       colour calculation blends exactly two.
-- [ ] If fewer than two pixels are found, the back screen fills the remaining slot; if two are
+- [x] If fewer than two pixels are found, the back screen fills the remaining slot; if two are
       found the back screen is skipped entirely (§B.9).
-- [ ] Layer buffers must be fully zeroed each frame (`TitanErase` equivalent), including the
+- [x] Layer buffers must be fully zeroed each frame (`TitanErase` equivalent), including the
       priority byte — §B.9 notes the scan matches on priority alone, not on the pixel being
       nonzero, so a stale priority from the previous frame resurrects a stale pixel.
-- [ ] `SFPRMD` `0x0EA` special priority modes (§A.13): mode 0 verbatim; mode 1 (per tile) applies
+- [x] `SFPRMD` `0x0EA` special priority modes (§A.13): mode 0 verbatim; mode 1 (per tile) applies
       `priority = (priority & 0xE) | (specialfunction & 1)` **inside pattern decode**, so tile
       layers only; mode 2 (per pixel) applies in the scroll draw loop only, gated on
       `specialfunction & 1` **and** `PixelIsSpecialPriority`; mode 3 is undocumented and treated
       as mode 0.
-- [ ] `SFSEL` `0x024` / `SFCODE` `0x026` (§A.4): `SFCODE` holds code A in bits 0-7 and code B in
+- [x] `SFSEL` `0x024` / `SFCODE` `0x026` (§A.4): `SFCODE` holds code A in bits 0-7 and code B in
       bits 8-15; each `SFSEL` bit picks one per layer. Each bit of the selected byte enables a
       *pair* of colour codes matched against `dot & 0xF`. Note §A.4's observation that
       `PixelIsSpecialPriority` and `GetAlpha` express the same pair mapping two different ways —
       implement one helper and use it for both, resolving the inconsistency in Mimas's favour.
-- [ ] `SFPRMD & 0x3FF` nonzero also forces a layer to be drawn even when its priority register
+- [x] `SFPRMD & 0x3FF` nonzero also forces a layer to be drawn even when its priority register
       reads 0 (§A.13). Easy to miss; it changes which layers exist at all.
 
 ### 4.2 Colour calculation
 
-- [ ] Introduce the intermediate pixel format (§0.2): 32-bit, **6-bit alpha in bits 24-29**, flag
+- [x] Introduce the intermediate pixel format (§0.2): 32-bit, **6-bit alpha in bits 24-29**, flag
       in bit 31. This replaces `rgb555_to_xrgb8888`'s direct-to-final output (`vdp.rs:65-73`) for
       everything inside the pipeline; the 5→8 expansion and the final conversion move to the end.
-- [ ] `CCRNA` `0x108`, `CCRNB` `0x10A`, `CCRR` `0x10C` ratios: `alpha = ((~CCR & 0x1F) << 1) + 1`
+- [x] `CCRNA` `0x108`, `CCRNB` `0x10A`, `CCRR` `0x10C` ratios: `alpha = ((~CCR & 0x1F) << 1) + 1`
       per §A.14's table — **inverted and doubled**, so register 0 → alpha `0x3F` (opaque) and
       register 31 → `0x01`.
-- [ ] `CCRLB` `0x10E` is the documented odd one out: `alpha = (CCRLB & 0x1F) << 1`, not inverted,
+- [x] `CCRLB` `0x10E` is the documented odd one out: `alpha = (CCRLB & 0x1F) << 1`, not inverted,
       no `+1`, opposite direction (§A.14). Implement as documented and comment that the source
       does not establish whether it is deliberate.
-- [ ] `CCCTL` `0x0EC`: per-layer enables (bits 0-4, bit 6 sprite), global bit 8 = additive,
+- [x] `CCCTL` `0x0EC`: per-layer enables (bits 0-4, bit 6 sprite), global bit 8 = additive,
       bit 9 = bottom-ratio. Bit 8 takes precedence over bit 9. Record §A.14's flagged conflict
       with `vdp2debug.c`'s "gradation" reading of bits 8-10 — implement the renderer's reading,
       note the other.
-- [ ] The `0x80` alpha bit (§B.10): set when the global mode bit *and* the layer's own enable bit
+- [x] The `0x80` alpha bit (§B.10): set when the global mode bit *and* the layer's own enable bit
       are both set; it lands at bit 31 and is what `TitanTransBit` tests. In ADD and BOTTOM modes
       participation requires both bits; in TOP mode participation is purely `alpha < 0x3F`.
-- [ ] The three blend functions (§B.10), each with its exact arithmetic:
+- [x] The three blend functions (§B.10), each with its exact arithmetic:
       - **Top**: `alpha = (alpha_of(top) << 2) + 3`; `out = (top*alpha + bottom*(0xFF-alpha))/0xFF`
         per channel; output alpha forced `0x3F`.
       - **Bottom**: returns `top` unchanged if bit 31 is clear; otherwise uses the *bottom* pixel's
         alpha as the ratio and **preserves** the top pixel's alpha rather than forcing `0x3F`.
       - **Add**: per-channel saturating addition, alpha forced `0x3F`.
-- [ ] `SFCCMD` `0x0EE` (§A.14): mode 0 unconditional; mode 1 requires `specialcolorfunction & 1`;
+- [x] `SFCCMD` `0x0EE` (§A.14): mode 0 unconditional; mode 1 requires `specialcolorfunction & 1`;
       mode 2 additionally requires the SFCODE colour-code bit; mode 3 requires the preserved CRAM
       bit 15 (pixel bit 31).
-- [ ] Final conversion (§B.10): `((pixel & 0x3F000000) << 2) + 0x03000000 | (pixel & 0x00FFFFFF)`
+- [x] Final conversion (§B.10): `((pixel & 0x3F000000) << 2) + 0x03000000 | (pixel & 0x00FFFFFF)`
       — note the `+` rather than `|`, which is what makes alpha `0x3F` produce exactly `0xFF`.
       Then Mimas's own 5→8 expansion and XRGB8888 packing for `minifb`.
-- [ ] **Do not implement the simplified compositing path** (`TitanRenderLinesSimplified`, §B.10).
+- [x] **Do not implement the simplified compositing path** (`TitanRenderLinesSimplified`, §B.10).
       It is a performance specialisation whose four guard conditions (`CCCTL & 0x807F == 0`,
       `SFPRMD & 0x3FF == 0`, `LNCLEN & 0x1F == 0`, `SDCTL & 0x13F == 0`) exist to make it
       behaviourally equivalent to the general path. Adding a second implementation of the same
@@ -631,38 +631,38 @@ explicitly labelled as one.
 
 ### 4.3 Shadows
 
-- [ ] `SDCTL` `0x0E2` per-layer bits 0-4 → `shadow_enabled`, stored on every written pixel.
+- [x] `SDCTL` `0x0E2` per-layer bits 0-4 → `shadow_enabled`, stored on every written pixel.
       **It means "this layer accepts being shadowed", not "this layer casts a shadow"** — it is
       read from the pixel *below* (§A.12, §B.11).
-- [ ] The three shadow paths (§B.11): transparent-MSB shadow, self-shadow (gated on
+- [x] The three shadow paths (§B.11): transparent-MSB shadow, self-shadow (gated on
       `!(SPCTL & 0x10)`), normal shadow. All three blend with `0x20000000` — alpha `0x20`, RGB 0,
       i.e. roughly 50% toward black.
-- [ ] §B.11 notes Yabause reads the *global* `SPCTL` here rather than a snapshot, which it calls a
+- [x] §B.11 notes Yabause reads the *global* `SPCTL` here rather than a snapshot, which it calls a
       thread-safety wart. Mimas's snapshot model (§1.1) fixes this for free; note it as a
       deliberate improvement rather than silently diverging.
 
 ### 4.4 Testing — Phase 4
 
-- [ ] `priority_zero_is_never_stored` — a layer with priority 0 must not appear even when it is
+- [x] `priority_zero_is_never_stored` — a layer with priority 0 must not appear even when it is
       the only layer with a pixel.
-- [ ] `equal_priority_tie_break_order` — six layers all at the same priority, distinct colours,
+- [x] `equal_priority_tie_break_order` — six layers all at the same priority, distinct colours,
       asserting the sprite > RBG0 > NBG0 > NBG1 > NBG2 > NBG3 order. One test, six sub-assertions
       built by disabling one layer at a time.
-- [ ] `back_screen_fills_the_second_slot_when_only_one_layer_wrote`.
-- [ ] `two_layers_found_skips_the_back_screen` — assert a back screen colour that would be
+- [x] `back_screen_fills_the_second_slot_when_only_one_layer_wrote`.
+- [x] `two_layers_found_skips_the_back_screen` — assert a back screen colour that would be
       visible if it leaked.
-- [ ] `blend_top_ratio_matches_hand_computed_arithmetic` — pick `CCRNA = 15`, hand-compute
+- [x] `blend_top_ratio_matches_hand_computed_arithmetic` — pick `CCRNA = 15`, hand-compute
       `alpha = ((~15 & 0x1F) << 1) + 1 = 0x21`, then `(0x21 << 2) + 3 = 0x87`, then the per-channel
       mix for two chosen colours. Assert the exact byte. Repeat for `blend_add` (with a saturating
       case) and `blend_bottom` (including the pass-through when bit 31 is clear).
-- [ ] `ccrlb_is_not_inverted` — asserts the documented asymmetry explicitly, so that a future
+- [x] `ccrlb_is_not_inverted` — asserts the documented asymmetry explicitly, so that a future
       "consistency fix" that inverts it fails a test instead of silently changing output.
-- [ ] `sfprmd_mode_1_replaces_priority_bit_0_from_the_pattern_name` and
+- [x] `sfprmd_mode_1_replaces_priority_bit_0_from_the_pattern_name` and
       `sfprmd_mode_2_uses_the_pixel_colour_code`.
-- [ ] `sfprmd_nonzero_forces_a_priority_zero_layer_to_draw`.
-- [ ] `shadow_enabled_is_read_from_the_layer_below` — two layers, `SDCTL` set on the *bottom* one
+- [x] `sfprmd_nonzero_forces_a_priority_zero_layer_to_draw`.
+- [x] `shadow_enabled_is_read_from_the_layer_below` — two layers, `SDCTL` set on the *bottom* one
       only, asserting the shadow applies; and the inverse fixture asserting it does not.
-- [ ] `stale_priority_does_not_survive_a_frame` — render frame 1 with a layer, frame 2 with it
+- [x] `stale_priority_does_not_survive_a_frame` — render frame 1 with a layer, frame 2 with it
       disabled, assert frame 2 shows the back screen. Catches an incomplete erase.
 
 ---

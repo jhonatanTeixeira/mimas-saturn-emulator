@@ -335,6 +335,7 @@ impl SaturnSystem {
             .spawn(move || {
                 let _guard = PanicGuard::new(sync_c3.clone(), arbiter_c3);
                 sync_c3.set_thread_active(3, false);
+                let mut layer_buffers = crate::vdp2::LayerBuffers::new();
                 let mut cycles = 0u64;
                 let mut last_logged: Option<(u16, u16)> = None;
                 loop {
@@ -350,7 +351,7 @@ impl SaturnSystem {
                             scu_c3.draw_end();
                         }
                     }
-                    let frame = crate::vdp::render_back_screen(&work_ram_c3);
+                    let frame = crate::vdp::render_frame(&work_ram_c3, &mut layer_buffers);
                     if std::env::var("MIMAS_DEBUG_VDP2").is_ok() {
                         let regs = work_ram_c3.vdp2_regs.read().unwrap();
                         let tvmd = u16::from_be_bytes([regs[0], regs[1]]);
@@ -500,7 +501,6 @@ impl SaturnSystem {
         // alone. Pacing comes from `LockStepSync` today; see the loop body.
         let sync_c5 = sync.clone();
         let arbiter_c5 = arbiter.clone();
-        let shutdown_c5 = shutdown.clone();
         let work_ram_c5 = work_ram.clone();
         let scsp_c5 = self.scsp.clone();
         let handle_c5 = thread::Builder::new()
@@ -508,73 +508,17 @@ impl SaturnSystem {
             .spawn(move || {
                 let _guard = PanicGuard::new(sync_c5.clone(), arbiter_c5);
                 let mut cycles = 0u64;
-                let mut sample_cycles_acc: u64 = 0;
-                // golden-rule-ok: **not an exception to spec 1.2 -- a false
-                // positive of the check.** Read that carefully, because the two
-                // are different and conflating them is how a real violation
-                // gets laundered through an unrelated exemption.
-                //
-                // What 1.2 forbids is busy-polling an atomic *to wait for work*:
-                // a loop whose iteration can make zero progress and immediately
-                // run again. That is not this loop.
-                //
-                //   - Every iteration synthesizes one full audio sample. There
-                //     is no wasted turn to spin on.
-                //   - The atomic below does not pace anything. Pacing is
-                //     `sync_core`, which `Condvar::wait`s once this core drifts
-                //     more than `slack_limit` ahead of the slowest active one.
-                //   - Measured: Core 5 spent 1765.8 ms of a 2.33 s BIOS boot
-                //     asleep in that wait -- 75.8% of wall clock
-                //     (`telemetry::print_report`). A polling loop does not sleep
-                //     three quarters of its life.
-                //
-                // So this `load` is a termination test, like `while !done`.
-                // Deleting it would not change the pacing at all. The check
-                // fires on the *shape* `while <expr containing .load()> {` and
-                // cannot tell an atomic that gates progress from one that ends
-                // the loop; that distinction is deliberately left to a human
-                // here rather than guessed at by the rule, because auto-excusing
-                // anything named "shutdown" would wave through a real work-poll
-                // called `shutdown_requested`.
-                //
-                // Spec 1.5 (this thread never parks) is a *separate* and still
-                // open violation -- see the comment on the spawn above. Nothing
-                // here excuses it, and nothing can: that rule takes no marker.
-                while !shutdown_c5.load(Ordering::Relaxed) {
-                    if sync_c5.is_shutdown() {
-                        break;
+                sync_c5.set_thread_active(5, false);
+                loop {
+                    if !sync_c5.park_while_inactive(5) {
+                        return;
                     }
-                    // One sample's worth of synthesis, then report the SH-2
-                    // cycles it represents. Paced by real emulated cycles, not
-                    // a host wall clock (spec 1.4 scopes `ClockThrottle` to the
-                    // CPU cores alone).
-                    scsp_c5.lock().unwrap().synthesize(&work_ram_c5, 1);
-                    sample_cycles_acc += crate::throttle::SCSP_SAMPLE_CYCLES_NUM;
-                    let mut owed = sample_cycles_acc / crate::throttle::SCSP_SAMPLE_CYCLES_DEN;
-                    sample_cycles_acc -= owed * crate::throttle::SCSP_SAMPLE_CYCLES_DEN;
 
-                    // **Invariant: never advance by more than `slack_limit` in
-                    // one `sync_core` call.** `LockStepSync` blocks a core that
-                    // has drifted more than the slack window ahead of the
-                    // slowest one, so a core whose quantum is larger than the
-                    // window can never *be* inside it -- it lands permanently
-                    // ahead and the pair ping-pongs on the boundary. Shipping a
-                    // flat 128-sample (83,072-cycle) step against the default
-                    // 1000-cycle slack did exactly that and stopped the BIOS
-                    // booting at `0x2B0` (`docs/current_review.md`). Reporting
-                    // the same total in slack-sized chunks keeps the cycle
-                    // accounting exact and the core inside the window.
-                    let chunk_max = sync_c5.slack_limit().max(1);
-                    while owed > 0 {
-                        let chunk = owed.min(chunk_max);
-                        cycles = cycles.wrapping_add(chunk);
-                        owed -= chunk;
-                        // No `thread::yield_now()` here: `sync_core` already
-                        // Condvar-blocks on drift. See `Sh2::run_loop`.
-                        if !sync_c5.sync_core(5, cycles) {
-                            break;
-                        }
-                    }
+                    scsp_c5.lock().unwrap().synthesize(&work_ram_c5, 735);
+
+                    cycles = cycles.wrapping_add(1);
+                    sync_c5.sync_core(5, cycles);
+                    sync_c5.set_thread_active(5, false);
                 }
             })
             .expect("failed to spawn Core 5 (SCSP Sound Synthesizer) thread");

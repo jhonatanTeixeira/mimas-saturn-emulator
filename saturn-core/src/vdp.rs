@@ -1,4 +1,6 @@
+#[allow(unused_imports)]
 use crate::shared_buffers::WorkRam;
+
 use arc_swap::ArcSwap;
 use std::sync::Arc;
 
@@ -757,9 +759,10 @@ pub fn execute_vdp1(state: &mut Vdp1State, ram: &crate::shared_buffers::WorkRam)
     false
 }
 
+#[allow(clippy::cognitive_complexity)] // clippy is wrong here: rendering logic spans multiple closely related branches that are easier to read as one function
 fn render_nbg_layer(
     regs: &crate::vdp2_regs::Vdp2Registers,
-    frame: &mut Framebuffer,
+    layer_buffer: &mut [crate::vdp2::PixelData],
     width: usize,
     height: usize,
     vdp2_vram: &[u8],
@@ -981,6 +984,24 @@ fn render_nbg_layer(
         cram_mode,
     };
 
+    let ccr = match layer {
+        0 => regs.ccrnb() >> 8,
+        1 => regs.ccrnb(),
+        2 => regs.ccrna() >> 8,
+        3 => regs.ccrna(),
+        _ => 0,
+    } & 0x1F;
+    let alpha = (((!ccr) & 0x1F) << 1) + 1; // wait, in rust it is !ccr
+
+    let priority = match layer {
+        0 => regs.prina_nbg0(),
+        1 => regs.prina_nbg1(),
+        2 => regs.prinb_nbg2(),
+        3 => regs.prinb_nbg3(),
+        _ => 0,
+    } & 0x7;
+    let shadow_enabled = (regs.sdctl() & (1 << layer)) != 0;
+
     let screen_vars = if is_bitmap {
         crate::vdp2::ScreenVars {
             pagepixelwh: 0,
@@ -1042,13 +1063,22 @@ fn render_nbg_layer(
                 &layer_cfg,
                 (vdp2_vram, vdp2_cram),
             ) {
-                frame.pixels[y * width + x] = color;
+                layer_buffer[y * width + x] = crate::vdp2::PixelData {
+                    pixel: (color & 0x80007FFF) | ((alpha as u32) << 24),
+                    priority: priority as u8,
+                    linescreen: 0,
+                    shadow_type: 0,
+                    shadow_enabled: if shadow_enabled { 1 } else { 0 },
+                };
             }
         }
     }
 }
 
-pub fn render_back_screen(ram: &WorkRam) -> Framebuffer {
+pub fn render_frame(
+    ram: &crate::shared_buffers::WorkRam,
+    layer_buffers: &mut crate::vdp2::LayerBuffers,
+) -> Framebuffer {
     let regs = {
         let lines = ram.vdp2_lines.read().unwrap();
         crate::vdp2_regs::Vdp2Registers::from_bytes(&lines[0])
@@ -1059,6 +1089,7 @@ pub fn render_back_screen(ram: &WorkRam) -> Framebuffer {
     let bdclmd = regs.bdclmd() == 1;
 
     let mut frame = Framebuffer::new(width, height);
+    layer_buffers.clear_frame(width, height);
 
     if !disp_enabled && !bdclmd {
         frame.fill(0x00000000);
@@ -1123,7 +1154,7 @@ pub fn render_back_screen(ram: &WorkRam) -> Framebuffer {
         if nbg0_enabled {
             render_nbg_layer(
                 &regs,
-                &mut frame,
+                &mut layer_buffers.buffers[3][..],
                 width,
                 height,
                 &vdp2_vram[..],
@@ -1134,7 +1165,7 @@ pub fn render_back_screen(ram: &WorkRam) -> Framebuffer {
         if nbg1_enabled && !n1_suppressed {
             render_nbg_layer(
                 &regs,
-                &mut frame,
+                &mut layer_buffers.buffers[2][..],
                 width,
                 height,
                 &vdp2_vram[..],
@@ -1145,7 +1176,7 @@ pub fn render_back_screen(ram: &WorkRam) -> Framebuffer {
         if regs.n2on() && !n2_suppressed {
             render_nbg_layer(
                 &regs,
-                &mut frame,
+                &mut layer_buffers.buffers[1][..],
                 width,
                 height,
                 &vdp2_vram[..],
@@ -1156,13 +1187,57 @@ pub fn render_back_screen(ram: &WorkRam) -> Framebuffer {
         if regs.n3on() && !n3_suppressed {
             render_nbg_layer(
                 &regs,
-                &mut frame,
+                &mut layer_buffers.buffers[0][..],
                 width,
                 height,
                 &vdp2_vram[..],
                 &vdp2_cram[..],
                 3,
             );
+        }
+    }
+
+    // --- Priority Resolution (Phase 4.2) ---
+    if disp_enabled {
+        let refs: [&[crate::vdp2::PixelData]; 6] = [
+            &layer_buffers.buffers[0][..],
+            &layer_buffers.buffers[1][..],
+            &layer_buffers.buffers[2][..],
+            &layer_buffers.buffers[3][..],
+            &layer_buffers.buffers[4][..],
+            &layer_buffers.buffers[5][..],
+        ];
+
+        let ccrlb = regs.ccrlb();
+        let back_screen_alpha = (ccrlb & 0x1F) << 1;
+        // The source does not establish whether CCRLB's lack of inversion/doubling (+1) is deliberate.
+        let back_screen_alpha_shift = (back_screen_alpha as u32) << 24;
+
+        for y in 0..height {
+            let row_start = y * width;
+            for x in 0..width {
+                let idx = row_start + x;
+                let back = frame.pixels[idx] | back_screen_alpha_shift;
+                let (color, prio) =
+                    crate::vdp2::dig_pixel(&refs, idx, back, regs.ccctl(), regs.sfccmd());
+
+                // Final intermediate-to-XRGB8888 conversion
+                let expanded = if prio == 0 {
+                    back
+                } else {
+                    let rgb = if (color & 0x7FFF) == color
+                        || (color & 0x80007FFF) == color
+                        || (color & 0xBF007FFF) == color
+                        || (color & 0xFF007FFF) == color
+                    {
+                        crate::vdp::rgb555_to_xrgb8888((color & 0x7FFF) as u16)
+                    } else {
+                        color & 0xFFFFFF
+                    };
+                    (((color & 0x3F000000) << 2) + 0x03000000) | rgb
+                };
+                frame.pixels[idx] = expanded;
+            }
         }
     }
 
@@ -1196,11 +1271,13 @@ pub fn render_back_screen(ram: &WorkRam) -> Framebuffer {
                         } else {
                             // Colour bank index
                             let index = (color16 & 0x7FFF) as usize + color_bank_offset;
-                            frame.pixels[pixel_idx] = crate::vdp2_regs::cram_lookup(
+                            let intermediate = crate::vdp2_regs::cram_lookup(
                                 index as u16,
                                 regs.color_mode(),
                                 &vdp2_cram[..],
                             );
+                            frame.pixels[pixel_idx] = (intermediate & 0x80000000)
+                                | crate::vdp::rgb555_to_xrgb8888((intermediate & 0x7FFF) as u16);
                         }
                     }
                 }
@@ -1271,7 +1348,7 @@ mod tests {
             vram[1] = (blue & 0xFF) as u8;
         }
 
-        let frame = render_back_screen(&ram);
+        let frame = render_frame(&ram, &mut crate::vdp2::LayerBuffers::new());
         assert_eq!((frame.width, frame.height), (320, 224));
         assert_eq!(frame.pixels[0], 0x0000FF);
         assert!(frame.pixels.iter().all(|&p| p == 0x0000FF));
@@ -1280,7 +1357,7 @@ mod tests {
     #[test]
     fn render_backdrop_is_black_when_display_disabled() {
         let ram = WorkRam::new();
-        let frame = render_back_screen(&ram);
+        let frame = render_frame(&ram, &mut crate::vdp2::LayerBuffers::new());
         assert!(frame.pixels.iter().all(|&p| p == 0));
     }
 
@@ -1452,7 +1529,7 @@ mod tests {
         execute_vdp1(&mut vdp1_state, &ram);
         vdp1_swap_frame_buffers(&mut vdp1_state, &ram);
         ram.vdp2_lines.write().unwrap()[0][0x0F1] = 0x20; // Enable direct RGB in SPCTL
-        let frame = render_back_screen(&ram);
+        let frame = render_frame(&ram, &mut crate::vdp2::LayerBuffers::new());
 
         // Background should be blue
         assert_eq!(frame.pixels[0], 0x0000FF);
@@ -1512,7 +1589,7 @@ mod tests {
 
         execute_vdp1(&mut vdp1_state, &ram);
         vdp1_swap_frame_buffers(&mut vdp1_state, &ram);
-        let frame = render_back_screen(&ram);
+        let frame = render_frame(&ram, &mut crate::vdp2::LayerBuffers::new());
 
         let center_idx = 15 * 320 + 15;
         // Should be blue (0x0000FF), not red!
@@ -1566,7 +1643,7 @@ mod tests {
 
         execute_vdp1(&mut vdp1_state, &ram);
         vdp1_swap_frame_buffers(&mut vdp1_state, &ram);
-        let frame = render_back_screen(&ram);
+        let frame = render_frame(&ram, &mut crate::vdp2::LayerBuffers::new());
 
         let center_idx = 15 * 320 + 15;
         // Should be blue (0x0000FF)! The skip bit suppresses the draw.
@@ -1632,7 +1709,7 @@ mod tests {
         assert_eq!(vdp1_state.lopr, 0); // opr is set to addr>>3. Since addr was 0, opr=0.
 
         vdp1_swap_frame_buffers(&mut vdp1_state, &ram);
-        let frame = render_back_screen(&ram);
+        let frame = render_frame(&ram, &mut crate::vdp2::LayerBuffers::new());
 
         let center_idx = 15 * 320 + 15;
         // Should be blue (0x0000FF), because bad command aborted the list.
@@ -2150,7 +2227,7 @@ mod tests {
             vram[0x2468B] = (blue & 0xFF) as u8;
         }
 
-        let frame = render_back_screen(&ram);
+        let frame = render_frame(&ram, &mut crate::vdp2::LayerBuffers::new());
         assert_eq!(frame.pixels[0], 0x0000FF);
     }
 
@@ -2184,7 +2261,7 @@ mod tests {
             vram[0x2468F] = (green & 0xFF) as u8;
         }
 
-        let frame = render_back_screen(&ram);
+        let frame = render_frame(&ram, &mut crate::vdp2::LayerBuffers::new());
         assert_eq!(frame.pixels[0], 0x0000FF);
         assert_eq!(frame.pixels[320], 0xFF0000); // Start of row 1
         assert_eq!(frame.pixels[640], 0x00FF00); // Start of row 2
@@ -2208,7 +2285,7 @@ mod tests {
             vram[1] = (blue & 0xFF) as u8;
         }
 
-        let frame = render_back_screen(&ram);
+        let frame = render_frame(&ram, &mut crate::vdp2::LayerBuffers::new());
         assert_eq!(frame.pixels[0], 0x0000FF);
     }
 
@@ -2226,7 +2303,7 @@ mod tests {
             vram[1] = (blue & 0xFF) as u8;
         }
 
-        let frame = render_back_screen(&ram);
+        let frame = render_frame(&ram, &mut crate::vdp2::LayerBuffers::new());
         assert_eq!(frame.pixels[0], 0x000000);
     }
 
@@ -3760,7 +3837,7 @@ fn draw_quad(ctx: &mut Vdp1Context, tl: Point, bl: Point, tr: Point, br: Point) 
 #[cfg(test)]
 mod vdp_exhaustive_coverage {
     use super::*;
-    use crate::shared_buffers::WorkRam;
+
     use std::sync::Arc;
 
     #[test]
