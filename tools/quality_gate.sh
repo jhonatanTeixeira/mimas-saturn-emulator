@@ -92,12 +92,22 @@ show_cfg() {
 echo ""
 echo "Effective configuration:"
 show_cfg "coverage min %"   "${MIMAS_COVERAGE_MIN:-90}"      "90"          min
-show_cfg "speed floor %"    "${MIMAS_MIN_SPEED_PCT:-150}"    "150"         min
+show_cfg "speed floor %"    "${MIMAS_MIN_SPEED_PCT:-190}"    "190"         min
 show_cfg "speed warn %"     "${MIMAS_WARN_SPEED_PCT:-170}"   "170"         min
 show_cfg "expected boot PC" "${MIMAS_GATE_PC:-0x06001694}"   "0x06001694"  exact
 show_cfg "min WRAM accesses" "${MIMAS_GATE_MIN_WRAM:-2000000}" "2000000"   min
 show_cfg "max source lines" "${MIMAS_LOC_MAX:-34000}"        "34000"       max
 show_cfg "max binary MB"    "${MIMAS_BIN_MAX_MB:-16}"        "16"          max
+
+# Scope, not a threshold, so it is not run through show_cfg: the 90% floor is
+# unchanged either way, what changes is the set of lines it applies to. Empty
+# (the default) means the whole tree.
+COVERAGE_COMMITS="${MIMAS_COVERAGE_COMMITS:-}"
+if [ -n "$COVERAGE_COMMITS" ]; then
+    printf "  %-22s %-12s  ◑  SCOPED (default: whole tree)\n" "coverage scope" "$COVERAGE_COMMITS"
+else
+    printf "  %-22s %-12s\n" "coverage scope" "whole tree"
+fi
 
 if [ ${#LOOSENED[@]} -ne 0 ] && [ -z "$OVERRIDE_REASON" ]; then
     echo ""
@@ -225,9 +235,29 @@ echo "7/9 📊 Coverage (target 90%)"
 # scu_dsp.rs (61%), lib.rs (61%) and the untested frontend binaries (0%).
 # `--ignore-tests` excludes the test functions' own bodies from the denominator;
 # that is what "coverage" means, not an exclusion of product code.
+#
+# MIMAS_COVERAGE_COMMITS scopes the same floor to one commit range instead of
+# the tree. That is not a lower bar -- it is the same 90%, asked of the lines a
+# change actually touched. It exists because the whole-tree number cannot answer
+# the question that matters during review: a commit adding 200 untested lines
+# moves 65.03% to 64.8%, which nobody notices. Old debt stays exactly as visible
+# as it was; new work has to carry its own tests.
+#
+# It is reported separately everywhere, because "the gate passed" must not be
+# able to mean "the gate passed on eleven lines".
 COVERAGE_MIN="${MIMAS_COVERAGE_MIN:-90}"
 if ! command -v cargo-tarpaulin &> /dev/null; then
     fail "Coverage — cargo-tarpaulin not installed ('cargo install cargo-tarpaulin')"
+elif [ -n "$COVERAGE_COMMITS" ]; then
+    echo "   scope: $COVERAGE_COMMITS (tree total measured but NOT enforced)"
+    if ! cargo tarpaulin --ignore-tests --skip-clean --out Lcov --out Html; then
+        fail "Coverage — cargo-tarpaulin failed to produce a report"
+    elif python3 tools/diff_coverage.py --lcov lcov.info \
+            --range "$COVERAGE_COMMITS" --min "$COVERAGE_MIN"; then
+        pass "Diff coverage >= ${COVERAGE_MIN}% on ${COVERAGE_COMMITS} (whole-tree total NOT enforced)"
+    else
+        fail "Diff coverage below ${COVERAGE_MIN}% on ${COVERAGE_COMMITS} — new or changed lines no test reaches"
+    fi
 else
     if cargo tarpaulin --ignore-tests --skip-clean \
             --fail-under "$COVERAGE_MIN" --out Html; then
@@ -300,7 +330,7 @@ MIN_WRAM="${MIMAS_GATE_MIN_WRAM:-2000000}"
 # A53 core is worth roughly 1/9 to 1/14 of a Zen 2 core on this workload. That
 # puts the real target near 1000% on desktop x86 against today's 188% -- a 5-8x
 # gap. See docs/mimas-performance-analysis.md 3.2.
-MIN_SPEED="${MIMAS_MIN_SPEED_PCT:-150}"
+MIN_SPEED="${MIMAS_MIN_SPEED_PCT:-190}"
 WARN_SPEED="${MIMAS_WARN_SPEED_PCT:-170}"
 
 BIOS_PATH="${MIMAS_BIOS_PATH:-}"
@@ -374,6 +404,12 @@ elif [ ${#OVERRIDDEN[@]} -ne 0 ]; then
     echo "---------------------------------------------"
     echo "↑  ${#OVERRIDDEN[@]} threshold(s) tightened from the committed defaults:"
     for o in "${OVERRIDDEN[@]}"; do echo "     $o"; done
+fi
+if [ -n "$COVERAGE_COMMITS" ]; then
+    echo "---------------------------------------------"
+    echo "◑  Coverage was checked on ${COVERAGE_COMMITS} only, not the whole tree."
+    echo "   The whole-tree figure is still below its floor and is still debt;"
+    echo "   this run did not measure it. Say so when reporting the result."
 fi
 echo "---------------------------------------------"
 if [ ${#FAILED[@]} -eq 0 ]; then

@@ -495,9 +495,9 @@ impl SaturnSystem {
                         let chunk = remaining.min(chunk_max);
                         remaining -= chunk;
 
-                        sample_cycles_acc += chunk * crate::throttle::SCSP_SAMPLE_CYCLES_NUM;
-                        let samples = sample_cycles_acc / crate::throttle::SCSP_SAMPLE_CYCLES_DEN;
-                        sample_cycles_acc -= samples * crate::throttle::SCSP_SAMPLE_CYCLES_DEN;
+                        sample_cycles_acc += chunk * crate::throttle::SCSP_SAMPLE_CYCLES_DEN;
+                        let samples = sample_cycles_acc / crate::throttle::SCSP_SAMPLE_CYCLES_NUM;
+                        sample_cycles_acc -= samples * crate::throttle::SCSP_SAMPLE_CYCLES_NUM;
 
                         if samples > 0 {
                             scsp_c5
