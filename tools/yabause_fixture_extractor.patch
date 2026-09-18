@@ -1,0 +1,190 @@
+diff --git a/yabause/src/cs2.c b/yabause/src/cs2.c
+index accaa2da1..517f12a16 100644
+--- a/yabause/src/cs2.c
++++ b/yabause/src/cs2.c
+@@ -33,6 +33,105 @@
+ #include "scu.h"
+ #include "smpc.h"
+ #include "yui.h"
++#include "vdp2.h"
++#include <stdio.h>
++#include <string.h>
++#include <time.h>
++
++// Mimas fixture extraction hook (temporary, not upstream Yabause). This used
++// to dump on the very first Cs2Exec() call -- which fires from the very
++// first cycle of the emulation loop, long before the BIOS has done anything,
++// so every capture was all-zero. Fixed to fire once real wall-clock time has
++// elapsed instead (default 25s, override via MIMAS_FIXTURE_DELAY_SECS), so a
++// `timeout N retroarch ...` run captures state as late as possible within
++// its window rather than at T=0.
++static void MimasDumpAllFixtures(void) {
++   static int dumped = 0;
++   static time_t start_time = 0;
++   if (dumped) return;
++   const char *dir = getenv("MIMAS_FIXTURE_DIR");
++   if (!dir) return;
++
++   time_t now = time(NULL);
++   if (start_time == 0) start_time = now;
++   const char *delay_env = getenv("MIMAS_FIXTURE_DELAY_SECS");
++   int delay_secs = delay_env ? atoi(delay_env) : 25;
++   if (now - start_time < delay_secs) return;
++
++   dumped = 1;
++
++   char path[512];
++   FILE *f;
++   int i;
++
++   // 1. Dump SMPC registers
++   extern Smpc *SmpcRegs;
++   if (SmpcRegs) {
++      u8 buf[0x80];
++      memset(buf, 0, sizeof(buf));
++      for (i = 0; i < 7; i++) buf[0x01 + i * 2] = SmpcRegs->IREG[i];
++      buf[0x1F] = SmpcRegs->COMREG;
++      for (i = 0; i < 32; i++) buf[0x21 + i * 2] = SmpcRegs->OREG[i];
++      buf[0x61] = SmpcRegs->SR;
++      buf[0x63] = SmpcRegs->SF;
++      buf[0x75] = SmpcRegs->PDR[0];
++      buf[0x77] = SmpcRegs->PDR[1];
++      buf[0x79] = SmpcRegs->DDR[0];
++      buf[0x7B] = SmpcRegs->DDR[1];
++      buf[0x7D] = SmpcRegs->IOSEL;
++      buf[0x7F] = SmpcRegs->EXLE;
++
++      snprintf(path, sizeof(path), "%s/bios_post_smpc_regs.bin", dir);
++      f = fopen(path, "wb");
++      if (f) {
++         fwrite(buf, 1, sizeof(buf), f);
++         fclose(f);
++      }
++   }
++
++   // 2. Dump HighWram (1MB)
++   extern u8 *HighWram;
++   if (HighWram) {
++      snprintf(path, sizeof(path), "%s/bios_post_smpc_wram_high.bin", dir);
++      f = fopen(path, "wb");
++      if (f) {
++         fwrite(HighWram, 1, 0x100000, f);
++         fclose(f);
++      }
++   }
++
++   // 3. Dump Vdp2Ram (512KB)
++   extern u8 *Vdp2Ram;
++   if (Vdp2Ram) {
++      snprintf(path, sizeof(path), "%s/bios_post_vdp2_vram.bin", dir);
++      f = fopen(path, "wb");
++      if (f) {
++         fwrite(Vdp2Ram, 1, 0x80000, f);
++         fclose(f);
++      }
++   }
++
++   // 4. Dump VDP2 registers (Big-Endian, 0x200 bytes)
++   extern Vdp2 * Vdp2Regs;
++   if (Vdp2Regs) {
++      snprintf(path, sizeof(path), "%s/bios_post_vdp2_regs.bin", dir);
++      f = fopen(path, "wb");
++      if (f) {
++         u16 out_regs[0x100];
++         memset(out_regs, 0, sizeof(out_regs));
++         u16 *src = (u16 *)Vdp2Regs;
++         int limit = sizeof(Vdp2) / 2;
++         if (limit > 0x100) limit = 0x100;
++         for (i = 0; i < limit; i++) {
++            u16 val = src[i];
++            out_regs[i] = ((val & 0xFF) << 8) | ((val >> 8) & 0xFF);
++         }
++         fwrite(out_regs, 1, 0x200, f);
++         fclose(f);
++      }
++   }
++}
++
+ 
+ #define CDB_HIRQ_CMOK      0x0001
+ #define CDB_HIRQ_DRDY      0x0002
+@@ -964,6 +1063,7 @@ int Cs2ForceCloseTray( int coreid, const char * cdpath ) {
+  * @param[in]  timing Cycles to execute in usec
+  */
+ void Cs2Exec(u32 timing) {
++   MimasDumpAllFixtures();
+    Cs2Area->_statuscycles += timing * 3;
+    Cs2Area->_periodiccycles += timing * 3;
+ 
+@@ -3664,7 +3764,7 @@ int Cs2CopyDirRecord(u8 * buffer, dirrec_struct * dirrec)
+   buffer += sizeof(dirrec->namelength);
+ 
+   memset(dirrec->name, 0, sizeof(dirrec->name));
+-  memcpy(dirrec->name, buffer, dirrec->namelength);
++  memcpy(dirrec->name, buffer, dirrec->namelength > 31 ? 31 : dirrec->namelength);
+   buffer += dirrec->namelength;
+ 
+   // handle padding
+diff --git a/yabause/src/smpc.c b/yabause/src/smpc.c
+index 9189f03b7..540a08665 100644
+--- a/yabause/src/smpc.c
++++ b/yabause/src/smpc.c
+@@ -23,6 +23,8 @@
+ */
+ 
+ #include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
+ #include <time.h>
+ #include "smpc.h"
+ #include "cs2.h"
+@@ -213,6 +215,41 @@ static struct movietime movietime;
+ int totalseconds;
+ int noon= 43200;
+ 
++//////////////////////////////////////////////////////////////////////////////
++// Mimas fixture extraction hook (temporary, not upstream Yabause): dumps the
++// real 0x80-byte SMPC register window (odd-byte-per-register layout, exactly
++// matching Mimas's WorkRam::smpc_regs address mapping) to a fixed path once
++// per call, so a real, independently-derived SMPC state can be loaded into
++// Mimas's own test suite instead of a self-consistent guess.
++static void MimasDumpSmpcRegs(const char *tag) {
++   static int dumped = 0;
++   if (dumped) return;
++   const char *dir = getenv("MIMAS_FIXTURE_DIR");
++   if (!dir) return;
++   dumped = 1;
++   u8 buf[0x80];
++   int i;
++   memset(buf, 0, sizeof(buf));
++   for (i = 0; i < 7; i++) buf[0x01 + i * 2] = SmpcRegs->IREG[i];
++   buf[0x1F] = SmpcRegs->COMREG;
++   for (i = 0; i < 32; i++) buf[0x21 + i * 2] = SmpcRegs->OREG[i];
++   buf[0x61] = SmpcRegs->SR;
++   buf[0x63] = SmpcRegs->SF;
++   buf[0x75] = SmpcRegs->PDR[0];
++   buf[0x77] = SmpcRegs->PDR[1];
++   buf[0x79] = SmpcRegs->DDR[0];
++   buf[0x7B] = SmpcRegs->DDR[1];
++   buf[0x7D] = SmpcRegs->IOSEL;
++   buf[0x7F] = SmpcRegs->EXLE;
++   char path[512];
++   snprintf(path, sizeof(path), "%s/smpc_%s.bin", dir, tag);
++   FILE *f = fopen(path, "wb");
++   if (f) {
++      fwrite(buf, 1, sizeof(buf), f);
++      fclose(f);
++   }
++}
++
+ //////////////////////////////////////////////////////////////////////////////
+ 
+ static void SmpcINTBACKStatus(void) {
+@@ -443,6 +480,7 @@ static void SmpcINTBACK(void) {
+       SmpcInternalVars->intback = (SmpcRegs->IREG[1] & 0x8) >> 3; // does the program want peripheral data too?
+       SmpcINTBACKStatus();
+       SmpcRegs->SR = 0x4F | (SmpcInternalVars->intback << 5); // the low nibble is undefined(or 0xF)
++      MimasDumpSmpcRegs("intback_status");
+       ScuSendSystemManager();
+       return;
+    }
