@@ -19,3 +19,10 @@
 mutants.out*/
 .mutants-tmp/
 scratch/ra_system/*.bin
+/*.py
+/*.log
+/*.bin
+/*.html
+lcov.info
+tmp.json
+scratch

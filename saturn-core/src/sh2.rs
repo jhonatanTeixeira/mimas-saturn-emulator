@@ -4457,6 +4457,7 @@ impl Sh2 {
 
     /// Thread execution entry point
     pub fn run_loop(&mut self, shutdown: Arc<std::sync::atomic::AtomicBool>) {
+        let mut mismatch = false;
         // VBLANK-IN/OUT generation used to be a wall-clock timer run right
         // here -- a *second*, independent ~60Hz clock racing Core 3's own
         // frame-render tick (`docs/implementation-plans/scu.md` Phase 3:
@@ -4501,6 +4502,11 @@ impl Sh2 {
             }
             let cycles_before = self.cycles;
             self.step();
+            if self.pc == 0x06001680 {
+                if self.registers[2] != self.registers[4] {
+                    if !mismatch { eprintln!("[DEBUG] MISMATCH! R2={:08X}, R4={:08X}, R3={:08X}", self.registers[2], self.registers[4], self.registers[3]); mismatch = true; }
+                }
+            }
             let delta = self.cycles.wrapping_sub(cycles_before) as u32;
             if let Some(ref mut t) = throttle {
                 t.advance(delta as u64);

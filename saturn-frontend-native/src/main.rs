@@ -223,6 +223,13 @@ fn run_cli(args: Vec<String>) -> bool {
             // certainly parked in a real wait loop (hardware polling) rather
             // than just a slow bounded loop -- no point burning the rest of
             // the window sampling something that isn't moving.
+            std::fs::write("/tmp/mimas_ram.bin", &system.work_ram.high_ram[0].read().unwrap()[..]).unwrap();
+            println!("RAM 07C0-07E0");
+            let ram = system.work_ram.high_ram[0].read().unwrap();
+            for i in (0x7C0..0x7E4).step_by(2) {
+                let w = ((ram[i] as u16) << 8) | (ram[i+1] as u16);
+                println!("{:04X}: {:04X}", i, w);
+            }
             println!(
                 "Core 0 PC settled at {:#010X} (unchanged for 500ms) -- stopping early",
                 pc

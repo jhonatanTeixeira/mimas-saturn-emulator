@@ -1,0 +1,8 @@
+--- saturn-core/src/vdp2.rs
++++ saturn-core/src/vdp2.rs
+@@ -115,3 +115,3 @@
+-    let mut l1 = 0;
++    let mut _l1 = 0;
+@@ -128,3 +128,3 @@
+-                    l1 = l;
++                    _l1 = l;

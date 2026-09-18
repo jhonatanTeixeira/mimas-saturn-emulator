@@ -362,6 +362,8 @@ impl M68k {
     }
 
     pub fn step(&mut self) {
+        let mut dbg_cnt = UNIMPL_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if dbg_cnt < 20 { eprintln!("[M68K START] pc={:08X}", self.pc); }
         if !self.running {
             return;
         }
@@ -458,11 +460,39 @@ impl M68k {
                     opcode, pc, self.d, self.a
                 );
                 if n == 0 {
+                    // Why this reports the *memory* and not just the opcode:
+                    // when the M68K runs off into an unwritten region it
+                    // executes zeros, the PC becomes garbage, and every
+                    // subsequent "unimplemented opcode" is a consequence, not a
+                    // cause. On 2026-09-18 a whole session was spent hunting a
+                    // missing instruction for `opcode=0xFFFC at pc=0x00003232`
+                    // — which is not an opcode at all, it is the displacement
+                    // word of the `DBF D7,-4` sitting at 0x3230. The message
+                    // was the bug.
                     let ram = self.work_ram.sound_ram.read().unwrap();
-                    std::fs::write("/tmp/claude-1000/sound_ram_dump.bin", &ram[..])
-                        .expect("failed to write sound ram dump");
+                    let lo = (pc as usize).saturating_sub(16).min(ram.len());
+                    let hi = ((pc as usize) + 16).min(ram.len());
+                    let around_is_zero = ram[lo..hi].iter().all(|&b| b == 0);
+                    let first_nonzero = ram.iter().position(|&b| b != 0);
+                    let vectors_live = ram[0..8].iter().any(|&b| b != 0);
+                    eprintln!(
+                        "[M68K]   bytes around pc: {:02X?}",
+                        &ram[lo..hi]
+                    );
+                    eprintln!(
+                        "[M68K]   region around pc all zero: {}  |  reset vectors still present: {}  |  first non-zero byte in sound RAM: {:?}",
+                        around_is_zero, vectors_live, first_nonzero
+                    );
+                    if around_is_zero {
+                        eprintln!(
+                            "[M68K]   >>> This is NOT a missing instruction. The M68K is executing \
+unwritten sound RAM. Look at what should have uploaded the driver \
+(the BIOS write-verify loop at 0x0600166E copies 0x25A00700 -> \
+0x25A00000 *within* sound RAM, so an empty source overwrites the \
+reset vectors with zeros)."
+                        );
+                    }
                     drop(ram);
-                    eprintln!("[M68K] dumped full sound_ram (512KB) to /tmp/claude-1000/sound_ram_dump.bin");
                     let ring = TRACE_RING.lock().unwrap();
                     eprintln!(
                         "[M68K] last {} executed (pc,opcode,a0,a1,d7) tuples:",
