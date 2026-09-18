@@ -490,9 +490,18 @@ impl SaturnSystem {
                 let _guard = PanicGuard::new(sync_c5.clone(), arbiter_c5);
                 let mut cycles = 0u64;
                 let mut sample_cycles_acc: u64 = 0;
+                // golden-rule-ok: spec 1.2 forbids busy-polling an atomic *for
+                // work*. This load is the shutdown exit check, not a wait: the
+                // body below synthesizes a full sample on every single
+                // iteration, so the loop never spins waiting for something to
+                // become true. Core 5 is also the one thread spec 1.5 exempts
+                // from parking -- real hardware's SCSP synthesizes continuously
+                // regardless of what any CPU is doing -- so there is no park to
+                // return to here. That exemption is recorded in `CLAUDE.md` and
+                // `GEMINI.md` and is allowlisted *by name* in
+                // `rule_spawned_threads_park`, deliberately, so it stays visible
+                // rather than making the rule silent.
                 while !shutdown_c5.load(Ordering::Relaxed) {
-                    // golden-rule-ok: documented exception
-                    // golden-rule-ok: documented exception for scsp-synth
                     if sync_c5.is_shutdown() {
                         break;
                     }

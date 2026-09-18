@@ -343,6 +343,7 @@ pub fn vdp1_swap_frame_buffers(state: &mut Vdp1State, ram: &crate::shared_buffer
     }
 }
 
+#[allow(clippy::cognitive_complexity)] // clippy is wrong here: instruction decoders are naturally giant matches and shouldn't be split
 pub fn execute_vdp1(state: &mut Vdp1State, ram: &crate::shared_buffers::WorkRam) -> bool {
     if state.vblank_erase || state.manualerase {
         state.vblank_erase = false;
@@ -3377,6 +3378,7 @@ fn draw_line_impl(
     putpixel(x2, y2, r, g, b);
 }
 
+#[allow(clippy::cognitive_complexity)] // clippy is wrong here: software rasterization logic needs to stay in one block for performance and readability
 fn draw_quad(ctx: &mut Vdp1Context, tl: Point, bl: Point, tr: Point, br: Point) {
     let state = ctx.state;
     let cmd = ctx.cmd;

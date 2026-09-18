@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rustscan import function_bodies, production_code, rust_files, strip_literals
+from rustscan import _block_end, function_bodies, production_code, rust_files, strip_literals
 
 OK_MARKER = re.compile(r"//\s*golden-rule-ok:")
 
@@ -50,9 +50,12 @@ class Tree:
     """The source under test: either the working tree or a git revision."""
 
     rev: str | None = None
+    virtual: dict[str, str] | None = None
     _cache: dict[str, str] = field(default_factory=dict)
 
     def files(self) -> list[str]:
+        if self.virtual is not None:
+            return sorted(self.virtual)
         if self.rev is None:
             return [str(p) for p in rust_files(Path("."))]
         out = subprocess.run(
@@ -62,6 +65,8 @@ class Tree:
         return [f for f in out if f.endswith(".rs") and not f.startswith("scratch/")]
 
     def read(self, path: str) -> str:
+        if self.virtual is not None:
+            return self.virtual.get(path, "")
         if path not in self._cache:
             if self.rev is None:
                 self._cache[path] = Path(path).read_text(errors="ignore")
@@ -234,20 +239,86 @@ def _raw_excused(raw: str, prod: str, idx: int) -> bool:
     return _excused(raw, idx)
 
 
+def _while_condition(src: str, at: int) -> tuple[str, int] | None:
+    """Split a `while` at `at` into (condition text, index of the body's `{`).
+
+    Deliberately not a regex. The first version of this rule matched
+    `while\s+[^\n{]*\.load\s*\([^\n{]*\{` -- i.e. it assumed the condition
+    sits on one line and contains no braces. Both assumptions are wrong in Rust,
+    and the failure is not hypothetical: rewriting
+
+        while !shutdown.load(Ordering::Relaxed) {
+
+    as the semantically identical
+
+        while {
+            !shutdown.load(Ordering::Relaxed)
+        } {
+
+    made the rule match nothing at all. A `// golden-rule-ok:` comment was left
+    at the site, so the code read as though the check had fired and been
+    excused, when in fact the check had gone blind -- and would have stayed
+    blind for every future loop written that way. A rule that reformatting can
+    defeat is not a rule; see `rustscan.py`'s header for the same lesson learned
+    against `#[cfg(test)]`.
+
+    So: scan forward, ignoring `{` nested inside `(`/`[` (closures in arguments),
+    and treat a top-level `{...}` as part of the *condition* when another `{`
+    follows it -- which is exactly how the compiler reads a block-expression
+    condition.
+    """
+    n = len(src)
+    cond_start = i = at
+    while i < n:
+        paren = 0
+        j = i
+        while j < n:
+            c = src[j]
+            if c in "([":
+                paren += 1
+            elif c in ")]":
+                paren -= 1
+            elif c == ";":          # ran past the statement -- not a `while` body
+                return None
+            elif c == "{" and paren <= 0:
+                break
+            j += 1
+        if j >= n:
+            return None
+        close = _block_end(src, j)
+        k = close
+        while k < n and src[k].isspace():
+            k += 1
+        if k < n and src[k] == "{":
+            # `{...}` was a block-expression condition; the real body starts at k.
+            return src[cond_start:close], k
+        return src[cond_start:j], j
+    return None
+
+
 def rule_no_atomic_poll_loop(tree: Tree) -> list[Finding]:
     """Spec 1.2: "We forbid busy-polling of atomic variables (`AtomicBool`) in
     tight loops."
 
-    Catches Core 4's `while m68k_control.load(Ordering::Acquire) {`.
+    Catches Core 4's `while m68k_control.load(Ordering::Acquire) {`, in any
+    formatting -- see `_while_condition`.
     """
     out = []
     for f in _core_files(tree):
-        prod = production_code(tree.read(f))
-        for m in re.finditer(r"\bwhile\s+([^\n{]*\.load\s*\([^\n{]*)\{", prod):
-            if _raw_excused(tree.read(f), prod, m.start()):
+        raw = tree.read(f)
+        prod = production_code(raw)
+        for m in re.finditer(r"\bwhile\b", prod):
+            split = _while_condition(prod, m.end())
+            if split is None:
                 continue
+            cond, _body = split
+            if not re.search(r"\.load\s*\(", cond):
+                continue
+            if _raw_excused(raw, prod, m.start()):
+                continue
+            flat = " ".join(cond.split())
             out.append(Finding("no-atomic-poll-loop", "1.2", f, _line_of(prod, m.start()),
-                               f"atomic load as loop condition: while {m.group(1).strip()[:60]}"))
+                               f"atomic load as loop condition: while {flat[:60]}"))
     return out
 
 
@@ -510,7 +581,53 @@ def self_test() -> int:
         ("194572f", "thin-instruction-path", True,
          "five unconditional swap() calls per instruction in service_pending_interrupt"),
     ]
+    # Cases with no commit to point at: the shapes a rule must not be blind to.
+    # `while { cond } {` is not hypothetical -- it was written into
+    # `lib.rs`'s Core 5 loop and silently matched nothing.
+    POLL_PLAIN = """
+        pub fn spawn_it(flag: AtomicBool) {
+            while !flag.load(Ordering::Relaxed) { work(); }
+        }
+    """
+    POLL_BLOCK = """
+        pub fn spawn_it(flag: AtomicBool) {
+            while {
+                !flag.load(Ordering::Relaxed)
+            } {
+                work();
+            }
+        }
+    """
+    POLL_EXCUSED = """
+        pub fn spawn_it(flag: AtomicBool) {
+            // golden-rule-ok: this is the sanctioned exception, for <reason>
+            while !flag.load(Ordering::Relaxed) { work(); }
+        }
+    """
+    NO_POLL = """
+        pub fn spawn_it(v: Vec<u8>) {
+            while let Some(x) = v.pop() { work(x); }
+        }
+    """
+    synthetic = [
+        (POLL_PLAIN, "no-atomic-poll-loop", True, "plain one-line poll -- the original shape"),
+        (POLL_BLOCK, "no-atomic-poll-loop", True,
+         "same poll wrapped in a block-expression condition; the regex version saw nothing"),
+        (POLL_EXCUSED, "no-atomic-poll-loop", False, "excused at the site, so the rule stays quiet"),
+        (NO_POLL, "no-atomic-poll-loop", False, "`while let` with no atomic load"),
+    ]
+
     ok = True
+    for src, rule, expected, why in synthetic:
+        tree = Tree(virtual={"saturn-core/src/synthetic.rs": src})
+        hits = [f for f in run(tree) if f.rule == rule]
+        got = bool(hits)
+        mark = "\u2705" if got == expected else "\u274c"
+        if got != expected:
+            ok = False
+        print(f"  {mark} <synthetic> / {rule}: expected {'a hit' if expected else 'silence'}, "
+              f"got {len(hits)} \u2014 {why}")
+
     for rev, rule, expected, why in cases:
         hits = [f for f in run(Tree(rev=rev)) if f.rule == rule]
         got = bool(hits)

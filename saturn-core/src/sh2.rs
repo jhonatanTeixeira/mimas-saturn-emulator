@@ -2901,6 +2901,7 @@ impl Sh2 {
     }
 
     /// Execute a fetched SH-2 instruction opcode
+    #[allow(clippy::cognitive_complexity)] // clippy is wrong here because this is a giant CPU instruction decoder switch, splitting it ruins the lookup table structure
     fn execute(&mut self, opcode: u16) {
         let n = ((opcode >> 8) & 0xF) as usize;
         let m = ((opcode >> 4) & 0xF) as usize;
