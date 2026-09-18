@@ -579,17 +579,17 @@ explicitly labelled as one.
 - [x] Layer buffers must be fully zeroed each frame (`TitanErase` equivalent), including the
       priority byte — §B.9 notes the scan matches on priority alone, not on the pixel being
       nonzero, so a stale priority from the previous frame resurrects a stale pixel.
-- [x] `SFPRMD` `0x0EA` special priority modes (§A.13): mode 0 verbatim; mode 1 (per tile) applies
+- [ ] `SFPRMD` `0x0EA` special priority modes (**Partial:** Accessors created but not used in `dig_pixel`) (§A.13): mode 0 verbatim; mode 1 (per tile) applies
       `priority = (priority & 0xE) | (specialfunction & 1)` **inside pattern decode**, so tile
       layers only; mode 2 (per pixel) applies in the scroll draw loop only, gated on
       `specialfunction & 1` **and** `PixelIsSpecialPriority`; mode 3 is undocumented and treated
       as mode 0.
-- [x] `SFSEL` `0x024` / `SFCODE` `0x026` (§A.4): `SFCODE` holds code A in bits 0-7 and code B in
+- [ ] `SFSEL` `0x024` / `SFCODE` `0x026` (**Partial:** `pixel_is_special` written but never called) (§A.4): `SFCODE` holds code A in bits 0-7 and code B in
       bits 8-15; each `SFSEL` bit picks one per layer. Each bit of the selected byte enables a
       *pair* of colour codes matched against `dot & 0xF`. Note §A.4's observation that
       `PixelIsSpecialPriority` and `GetAlpha` express the same pair mapping two different ways —
       implement one helper and use it for both, resolving the inconsistency in Mimas's favour.
-- [x] `SFPRMD & 0x3FF` nonzero also forces a layer to be drawn even when its priority register
+- [ ] `SFPRMD & 0x3FF` nonzero also forces a layer to be drawn even when its priority register
       reads 0 (§A.13). Easy to miss; it changes which layers exist at all.
 
 ### 4.2 Colour calculation
@@ -616,7 +616,7 @@ explicitly labelled as one.
       - **Bottom**: returns `top` unchanged if bit 31 is clear; otherwise uses the *bottom* pixel's
         alpha as the ratio and **preserves** the top pixel's alpha rather than forcing `0x3F`.
       - **Add**: per-channel saturating addition, alpha forced `0x3F`.
-- [x] `SFCCMD` `0x0EE` (§A.14): mode 0 unconditional; mode 1 requires `specialcolorfunction & 1`;
+- [ ] `SFCCMD` `0x0EE` (§A.14): mode 0 unconditional; mode 1 requires (**Partial:** modes 1 and 2 are ignored for now) `specialcolorfunction & 1`;
       mode 2 additionally requires the SFCODE colour-code bit; mode 3 requires the preserved CRAM
       bit 15 (pixel bit 31).
 - [x] Final conversion (§B.10): `((pixel & 0x3F000000) << 2) + 0x03000000 | (pixel & 0x00FFFFFF)`
@@ -631,10 +631,10 @@ explicitly labelled as one.
 
 ### 4.3 Shadows
 
-- [x] `SDCTL` `0x0E2` per-layer bits 0-4 → `shadow_enabled`, stored on every written pixel.
+- [ ] `SDCTL` `0x0E2` per-layer bits 0-4 (**Partial:** field stored, but consumption is empty in `dig_pixel`) → `shadow_enabled`, stored on every written pixel.
       **It means "this layer accepts being shadowed", not "this layer casts a shadow"** — it is
       read from the pixel *below* (§A.12, §B.11).
-- [x] The three shadow paths (§B.11): transparent-MSB shadow, self-shadow (gated on
+- [ ] The three shadow paths (§B.11): transparent-MSB shadow, self-shadow (gated on
       `!(SPCTL & 0x10)`), normal shadow. All three blend with `0x20000000` — alpha `0x20`, RGB 0,
       i.e. roughly 50% toward black.
 - [x] §B.11 notes Yabause reads the *global* `SPCTL` here rather than a snapshot, which it calls a

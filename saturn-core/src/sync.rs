@@ -203,6 +203,11 @@ impl LockStepSync {
     /// `set_thread_active(core_id, true)` -- no separate "enable" API,
     /// since that call already seeds this core's cycle count to the
     /// current active minimum, which a bespoke enable flag would skip.
+    pub fn get_cycles(&self, core_id: usize) -> u64 {
+        let state = self.state.lock().unwrap();
+        state.cycles[core_id]
+    }
+
     pub fn park_while_inactive(&self, core_id: usize) -> bool {
         let mut state = self.state.lock().unwrap();
         if core_id >= self.num_threads {

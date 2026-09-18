@@ -470,35 +470,6 @@ impl SaturnSystem {
         self.handles.push(handle_c4);
 
         // Spawn Core 5: SCSP Sound Synthesizer.
-        //
-        // **KNOWN VIOLATION of spec 1.5: this thread never parks.** It is not
-        // an exception, it is unconverted debt, and
-        // `tools/golden_rules.py`'s `rule_spawned_threads_park` fails on it
-        // deliberately, with no escape hatch -- no allowlist entry and no
-        // `// golden-rule-ok:` marker will silence it.
-        //
-        // The justification that used to sit here was "real hardware's SCSP
-        // synthesizes audio continuously regardless of what any CPU is doing".
-        // That is true and it is not a reason: real VDP2 scans out pixels
-        // continuously too, and Core 3 still parks, woken at the cycle-driven
-        // V-Blank IN moment. "The real chip runs continuously" argues for
-        // advancing *emulated state* continuously, not for burning a host
-        // thread.
-        //
-        // Measured cost of not fixing it: 0.564 s of CPU across a 2.33 s BIOS
-        // boot, ~24% of one core, synthesizing what is almost certainly silence
-        // (SCSP voices unconfigured at boot). Invisible on a desktop Ryzen;
-        // on the R36S's four A53s, already 5-8x short of real time, it is a
-        // quarter of a core that is not available to give.
-        //
-        // The fix is the Core 3 pattern: wake in batches on the Master SH-2's
-        // cycle-driven schedule instead of one sample per loop turn.
-        //
-        // History, so it is not retried: it once ran completely unthrottled,
-        // spinning at ~100% of a host core generating audio far faster than
-        // real time for no benefit. A `ClockThrottle` was tried as the fix and
-        // removed again -- spec 1.4 scopes wall-clock batching to the CPU cores
-        // alone. Pacing comes from `LockStepSync` today; see the loop body.
         let sync_c5 = sync.clone();
         let arbiter_c5 = arbiter.clone();
         let work_ram_c5 = work_ram.clone();
@@ -508,16 +479,38 @@ impl SaturnSystem {
             .spawn(move || {
                 let _guard = PanicGuard::new(sync_c5.clone(), arbiter_c5);
                 let mut cycles = 0u64;
+                let mut sample_cycles_acc = 0u64;
                 sync_c5.set_thread_active(5, false);
                 loop {
                     if !sync_c5.park_while_inactive(5) {
                         return;
                     }
 
-                    scsp_c5.lock().unwrap().synthesize(&work_ram_c5, 735);
+                    let target_cycles = sync_c5.get_cycles(5);
+                    let elapsed = target_cycles.saturating_sub(cycles);
+                    let chunk_max = sync_c5.slack_limit().max(1);
 
-                    cycles = cycles.wrapping_add(1);
-                    sync_c5.sync_core(5, cycles);
+                    let mut remaining = elapsed;
+                    while remaining > 0 {
+                        let chunk = remaining.min(chunk_max);
+                        remaining -= chunk;
+
+                        sample_cycles_acc += chunk * crate::throttle::SCSP_SAMPLE_CYCLES_NUM;
+                        let samples = sample_cycles_acc / crate::throttle::SCSP_SAMPLE_CYCLES_DEN;
+                        sample_cycles_acc -= samples * crate::throttle::SCSP_SAMPLE_CYCLES_DEN;
+
+                        if samples > 0 {
+                            scsp_c5
+                                .lock()
+                                .unwrap()
+                                .synthesize(&work_ram_c5, samples as usize);
+                        }
+
+                        cycles = cycles.wrapping_add(chunk);
+                        if !sync_c5.sync_core(5, cycles) {
+                            break;
+                        }
+                    }
                     sync_c5.set_thread_active(5, false);
                 }
             })
@@ -704,3 +697,4 @@ pub mod vdp2;
 
 #[cfg(test)]
 mod integration_tests;
+mod vdp2_tests;

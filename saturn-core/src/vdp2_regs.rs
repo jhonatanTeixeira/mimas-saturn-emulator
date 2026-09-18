@@ -96,9 +96,6 @@ impl Vdp2Registers {
     pub fn ccrnb(&self) -> u16 {
         self.regs[0x10A / 2]
     }
-    pub fn ccrr(&self) -> u16 {
-        self.regs[0x10C / 2]
-    }
     pub fn ccrlb(&self) -> u16 {
         self.regs[0x10E / 2]
     }
@@ -445,7 +442,13 @@ pub fn cram_lookup(index: u16, mode: u16, cram: &[u8]) -> u32 {
         }
         2 => {
             let addr = ((index as usize) << 2) & 0xFFF;
-            u32::from_be_bytes([cram[addr], cram[addr + 1], cram[addr + 2], cram[addr + 3]])
+            let val =
+                u32::from_be_bytes([cram[addr], cram[addr + 1], cram[addr + 2], cram[addr + 3]]);
+            let msb = val & 0x80000000;
+            let r = (val >> 3) & 0x1F;
+            let g = (val >> 11) & 0x1F;
+            let b = (val >> 19) & 0x1F;
+            msb | (b << 10) | (g << 5) | r
         }
         _ => 0,
     }
@@ -523,7 +526,7 @@ mod tests {
         cram[3] = 0x78;
 
         let color = cram_lookup(0, 2, &cram);
-        assert_eq!(color, 0x12345678);
+        assert_eq!(color, 6479);
     }
 
     #[test]

@@ -985,13 +985,13 @@ fn render_nbg_layer(
     };
 
     let ccr = match layer {
-        0 => regs.ccrnb() >> 8,
-        1 => regs.ccrnb(),
-        2 => regs.ccrna() >> 8,
-        3 => regs.ccrna(),
+        0 => regs.ccrna(),
+        1 => regs.ccrna() >> 8,
+        2 => regs.ccrnb(),
+        3 => regs.ccrnb() >> 8,
         _ => 0,
     } & 0x1F;
-    let alpha = (((!ccr) & 0x1F) << 1) + 1; // wait, in rust it is !ccr
+    let alpha = (((!ccr) & 0x1F) << 1) + 1;
 
     let priority = match layer {
         0 => regs.prina_nbg0(),
@@ -1225,15 +1225,7 @@ pub fn render_frame(
                 let expanded = if prio == 0 {
                     back
                 } else {
-                    let rgb = if (color & 0x7FFF) == color
-                        || (color & 0x80007FFF) == color
-                        || (color & 0xBF007FFF) == color
-                        || (color & 0xFF007FFF) == color
-                    {
-                        crate::vdp::rgb555_to_xrgb8888((color & 0x7FFF) as u16)
-                    } else {
-                        color & 0xFFFFFF
-                    };
+                    let rgb = crate::vdp::rgb555_to_xrgb8888((color & 0x7FFF) as u16);
                     (((color & 0x3F000000) << 2) + 0x03000000) | rgb
                 };
                 frame.pixels[idx] = expanded;

@@ -54,17 +54,6 @@ impl LayerBuffers {
     }
 }
 
-pub fn pixel_is_special(layer: usize, dot: u32, sfsel: u16, sfcode: u16) -> bool {
-    let sel_bit = (sfsel >> layer) & 1;
-    let code_byte = if sel_bit != 0 {
-        (sfcode >> 8) & 0xFF
-    } else {
-        sfcode & 0xFF
-    };
-    let dot_idx = dot & 0xF;
-    (code_byte & (1 << (dot_idx >> 1))) != 0
-}
-
 pub fn blend_pixels(top: u32, bottom: u32, mode: u8) -> u32 {
     let top_alpha = (top >> 24) & 0x3F;
     let tr = top & 0x1F;
@@ -156,7 +145,16 @@ pub fn dig_pixel(
     let mut out_pixel = top.pixel;
 
     // Check CCCTL
-    let top_ccctl_en = (ccctl & (1 << l0)) != 0;
+    let ccctl_layer_bit = match l0 {
+        0 => 3, // NBG3
+        1 => 2, // NBG2
+        2 => 1, // NBG1
+        3 => 0, // NBG0
+        4 => 4, // RBG0
+        5 => 6, // SPRITE
+        _ => 0,
+    };
+    let top_ccctl_en = (ccctl & (1 << ccctl_layer_bit)) != 0;
     let top_alpha_bit = (top.pixel & 0x80000000) != 0;
     let top_alpha_val = (top.pixel >> 24) & 0x3F;
 
@@ -190,50 +188,10 @@ pub fn dig_pixel(
         out_pixel = blend_pixels(out_pixel, bottom, blend_mode);
     }
 
-    // Special Shadow check: if top is sprite and has shadow_type... wait, Phase 4 doesn't have sprite shadow yet.
-    // Shadows: "implement blending with 0x20000000 per the spec".
-    // If top is shadow and bottom accepts it:
-    // ... wait, Phase 4.3 says "SDCTL per layer -> shadow_enabled... It means 'this layer accepts being shadowed'."
-    if top.pixel == 0 { // Sprite shadow color is 0 usually, but let's leave shadow as a TODO or basic implementation.
-         // pass
-    }
-
     (out_pixel, top.priority)
 }
 
 // OLD
-pub fn old_dig_pixel(layers: &[&[PixelData]; 6], index: usize, back_screen: u32) -> (u32, u8) {
-    let mut p0: Option<&PixelData> = None;
-    let mut p1: Option<&PixelData> = None;
-
-    // Sprite=5, RBG0=4, NBG0=3, NBG1=2, NBG2=1, NBG3=0
-    let tie_break_order = [5, 4, 3, 2, 1, 0];
-
-    for prio in (1..=7).rev() {
-        for &l in tie_break_order.iter() {
-            let p = &layers[l][index];
-            if p.priority == prio {
-                if p0.is_none() {
-                    p0 = Some(p);
-                } else if p1.is_none() {
-                    p1 = Some(p);
-                    break;
-                }
-            }
-        }
-        if p1.is_some() {
-            break;
-        }
-    }
-
-    let top = match p0 {
-        Some(p) => p.pixel,
-        None => return (back_screen, 0), // priority 0 for backscreen
-    };
-
-    (top, p0.unwrap().priority)
-}
-
 pub struct Vdp2State {
     pub pipe: [Vdp2CellInfo; 2],
     pub oldcellcheck: u32,
@@ -617,7 +575,11 @@ pub fn fetch_pixel(
             if (dot & 0x80000000) == 0 && cfg.transparencyenable {
                 return None;
             }
-            Some(dot & 0xFFFFFF)
+            let msb = dot & 0x80000000;
+            let r = (dot >> 3) & 0x1F;
+            let g = (dot >> 11) & 0x1F;
+            let b = (dot >> 19) & 0x1F;
+            Some(msb | (b << 10) | (g << 5) | r)
         }
         _ => None,
     }
@@ -895,7 +857,7 @@ mod tests {
             },
             (&vram, &cram),
         );
-        assert_eq!(px, Some(0xDEAD_BEEF));
+        assert_eq!(px, Some(2147505917));
     }
 
     #[test]
@@ -935,7 +897,7 @@ mod tests {
             },
             (&vram, &cram),
         );
-        assert_eq!(px, Some(0x0102_0304));
+        assert_eq!(px, Some(0));
     }
 
     #[test]
@@ -1006,7 +968,7 @@ mod tests {
         );
         assert_eq!(
             opaque,
-            Some(0xCAFE_BABE),
+            Some(2147516151),
             "dot 0 with transparency disabled still draws palette entry 0"
         );
     }
@@ -1079,7 +1041,7 @@ mod tests {
             },
             (&vram, &cram),
         );
-        assert_eq!(px, Some(0x1122_3344));
+        assert_eq!(px, Some(4296));
     }
 
     #[test]
@@ -1118,7 +1080,7 @@ mod tests {
             },
             (&vram, &cram),
         );
-        assert_eq!(flipped, Some(0xDEAD_BEEF));
+        assert_eq!(flipped, Some(2147505917));
     }
 
     #[test]
