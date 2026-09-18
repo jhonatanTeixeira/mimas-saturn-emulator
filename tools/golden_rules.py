@@ -43,6 +43,13 @@ class Finding:
     path: str
     line: int
     detail: str
+    # False when the rule has no `// golden-rule-ok:` lookup, so the footer does
+    # not advertise an escape hatch that does not exist. Advertising one is not
+    # harmless: an agent that tries the marker, sees the rule still red, and
+    # concludes the checker is broken is one step away from reshaping the code
+    # until the checker stops matching -- which is exactly how
+    # `rule_no_atomic_poll_loop` went blind.
+    excusable: bool = True
 
 
 @dataclass
@@ -364,11 +371,30 @@ def rule_spawned_threads_park(tree: Tree) -> list[Finding]:
     """Spec 1.5: "Every other component thread is parked-until-woken."
 
     Only the two SH-2 cores may loop continuously. Every other spawned thread has
-    to reach `park_while_inactive`. Core 5 (SCSP) never did -- the spec records it
-    as a known gap, so it is allowlisted here *by name*, which keeps the exception
-    visible instead of making the rule silent.
+    to reach `park_while_inactive`.
+
+    **Core 5 (`scsp-synth`) used to be allowlisted here and no longer is.** The
+    justification on record was that "real hardware synthesizes audio
+    continuously regardless of what any CPU is doing", but that argument does not
+    single Core 5 out from anything: real VDP2 scans out pixels continuously too,
+    and Core 3 still parks and is woken at the cycle-driven V-Blank IN moment.
+    "The real chip runs continuously" is an argument for advancing *emulated
+    state* continuously, not for burning a host thread. The honest half of the
+    old note was its second clause -- "it has not yet been converted and is
+    tracked as follow-up work" -- which is inherited debt, not a design.
+
+    Measured cost of leaving it: 0.564 s of CPU across a 2.33 s BIOS boot, about
+    24% of one core, synthesizing what is almost certainly silence. On a Ryzen
+    that vanishes; on the R36S's four A53s, already 5-8x short of real time, it
+    is a quarter of a core that is not available to give.
+
+    So this rule has **no escape hatch at all** -- no allowlist entry and, unlike
+    every other rule here, no `// golden-rule-ok:` lookup. A thread that loops
+    forever is either converted to park or it stays red. The fix is not exotic:
+    wake it in batches on the Master's cycle-driven schedule, exactly as Core 3
+    is woken.
     """
-    allowed_names = {"sh2-master", "sh2-slave", "scsp-synth"}
+    allowed_names = {"sh2-master", "sh2-slave"}
     out = []
     f = "saturn-core/src/lib.rs"
     if f not in tree.files():
@@ -400,7 +426,8 @@ def rule_spawned_threads_park(tree: Tree) -> list[Finding]:
         body = prod[brace : i + 1]
         if "park_while_inactive" not in body:
             out.append(Finding("threads-park", "1.5", f, _line_of(raw, m.start()),
-                               f"thread `{name}` never reaches park_while_inactive"))
+                               f"thread `{name}` never reaches park_while_inactive",
+                               excusable=False))
     return out
 
 
@@ -609,7 +636,38 @@ def self_test() -> int:
             while let Some(x) = v.pop() { work(x); }
         }
     """
+    # `threads-park` has no escape hatch on purpose. The marker case below is the
+    # one that matters: it proves the rule cannot be talked out of, only fixed.
+    PARK_NONE = """
+        fn start() {
+            thread::Builder::new().name("vdp1-draw".into()).spawn(move || {
+                loop { do_work(); }
+            });
+        }
+    """
+    PARK_MARKED = """
+        fn start() {
+            // golden-rule-ok: claiming an exception that this rule does not grant
+            thread::Builder::new().name("vdp1-draw".into()).spawn(move || {
+                loop { do_work(); }
+            });
+        }
+    """
+    PARK_OK = """
+        fn start() {
+            thread::Builder::new().name("vdp1-draw".into()).spawn(move || {
+                loop {
+                    if !sync.park_while_inactive(2) { return; }
+                    do_work();
+                }
+            });
+        }
+    """
     synthetic = [
+        (PARK_NONE, "threads-park", True, "thread loops forever, never parks"),
+        (PARK_MARKED, "threads-park", True,
+         "a `golden-rule-ok:` marker must NOT silence this rule -- it has no escape hatch"),
+        (PARK_OK, "threads-park", False, "thread reaches park_while_inactive"),
         (POLL_PLAIN, "no-atomic-poll-loop", True, "plain one-line poll -- the original shape"),
         (POLL_BLOCK, "no-atomic-poll-loop", True,
          "same poll wrapped in a block-expression condition; the regex version saw nothing"),
@@ -619,7 +677,7 @@ def self_test() -> int:
 
     ok = True
     for src, rule, expected, why in synthetic:
-        tree = Tree(virtual={"saturn-core/src/synthetic.rs": src})
+        tree = Tree(virtual={"saturn-core/src/lib.rs": src})
         hits = [f for f in run(tree) if f.rule == rule]
         got = bool(hits)
         mark = "\u2705" if got == expected else "\u274c"
@@ -657,11 +715,16 @@ def main() -> int:
     print(f"❌ {len(findings)} golden-rule violation(s):")
     for f in sorted(findings, key=lambda x: (x.rule, x.path, x.line)):
         loc = f"{f.path}:{f.line}" if f.line else f.path
-        print(f"   [{f.rule}] spec §{f.spec}  {loc}")
+        tag = "" if f.excusable else "  [no escape hatch]"
+        print(f"   [{f.rule}] spec §{f.spec}  {loc}{tag}")
         print(f"      {f.detail}")
     print()
-    print("   Fix the violation, or mark the specific site with")
-    print("   `// golden-rule-ok: <reason>` if the rule is genuinely wrong there.")
+    if any(f.excusable for f in findings):
+        print("   Fix the violation, or mark the specific site with")
+        print("   `// golden-rule-ok: <reason>` if the rule is genuinely wrong there.")
+    if any(not f.excusable for f in findings):
+        print("   Rules marked [no escape hatch] take no `// golden-rule-ok:` marker.")
+        print("   They stay red until the code changes. That is the point.")
     return 1
 
 

@@ -470,15 +470,34 @@ impl SaturnSystem {
 
         // Spawn Core 5: SCSP Sound Synthesizer.
         //
-        // Always has real work (real hardware's SCSP synthesizes
-        // continuously, independent of the M68K's own run/stop state), so
-        // unlike Cores 2/4/7 it can't park -- but it previously ran
-        // completely unthrottled regardless of `self.speed`, spinning at
-        // ~100% of a host core generating audio far faster than real time
-        // for no benefit. Now paced through the same `ClockThrottle`
-        // mechanism the SH-2s and M68K already use: a no-op when
-        // `ThrottleSpeed::Unthrottled` (the default -- existing
-        // verification workflows are unaffected), real pacing otherwise.
+        // **KNOWN VIOLATION of spec 1.5: this thread never parks.** It is not
+        // an exception, it is unconverted debt, and
+        // `tools/golden_rules.py`'s `rule_spawned_threads_park` fails on it
+        // deliberately, with no escape hatch -- no allowlist entry and no
+        // `// golden-rule-ok:` marker will silence it.
+        //
+        // The justification that used to sit here was "real hardware's SCSP
+        // synthesizes audio continuously regardless of what any CPU is doing".
+        // That is true and it is not a reason: real VDP2 scans out pixels
+        // continuously too, and Core 3 still parks, woken at the cycle-driven
+        // V-Blank IN moment. "The real chip runs continuously" argues for
+        // advancing *emulated state* continuously, not for burning a host
+        // thread.
+        //
+        // Measured cost of not fixing it: 0.564 s of CPU across a 2.33 s BIOS
+        // boot, ~24% of one core, synthesizing what is almost certainly silence
+        // (SCSP voices unconfigured at boot). Invisible on a desktop Ryzen;
+        // on the R36S's four A53s, already 5-8x short of real time, it is a
+        // quarter of a core that is not available to give.
+        //
+        // The fix is the Core 3 pattern: wake in batches on the Master SH-2's
+        // cycle-driven schedule instead of one sample per loop turn.
+        //
+        // History, so it is not retried: it once ran completely unthrottled,
+        // spinning at ~100% of a host core generating audio far faster than
+        // real time for no benefit. A `ClockThrottle` was tried as the fix and
+        // removed again -- spec 1.4 scopes wall-clock batching to the CPU cores
+        // alone. Pacing comes from `LockStepSync` today; see the loop body.
         let sync_c5 = sync.clone();
         let arbiter_c5 = arbiter.clone();
         let shutdown_c5 = shutdown.clone();
@@ -490,17 +509,37 @@ impl SaturnSystem {
                 let _guard = PanicGuard::new(sync_c5.clone(), arbiter_c5);
                 let mut cycles = 0u64;
                 let mut sample_cycles_acc: u64 = 0;
-                // golden-rule-ok: spec 1.2 forbids busy-polling an atomic *for
-                // work*. This load is the shutdown exit check, not a wait: the
-                // body below synthesizes a full sample on every single
-                // iteration, so the loop never spins waiting for something to
-                // become true. Core 5 is also the one thread spec 1.5 exempts
-                // from parking -- real hardware's SCSP synthesizes continuously
-                // regardless of what any CPU is doing -- so there is no park to
-                // return to here. That exemption is recorded in `CLAUDE.md` and
-                // `GEMINI.md` and is allowlisted *by name* in
-                // `rule_spawned_threads_park`, deliberately, so it stays visible
-                // rather than making the rule silent.
+                // golden-rule-ok: **not an exception to spec 1.2 -- a false
+                // positive of the check.** Read that carefully, because the two
+                // are different and conflating them is how a real violation
+                // gets laundered through an unrelated exemption.
+                //
+                // What 1.2 forbids is busy-polling an atomic *to wait for work*:
+                // a loop whose iteration can make zero progress and immediately
+                // run again. That is not this loop.
+                //
+                //   - Every iteration synthesizes one full audio sample. There
+                //     is no wasted turn to spin on.
+                //   - The atomic below does not pace anything. Pacing is
+                //     `sync_core`, which `Condvar::wait`s once this core drifts
+                //     more than `slack_limit` ahead of the slowest active one.
+                //   - Measured: Core 5 spent 1765.8 ms of a 2.33 s BIOS boot
+                //     asleep in that wait -- 75.8% of wall clock
+                //     (`telemetry::print_report`). A polling loop does not sleep
+                //     three quarters of its life.
+                //
+                // So this `load` is a termination test, like `while !done`.
+                // Deleting it would not change the pacing at all. The check
+                // fires on the *shape* `while <expr containing .load()> {` and
+                // cannot tell an atomic that gates progress from one that ends
+                // the loop; that distinction is deliberately left to a human
+                // here rather than guessed at by the rule, because auto-excusing
+                // anything named "shutdown" would wave through a real work-poll
+                // called `shutdown_requested`.
+                //
+                // Spec 1.5 (this thread never parks) is a *separate* and still
+                // open violation -- see the comment on the spawn above. Nothing
+                // here excuses it, and nothing can: that rule takes no marker.
                 while !shutdown_c5.load(Ordering::Relaxed) {
                     if sync_c5.is_shutdown() {
                         break;

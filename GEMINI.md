@@ -23,7 +23,7 @@ If you cannot implement a component this way, stop and flag it rather than shipp
 | 2 | `vdp1-draw` | No — parked forever | Named for VDP1 but currently does no real work: VDP1 command-list execution actually runs inline from Core 3, not here |
 | 3 | `vdp2-composite` | No — parked, woken at V-Blank IN | Runs both `vdp::execute_vdp1` and `render_backdrop` once per real frame, only when Master SH-2's cycle-driven timing fires V-Blank IN |
 | 4 | `m68k-sound-cpu` | No — parked while `SNDOFF`, woken on `SNDON` | Sound CPU |
-| 5 | `scsp-synth` | Yes — **documented exception** | Real hardware synthesizes audio continuously regardless of CPU state, so this is genuine hardware-driven continuous work, not a polling loop; paced via `ClockThrottle` |
+| 5 | `scsp-synth` | Yes — **OPEN VIOLATION, not an exception** | Never reaches `park_while_inactive`. `golden_rules.py` fails on this with **no escape hatch** — no allowlist, no `// golden-rule-ok:`. Do not try to silence it; convert it (wake in batches on the Master's cycle-driven schedule, like Core 3). Costs ~24% of a core at boot |
 | 6 | `scu-dma-dsp` | No — parked, woken on DMA/DSP activity | SCU DMA engine + DSP interpreter |
 | 7 | `smpc-cd-block` | No — parked forever | No SMPC or CD-block logic runs here yet |
 

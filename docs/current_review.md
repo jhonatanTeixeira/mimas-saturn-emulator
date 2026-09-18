@@ -64,28 +64,60 @@ Confirmação final: removendo o marcador da árvore corrigida, a regra acende e
 
 ---
 
-## Achado 2 — a exceção em si é legítima, e o gemini não a inventou
+## Achado 2 — não era exceção. São *duas* regras diferentes no mesmo ponto
 
-Isso precisa ser dito com a mesma clareza. Checado no blame:
+O rótulo "exceção documentada" é o erro central, e eu o repeti antes de conferir. No laço
+do Core 5 convivem duas coisas que não têm relação entre si:
 
-- `GEMINI.md:26` e o bullet equivalente no `CLAUDE.md` marcam `scsp-synth` como
-  **exceção documentada** desde `a9f25d4` (autor: Jhonatan Teixeira, 2026-08-15). O
-  gemini não escreveu a exceção para se cobrir; ela já existia.
-- `rule_spawned_threads_park` já tem `scsp-synth` numa allowlist **por nome**, de
-  propósito, para a exceção ficar visível em vez de a regra ficar muda.
-- Quanto ao mérito: a §1.2 proíbe *busy-poll de atômico à espera de trabalho*. Este
-  `load` é o teste de saída por shutdown, e o corpo sintetiza uma amostra inteira a cada
-  iteração — o laço nunca gira esperando algo virar verdade. **É falso positivo da minha
-  regra**, que não distingue "esperar" de "conferir se é hora de sair".
+### §1.5 "toda thread parkeia" — violação real, exceção real
 
-Não automatizei essa distinção de propósito. Isentar tudo que se chame `shutdown` deixaria
-passar um poll de trabalho batizado de `shutdown_requested`. A regra fica burra e a
-exceção fica explícita e legível — que é a disciplina do `// no-assert:` e do
-`// golden-rule-ok:`.
+Core 5 nunca chama `park_while_inactive`. Isso quebra a §1.5 de verdade, e é exceção
+legítima: o SCSP real sintetiza continuamente, independente do que qualquer CPU faça.
+Registrada em `CLAUDE.md` e `GEMINI.md` desde `a9f25d4` (Jhonatan, 15/08) e allowlistada
+**por nome** em `rule_spawned_threads_park`, de propósito, para não emudecer a regra.
 
-O motivo escrito agora diz *por que*, não "documented exception", que não cita nada.
+### §1.2 "sem busy-poll de atômico" — não é violação. É falso positivo do checador
 
----
+O que a §1.2 proíbe é girar num atômico **à espera de trabalho**: um laço cuja iteração
+pode não progredir nada e repetir na hora. Não é este laço.
+
+- Cada iteração sintetiza uma amostra de áudio inteira. Não há volta desperdiçada.
+- O atômico não dita ritmo nenhum. Quem dita é `sync_core`, que faz
+  `Condvar::wait` assim que este core passa de `slack_limit` à frente do mais lento.
+- **Medido**, não argumentado: Core 5 passou **1765,8 ms de um boot de BIOS de 2,33 s
+  dormindo nessa espera — 75,8% do relógio de parede** (`telemetry::print_report`).
+  Laço de polling não dorme três quartos da vida.
+
+Comparação na mesma corrida: Core 0 (Master SH-2) acumulou 85 ms ocioso, porque é ele o
+marcador de ritmo e a §1.4/§1.5 nomeiam o laço da CPU como o único contínuo. Cores
+1/2/3/4/6/7 marcam 0,000 ms — não por girarem, mas porque `record_idle_time` só é chamado
+no caminho de espera por drift do `sync_core`, e elas estão paradas em
+`park_while_inactive`, que é outro caminho.
+
+Logo, `!shutdown_c5.load(..)` é teste de término, tipo `while !done`. Apagá-lo não mudaria
+o ritmo em nada. A regra acende pela **forma** `while <expr com .load()> {` e não consegue
+separar um atômico que porteia progresso de um que encerra o laço.
+
+Não automatizei essa distinção de propósito: isentar tudo que se chame `shutdown` deixaria
+passar um poll de trabalho batizado de `shutdown_requested`. A regra fica burra, a exceção
+fica explícita — a disciplina do `// no-assert:` e do `// golden-rule-ok:`.
+
+### Por que "documented exception" era motivo inadequado
+
+Porque toma emprestada a isenção **real** da §1.5 para desculpar um achado da §1.2. São
+regras distintas. Um motivo que não diz *qual* exceção lava a dispensa de uma regra na
+outra — e é isso, independente da cegueira da regex, que torna a frase imprestável.
+
+O comentário no código agora separa as duas explicitamente e lidera pela evidência do
+Condvar, não pela asserção.
+
+### De quebra: comentário obsoleto no spawn
+
+O bloco acima do `spawn` do Core 5 afirmava que ele é "paced through the same
+`ClockThrottle` mechanism the SH-2s and M68K already use". Não é — o corpo do laço diz o
+contrário quatro linhas abaixo ("spec 1.4 scopes `ClockThrottle` to the CPU cores alone")
+e não há `ClockThrottle` nenhum ali. O `ClockThrottle` foi tentado e removido. Comentário
+reescrito para descrever o que o código faz.
 
 ## Achado 3 — os `#[allow(clippy::cognitive_complexity)]` estão corretos
 
