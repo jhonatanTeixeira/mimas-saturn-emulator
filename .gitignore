@@ -18,3 +18,4 @@
 # cargo-mutants output and its copied build trees
 mutants.out*/
 .mutants-tmp/
+scratch/ra_system/*.bin
