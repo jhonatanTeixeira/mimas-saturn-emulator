@@ -173,5 +173,4 @@ fn test_dig_pixel_blend_logic() {
     let layers2: [&[crate::vdp2::PixelData]; 6] = [&empty, &empty, &empty, &nbg0, &rbg0, &empty];
     let _ = crate::vdp2::dig_pixel(&layers2, 0, 0, 0, 0x101); // ADD
     let _ = crate::vdp2::dig_pixel(&layers2, 0, 0, 0, 0x201); // BOTTOM
-    
 }

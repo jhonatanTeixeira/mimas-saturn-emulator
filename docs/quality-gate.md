@@ -151,8 +151,8 @@ the absence of a panic genuinely is the point.
 
 `cargo tarpaulin --ignore-tests --fail-under 90`, **with no `--exclude-files`**.
 
-Measured 2026-09-17: **65.03%** (5853/9000 lines). This step is red and stays red
-until the gap closes. Adding exclusions until the number reaches the target
+Measured 2026-09-18: **77.84%** (6512/8366 lines), up from 65.03% the day
+before. This step is red and stays red until the gap closes. Adding exclusions until the number reaches the target
 measures how many exclusions were added, nothing else. What is below the bar is
 recorded in `.development/current_bugs.md` instead of hidden behind a flag.
 
@@ -165,6 +165,59 @@ opcode masks that can never match, `vdp2_regs.rs` at 35% had four accessors
 reading the wrong register offset. That is not a coincidence.
 
 **Honest fix:** write tests.
+
+#### Scoping the same floor to a commit range — `MIMAS_COVERAGE_COMMITS`
+
+```bash
+MIMAS_COVERAGE_COMMITS=HEAD~3 bash tools/quality_gate.sh
+```
+
+Set it, and the 90% floor is applied to **the executable lines that range
+changed**, instead of to the whole tree. Leave it unset and nothing changes: the
+whole tree is measured, as before.
+
+This is not a lower bar. It is the same 90%, asked of new work. It exists
+because the whole-tree number cannot answer the question that matters during
+review: a commit adding 200 untested lines moves 77.84% to about 77.4%, which
+nobody notices, and a commit adding 200 well-tested lines is equally invisible.
+Old debt stays exactly as visible as it was — it is simply not what this run
+measured.
+
+What counts: only lines tarpaulin reports as executable. Comments, blank lines,
+`use` statements and type declarations never appear in the LCOV data, so they
+are neither numerator nor denominator. `--ignore-tests` keeps test bodies out
+too, so adding tests cannot inflate the score — tests show up as coverage of the
+product lines they exercise, which is the point. A range that touches no product
+code passes with "nothing to measure", rather than dividing by zero.
+
+**The diff always runs from the base to the working tree, and a range whose tip
+is not HEAD is refused.** Coverage is measured by running the tests against the
+working tree, so that is the only version whose line numbers the LCOV data can
+be intersected with. This is not a hypothetical: on its first real run the tool
+was asked for `71a5c13~1..71a5c13` and cheerfully printed line numbers from a
+three-commit-old `vdp.rs` as uncovered, while tarpaulin had measured the current
+one. Every line that had moved reported the hit count of whatever now sat at
+that number. It now refuses and says why.
+
+Because a scoped run does not measure the tree, it is reported separately in the
+banner (`◑ SCOPED`), in the step, and in the summary — "the gate passed" must
+not be able to mean "the gate passed on eleven lines".
+
+Worked example, the three VDP2 Phase 4 commits:
+
+```
+   range: 8f04ee497..working tree
+      saturn-core/src/lib.rs: 19/20 (95.0%)
+   ❗ saturn-core/src/vdp.rs: 34/47 (72.3%)
+        uncovered lines: 988, 989, 990, 992, 997, 998, 999, 1001, ...
+   ❗ saturn-core/src/vdp2.rs: 77/98 (78.6%)
+   TOTAL: 151/192 (78.65%) against a 90% floor
+```
+
+`vdp.rs:988-1001` is the CCR-per-layer mapping that a review had just found
+inverted and a follow-up commit had just fixed. The fix landed with no test. The
+whole-tree figure did not move enough to notice; the diff figure names the
+lines.
 
 ### 8 — Code size
 
@@ -218,9 +271,11 @@ regression turns green.
 | variable | default | direction |
 |---|---|---|
 | `MIMAS_COVERAGE_MIN` | 90 | lower is looser |
+| `MIMAS_COVERAGE_COMMITS` | *(unset — whole tree)* | scope, not a threshold: narrows **what** the floor applies to, never the floor itself. Reported as `◑ SCOPED`, no override reason required |
 | `MIMAS_MIN_SPEED_PCT` | 150 | lower is looser |
 | `MIMAS_WARN_SPEED_PCT` | 170 | lower is looser |
 | `MIMAS_GATE_PC` | `0x06001694` | any change is looser |
+| `MIMAS_GATE_TARGET_PC` | *(undetermined)* | the BIOS-unlock milestone, not a threshold. Red until a completed BIOS boot is actually observed and its settle PC recorded — see [`unlock_bios.md`](unlock_bios.md). Setting it to an unobserved address is the same mistake as editing `MIMAS_GATE_PC` to match a broken build |
 | `MIMAS_GATE_MIN_WRAM` | 2000000 | lower is looser |
 | `MIMAS_LOC_MAX` | 34000 | higher is looser |
 | `MIMAS_BIN_MAX_MB` | 16 | higher is looser |

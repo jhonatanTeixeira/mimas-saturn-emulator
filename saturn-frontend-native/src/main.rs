@@ -198,6 +198,12 @@ fn run_cli(args: Vec<String>) -> bool {
         .unwrap_or(2);
     let run_started = Instant::now();
     let deadline = Instant::now() + Duration::from_secs(watch_secs);
+    // A frozen PC is not the same thing as a finished boot. The detector below
+    // needs 25 consecutive 20ms samples on one address, which a running
+    // two-instruction delay loop cannot produce -- so when it fires, the Master
+    // thread is usually *blocked* (LockStepSync drift), not looping. Set
+    // MIMAS_NO_EARLY_STOP=1 to run the full window and find out which.
+    let no_early_stop = std::env::var("MIMAS_NO_EARLY_STOP").is_ok();
     let mut last_pc = start_pc;
     let mut last_change = Instant::now();
     let mut samples = 0;
@@ -212,7 +218,7 @@ fn run_cli(args: Vec<String>) -> bool {
             );
             last_pc = pc;
             last_change = Instant::now();
-        } else if last_change.elapsed() > Duration::from_millis(500) {
+        } else if !no_early_stop && last_change.elapsed() > Duration::from_millis(500) {
             // Been sitting on the exact same PC for half a second: almost
             // certainly parked in a real wait loop (hardware polling) rather
             // than just a slow bounded loop -- no point burning the rest of
@@ -273,6 +279,18 @@ fn run_cli(args: Vec<String>) -> bool {
         );
     }
     saturn_core::telemetry::print_report();
+    if let Ok(path) = std::env::var("MIMAS_PC_RING") {
+        match saturn_core::sh2::dump_pc_ring(&path) {
+            Ok(n) => println!("PC ring: last {} instructions -> {}", n, path),
+            Err(e) => eprintln!("PC ring: could not write {}: {}", path, e),
+        }
+    }
+    if let Ok(path) = std::env::var("MIMAS_PC_TRACE") {
+        match saturn_core::sh2::dump_pc_trace(&path) {
+            Ok(n) => println!("PC trace: {} distinct addresses -> {}", n, path),
+            Err(e) => eprintln!("PC trace: could not write {}: {}", path, e),
+        }
+    }
 
     // Shutdown system gracefully
     system.shutdown();

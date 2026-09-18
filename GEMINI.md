@@ -155,7 +155,7 @@ VDP1 framebuffer swap is verified. `cargo build`, `cargo test` (396 green),
 | Mess detect (clippy) | fix it, or `#[allow(...)]` **with a comment saying why clippy is wrong here**. **Never `cargo clippy --fix`** -- it was run once and turned an m68k opcode guard into a no-op while muting the warnings that flagged half-written VDP1 code |
 | Golden rules | fix the violation, or `// golden-rule-ok: <reason>` **on the offending line** |
 | Tests that assert nothing | write a real assertion, or `// no-assert: <reason>` if proving the absence of a panic genuinely is the point |
-| Coverage | write tests. Not `--exclude-files`, not a lower bar |
+| Coverage | write tests. Not `--exclude-files`, not a lower bar. To hold *this change* to 90% instead of the whole tree, `MIMAS_COVERAGE_COMMITS=<base-ref>` — same floor, narrower scope, and it is reported as scoped |
 | Smoke test | if boot got *further*, verify and update the expected PC. If it got *shorter*, that is a regression, not a stale constant |
 | Semantic pass | read each hit. Fix it, or record why it is not the pattern |
 
@@ -176,3 +176,49 @@ reported as one.
 
 Say what actually happened. "8 of 12 passed, coverage and golden rules red" is
 useful. "The gate passed" when a threshold was lowered or a step skipped is not.
+
+### Before every commit: coverage of what you are about to commit
+
+**This is mandatory and it has to run *before* `git commit`, not after.**
+
+```bash
+MIMAS_COVERAGE_COMMITS=HEAD bash tools/quality_gate.sh
+```
+
+`HEAD` as the base means "diff HEAD against the working tree" — which, before
+you commit, is exactly the change you are about to make. The same 90% floor
+applies, to the lines you added or modified. **After** you commit, `HEAD` has
+moved and the same command measures nothing; there is no way to run this check
+retroactively, which is why the order matters.
+
+If it is red, the output names the exact uncovered lines. Write tests for them.
+Do not lower `MIMAS_COVERAGE_MIN`, do not widen the range until the number
+improves, and do not commit red and fix it later — the whole-tree figure moves
+by fractions of a percent per commit, so nobody will ever notice it again.
+
+Only lines tarpaulin reports as executable count. A change that touches only
+tests or docs passes with "nothing to measure", because `--ignore-tests` keeps
+test bodies out of the denominator: writing tests shows up as coverage of the
+product lines they exercise, never as coverage of themselves.
+
+Two things the tool refuses rather than answering wrongly, so do not try to work
+around either:
+
+- **A range whose tip is not HEAD.** Coverage is measured against the working
+  tree, so that is the only version whose line numbers it can be intersected
+  with. `A..B` with a historical `B` reports the hit counts of whatever now sits
+  at those line numbers.
+- **Coverage data older than the sources.** If any tracked `.rs` file changed
+  after the LCOV was written, re-run tarpaulin. Do not pass `--allow-stale` to
+  make the message go away.
+
+A scoped run does not measure the tree, and the gate prints that in its summary.
+Say it when reporting: "diff coverage green on my change" is a true statement,
+"coverage green" is not.
+
+### Committing
+
+You are the one who commits in this repository — Claude does not. That makes the
+check above yours alone to run. A commit that has not had
+`MIMAS_COVERAGE_COMMITS=HEAD` run against it is not ready, however green
+everything else looks.

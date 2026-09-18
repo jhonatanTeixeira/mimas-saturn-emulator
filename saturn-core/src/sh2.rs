@@ -2890,6 +2890,9 @@ impl Sh2 {
     /// instruction, all of which have a mandatory delay slot on real SH-2.
     fn delay_slot_and_jump(&mut self, target: u32) {
         let slot_pc = self.pc;
+        if !self.is_slave && pc_ring_enabled() {
+            ring_push(slot_pc);
+        }
         let opcode = self.read_word(slot_pc);
         self.pc = target.wrapping_sub(2);
         let base = self.get_base_cycles(opcode);
@@ -4483,6 +4486,19 @@ impl Sh2 {
                     break;
                 }
             }
+            // Before `step`, so this is the PC of the instruction about to
+            // execute. Placing it after (next to `pc_reporter`, which wants the
+            // *resulting* PC and is correct there) records the next address
+            // instead, silently dropping the very first instruction of the run
+            // -- which made `bios_progress.py` report the BIOS reset entry
+            // point `0x20000200` as never executed against a run that started
+            // there.
+            if pc_trace_enabled() {
+                record_pc(self.pc);
+            }
+            if !self.is_slave && pc_ring_enabled() {
+                ring_push(self.pc);
+            }
             let cycles_before = self.cycles;
             self.step();
             let delta = self.cycles.wrapping_sub(cycles_before) as u32;
@@ -4538,6 +4554,134 @@ impl Sh2 {
 /// `set_bus_trace` exists because resolving from the environment exactly once
 /// is not testable in a parallel test binary -- whichever test touched a bus
 /// first would win the race and pin the value for every other test.
+/// Records every distinct PC the Master SH-2 executes, for
+/// `tools/bios_progress.py` to intersect against a real Yabause capture of a
+/// full BIOS boot. Off by default; `MIMAS_PC_TRACE=<file>` turns it on and
+/// names the dump.
+///
+/// A per-instruction hook on the hottest path in the emulator needs
+/// justification, so: when disabled this is exactly one `Relaxed` load, the
+/// same shape spec 1.2b already sanctions for `bus_trace_enabled` -- no RMW, no
+/// lock, no syscall. When enabled it sets one bit in a preallocated bitmap with
+/// a `Relaxed` `fetch_or`, which is diagnostic-mode cost and never ships in a
+/// measured run.
+///
+/// The bitmap covers the two regions BIOS code actually executes from, at
+/// 2-byte instruction alignment: `0x00000000-0x000FFFFF` (BIOS ROM, also
+/// reached through the `0x20000000` cache-through mirror, which is folded in)
+/// and `0x06000000-0x060FFFFF` (high work RAM, where the BIOS copies its
+/// runtime). 512 Kbit each, 128 KB total. Anything outside both is ignored
+/// rather than silently aliased into them.
+const PC_BITMAP_WORDS: usize = (0x0010_0000 / 2) / 64;
+static PC_SEEN_ROM: [std::sync::atomic::AtomicU64; PC_BITMAP_WORDS] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; PC_BITMAP_WORDS];
+static PC_SEEN_WRAM: [std::sync::atomic::AtomicU64; PC_BITMAP_WORDS] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; PC_BITMAP_WORDS];
+/// The last `PC_RING_LEN` instructions the **Master** SH-2 executed, in order,
+/// delay slots included.
+///
+/// `PC_SEEN_*` above answers "was this address ever reached"; it is a set, so it
+/// cannot say whether the *second* call through an `RTS` returned, and it never
+/// sees a delay slot at all (those execute inside `step` via
+/// `delay_slot_and_jump`, not as a `run_loop` iteration). Both limits produced
+/// wrong readings while diagnosing the `0x06001694` stall: `0x06001608`, the
+/// `MOV.B R1,@R7` that actually writes SNDON to COMREG, looked unexecuted when
+/// it had certainly run.
+///
+/// This is the other instrument: a plain ring of the real execution order, which
+/// answers "what is it actually looping on right now".
+///
+/// Master only. The Slave would interleave into the same buffer and make the
+/// order meaningless, and every question this has been needed for is about
+/// Master's boot path.
+const PC_RING_LEN: usize = 1 << 16;
+static PC_RING: [std::sync::atomic::AtomicU32; PC_RING_LEN] =
+    [const { std::sync::atomic::AtomicU32::new(u32::MAX) }; PC_RING_LEN];
+static PC_RING_POS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static PC_RING_ON: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn pc_ring_enabled() -> bool {
+    match PC_RING_ON.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let on = std::env::var("MIMAS_PC_RING").is_ok();
+            PC_RING_ON.store(if on { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+fn ring_push(pc: u32) {
+    let i = PC_RING_POS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    PC_RING[i % PC_RING_LEN].store(pc, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Write the ring to `path`, oldest first, one 8-digit hex PC per line.
+pub fn dump_pc_ring(path: &str) -> std::io::Result<usize> {
+    use std::io::Write;
+    let pos = PC_RING_POS.load(std::sync::atomic::Ordering::Relaxed);
+    let start = pos.saturating_sub(PC_RING_LEN);
+    let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut n = 0;
+    for i in start..pos {
+        let v = PC_RING[i % PC_RING_LEN].load(std::sync::atomic::Ordering::Relaxed);
+        if v != u32::MAX {
+            writeln!(out, "{:08X}", v)?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+static PC_TRACE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn pc_trace_enabled() -> bool {
+    match PC_TRACE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let on = std::env::var("MIMAS_PC_TRACE").is_ok();
+            PC_TRACE.store(if on { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+fn record_pc(pc: u32) {
+    // `0x20000000` is the cache-through mirror of the same physical address, so
+    // fold it away before deciding which region this is -- otherwise the reset
+    // vector at `0x200003BA` would be dropped as out of range.
+    let phys = pc & 0x0FFF_FFFF;
+    let (table, off) = match phys {
+        0x0000_0000..=0x000F_FFFF => (&PC_SEEN_ROM, phys),
+        0x0600_0000..=0x060F_FFFF => (&PC_SEEN_WRAM, phys - 0x0600_0000),
+        _ => return,
+    };
+    let bit = (off / 2) as usize;
+    table[bit / 64].fetch_or(1u64 << (bit % 64), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Write every recorded PC to `path`, one 8-digit hex address per line.
+/// `tools/bios_progress.py` reads exactly this.
+pub fn dump_pc_trace(path: &str) -> std::io::Result<usize> {
+    use std::io::Write;
+    let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut n = 0;
+    for (table, base) in [(&PC_SEEN_ROM, 0u32), (&PC_SEEN_WRAM, 0x0600_0000u32)] {
+        for (w, cell) in table.iter().enumerate() {
+            let mut bits = cell.load(std::sync::atomic::Ordering::Relaxed);
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                writeln!(out, "{:08X}", base + ((w * 64 + b) as u32) * 2)?;
+                n += 1;
+            }
+        }
+    }
+    Ok(n)
+}
+
 static BUS_TRACE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 fn bus_trace_enabled() -> bool {

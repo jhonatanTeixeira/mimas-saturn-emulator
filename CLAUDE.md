@@ -150,7 +150,7 @@ VDP1 framebuffer swap is verified. `cargo build`, `cargo test` (396 green),
 | Mess detect (clippy) | fix it, or `#[allow(...)]` **with a comment saying why clippy is wrong here**. **Never `cargo clippy --fix`** -- it was run once and turned an m68k opcode guard into a no-op while muting the warnings that flagged half-written VDP1 code |
 | Golden rules | fix the violation, or `// golden-rule-ok: <reason>` **on the offending line** |
 | Tests that assert nothing | write a real assertion, or `// no-assert: <reason>` if proving the absence of a panic genuinely is the point |
-| Coverage | write tests. Not `--exclude-files`, not a lower bar |
+| Coverage | write tests. Not `--exclude-files`, not a lower bar. To hold *this change* to 90% instead of the whole tree, `MIMAS_COVERAGE_COMMITS=<base-ref>` — same floor, narrower scope, and it is reported as scoped |
 | Smoke test | if boot got *further*, verify and update the expected PC. If it got *shorter*, that is a regression, not a stale constant |
 | Semantic pass | read each hit. Fix it, or record why it is not the pattern |
 
@@ -171,3 +171,40 @@ reported as one.
 
 Say what actually happened. "8 of 12 passed, coverage and golden rules red" is
 useful. "The gate passed" when a threshold was lowered or a step skipped is not.
+
+### Coverage of work that is not committed yet
+
+Before calling any change done, measure the coverage of **the change**, not of
+the tree:
+
+```bash
+MIMAS_COVERAGE_COMMITS=HEAD bash tools/quality_gate.sh
+```
+
+`HEAD` as the base means "diff HEAD against the working tree", which is exactly
+the uncommitted work — staged and unstaged. Same 90% floor, applied to the lines
+being added or modified. The tree's own figure is still below its floor and is
+still debt; a scoped run does not measure it, and the gate says so in its
+summary. Repeat that when reporting.
+
+Two traps the tool now refuses rather than answering wrongly:
+
+- **A range whose tip is not HEAD.** Coverage is measured against the working
+  tree, so that is the only version whose line numbers the data can be
+  intersected with. Asking for `A..B` where `B` is historical reports the hit
+  counts of whatever now sits at those numbers.
+- **Coverage data older than the sources.** If any tracked `.rs` file was edited
+  after the LCOV was written, the numbers describe a different version of the
+  code. Re-run tarpaulin.
+
+A range that touches only tests or docs passes with "nothing to measure" —
+`--ignore-tests` keeps test bodies out of the denominator, so writing tests
+shows up as coverage of the product lines they exercise, never as coverage of
+themselves.
+
+### Committing
+
+**Claude does not commit in this repository.** Not with `git commit`, not with
+`git commit --amend`, not indirectly. Leave the work in the tree and say what
+changed; the human or Gemini commits it. This applies even when a change is
+finished, verified and green.
