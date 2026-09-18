@@ -657,10 +657,10 @@ explicitly labelled as one.
       case) and `blend_bottom` (including the pass-through when bit 31 is clear).
 - [x] `ccrlb_is_not_inverted` — asserts the documented asymmetry explicitly, so that a future
       "consistency fix" that inverts it fails a test instead of silently changing output.
-- [x] `sfprmd_mode_1_replaces_priority_bit_0_from_the_pattern_name` and
-      `sfprmd_mode_2_uses_the_pixel_colour_code`.
-- [x] `sfprmd_nonzero_forces_a_priority_zero_layer_to_draw`.
-- [x] `shadow_enabled_is_read_from_the_layer_below` — two layers, `SDCTL` set on the *bottom* one
+- [ ] `sfprmd_mode_1_replaces_priority_bit_0_from_the_pattern_name` and
+      `sfprmd_mode_2_uses_the_pixel_colour_code`. **Partial**: accessor written, not applied.
+- [ ] `sfprmd_nonzero_forces_a_priority_zero_layer_to_draw`. **Partial**
+- [ ] `shadow_enabled_is_read_from_the_layer_below` **Partial** — two layers, `SDCTL` set on the *bottom* one
       only, asserting the shadow applies; and the inverse fixture asserting it does not.
 - [x] `stale_priority_does_not_survive_a_frame` — render frame 1 with a layer, frame 2 with it
       disabled, assert frame 2 shows the back screen. Catches an incomplete erase.

@@ -158,20 +158,18 @@ fn test_dig_pixel_blend_logic() {
     let mut rbg0 = vec![crate::vdp2::PixelData::default(); 1];
 
     nbg0[0].priority = 6;
-    nbg0[0].pixel = 0x10000000 | 0x1111;
+    nbg0[0].pixel = 0xAA001111;
 
     rbg0[0].priority = 5;
-    rbg0[0].pixel = 0x80000000 | 0x2222;
+    rbg0[0].pixel = 0x80102222;
 
     let layers: [&[crate::vdp2::PixelData]; 6] = [&empty, &empty, &empty, &nbg0, &rbg0, &empty];
 
-    // Cover different modes and branches
-    let _ = crate::vdp2::dig_pixel(&layers, 0, 0, 3, 1);
-    let _ = crate::vdp2::dig_pixel(&layers, 0, 0, 0, 1);
+    let (pixel_add, _) = crate::vdp2::dig_pixel(&layers, 0, 0, 0x101, 1);
+    let (pixel_bottom, _) = crate::vdp2::dig_pixel(&layers, 0, 0, 0x201, 1);
+    let (pixel_top, _) = crate::vdp2::dig_pixel(&layers, 0, 0, 0, 1);
 
-    nbg0[0].pixel = 0x80000000 | 0x1111;
-    let layers2: [&[crate::vdp2::PixelData]; 6] = [&empty, &empty, &empty, &nbg0, &rbg0, &empty];
-    let _ = crate::vdp2::dig_pixel(&layers2, 0, 0, 0, 0x101); // ADD
-    let _ = crate::vdp2::dig_pixel(&layers2, 0, 0, 0, 0x201); // BOTTOM
-    // no-assert: just testing coverage
+    assert_eq!(pixel_add, 0x3F003333);
+    assert_eq!(pixel_bottom, 0xAA001E02);
+    assert_eq!(pixel_top, 0x3F00154C);
 }

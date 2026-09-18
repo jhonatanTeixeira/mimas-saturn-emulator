@@ -985,10 +985,10 @@ fn render_nbg_layer(
     };
 
     let ccr = match layer {
-        0 => regs.ccrna(),
-        1 => regs.ccrna() >> 8,
-        2 => regs.ccrnb(),
-        3 => regs.ccrnb() >> 8,
+        3 => regs.ccrna(),
+        2 => regs.ccrna() >> 8,
+        1 => regs.ccrnb(),
+        0 => regs.ccrnb() >> 8,
         _ => 0,
     } & 0x1F;
     let alpha = (((!ccr) & 0x1F) << 1) + 1;

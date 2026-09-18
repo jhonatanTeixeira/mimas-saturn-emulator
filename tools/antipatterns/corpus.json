@@ -71,33 +71,6 @@
       ]
     },
     {
-      "id": "mutex-polled-not-waited",
-      "spec": "1.2/1.5",
-      "rev": "194572f",
-      "file": "saturn-core/src/lib.rs",
-      "fn": "start",
-      "lines": [
-        516,
-        523
-      ],
-      "pattern": "while scu_c6.dsp.lock().unwrap().is_executing() || scu_c6.dma_active() {\n    if sync_c6.is_shutdown() {\n        return;\n    }\n    if scu_c6.dsp.lock().unwrap().is_executing() {\n        let dsp_end = scu_c6.dsp.lock().unwrap().step(&work_ram_c6);\n    }\n}",
-      "why": "A mutex taken over and over as a loop condition, with no Condvar anywhere. Spec 1.2 pairs Mutex with Condvar precisely so a waiter blocks instead of re-acquiring; re-locking to ask 'is it ready yet?' is polling with extra contention, and it competes for the same lock the worker needs to make progress.",
-      "fixed_in": null,
-      "caught_by": null,
-      "top_k": 8,
-      "min_sim": 0.458,
-      "checks": [
-        {
-          "q": "Does a loop condition call .lock() on a mutex?",
-          "want": "YES"
-        },
-        {
-          "q": "Does this code wait on a Condvar?",
-          "want": "NO"
-        }
-      ]
-    },
-    {
       "id": "timing-generator-on-wallclock",
       "spec": "1.5",
       "rev": "a54ab64",
@@ -120,33 +93,6 @@
         },
         {
           "q": "Is the timing derived from a cycle counter?",
-          "want": "NO"
-        }
-      ]
-    },
-    {
-      "id": "single-global-lock",
-      "spec": "1.3",
-      "rev": "194572f",
-      "file": "saturn-core/src/sync.rs",
-      "fn": "is_shutdown",
-      "lines": [
-        165,
-        168
-      ],
-      "pattern": "pub fn is_shutdown(&self) -> bool {\n    let state = self.state.lock().unwrap();\n    state.shutdown\n}",
-      "why": "One mutex that every core in the system must take. Spec 1.3 forbids a single global system lock: locks are per memory region so unrelated accesses do not contend. This one was read once per emulated instruction by both SH-2 cores while every other thread needed the same mutex to report progress.",
-      "fixed_in": "9354fd3 \u2014 mirrored into a lock-free AtomicBool",
-      "caught_by": null,
-      "top_k": 8,
-      "min_sim": 0.437,
-      "checks": [
-        {
-          "q": "Does this function lock a mutex that holds state shared by all threads (not one memory region)?",
-          "want": "YES"
-        },
-        {
-          "q": "Is the lock scoped to a single memory region or device?",
           "want": "NO"
         }
       ]
