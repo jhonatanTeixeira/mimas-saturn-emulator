@@ -4504,7 +4504,13 @@ impl Sh2 {
             self.step();
             if self.pc == 0x06001680 {
                 if self.registers[2] != self.registers[4] {
-                    if !mismatch { eprintln!("[DEBUG] MISMATCH! R2={:08X}, R4={:08X}, R3={:08X}", self.registers[2], self.registers[4], self.registers[3]); mismatch = true; }
+                    if !mismatch {
+                        eprintln!(
+                            "[DEBUG] MISMATCH! R2={:08X}, R4={:08X}, R3={:08X}",
+                            self.registers[2], self.registers[4], self.registers[3]
+                        );
+                        mismatch = true;
+                    }
                 }
             }
             let delta = self.cycles.wrapping_sub(cycles_before) as u32;

@@ -363,7 +363,9 @@ impl M68k {
 
     pub fn step(&mut self) {
         let mut dbg_cnt = UNIMPL_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if dbg_cnt < 20 { eprintln!("[M68K START] pc={:08X}", self.pc); }
+        if dbg_cnt < 20 {
+            eprintln!("[M68K START] pc={:08X}", self.pc);
+        }
         if !self.running {
             return;
         }
@@ -475,10 +477,7 @@ impl M68k {
                     let around_is_zero = ram[lo..hi].iter().all(|&b| b == 0);
                     let first_nonzero = ram.iter().position(|&b| b != 0);
                     let vectors_live = ram[0..8].iter().any(|&b| b != 0);
-                    eprintln!(
-                        "[M68K]   bytes around pc: {:02X?}",
-                        &ram[lo..hi]
-                    );
+                    eprintln!("[M68K]   bytes around pc: {:02X?}", &ram[lo..hi]);
                     eprintln!(
                         "[M68K]   region around pc all zero: {}  |  reset vectors still present: {}  |  first non-zero byte in sound RAM: {:?}",
                         around_is_zero, vectors_live, first_nonzero

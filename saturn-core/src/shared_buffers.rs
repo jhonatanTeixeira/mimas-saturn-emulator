@@ -181,7 +181,9 @@ impl WorkRam {
     }
 
     pub fn write_high_ram_byte(&self, off: usize, val: u8) {
-        if off == 0x000846 || off == 0x000847 { eprintln!("[WATCH] write_high_ram_byte to {:X} = {:02X}", off, val); }
+        if off == 0x000846 || off == 0x000847 {
+            eprintln!("[WATCH] write_high_ram_byte to {:X} = {:02X}", off, val);
+        }
         crate::telemetry::record_wram_write();
         let off = off & 0xFFFFF;
         let stripe = (off >> 15) & 31;
@@ -229,7 +231,9 @@ impl WorkRam {
     }
 
     pub fn write_high_ram_long(&self, off: usize, val: u32) {
-        if off == 0x000846 || off == 0x000844 || off == 0x000848 { eprintln!("[WATCH] write_high_ram_long to {:X} = {:08X}", off, val); }
+        if off == 0x000846 || off == 0x000844 || off == 0x000848 {
+            eprintln!("[WATCH] write_high_ram_long to {:X} = {:08X}", off, val);
+        }
         crate::telemetry::record_wram_write();
         let off = off & 0xFFFFF;
         let stripe = (off >> 15) & 31;
@@ -265,7 +269,9 @@ impl WorkRam {
     }
 
     pub fn write_high_ram_word(&self, off: usize, val: u16) {
-        if off == 0x000846 { eprintln!("[WATCH] write_high_ram_word to 0x0846 = {:04X}", val); }
+        if off == 0x000846 {
+            eprintln!("[WATCH] write_high_ram_word to 0x0846 = {:04X}", val);
+        }
         crate::telemetry::record_wram_write();
         let off = off & 0xFFFFF;
         let stripe = (off >> 15) & 31;

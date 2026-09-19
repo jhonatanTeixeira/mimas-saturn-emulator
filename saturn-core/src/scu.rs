@@ -1049,6 +1049,7 @@ impl Scu {
     fn copy_iteration(&self, lvl: &mut DmaLevel, work_ram: &WorkRam) {
         let dst_is_bbus = Self::is_b_bus_dma(lvl.write_address);
         let src_is_bbus = Self::is_b_bus_dma(lvl.read_address);
+
         if dst_is_bbus {
             let val = self.dma_read_word(work_ram, lvl.read_address);
             let dst = lvl.write_address & 0x0FFF_FFFF;
@@ -1061,6 +1062,19 @@ impl Scu {
             let dst = lvl.write_address & 0x0FFF_FFFF;
             crate::scu_dsp::write_word(work_ram, dst, val);
             lvl.read_address = lvl.read_address.wrapping_add(2);
+            // §2.4 (`scu.c:1198-1213`): the destination advances by the
+            // *write* width -- 2 bytes for this 16-bit unit -- i.e.
+            // `WriteAdd >> 1`, never the full `WriteAdd`. The reference
+            // spells this out as `dma->WriteAddress += (dma->WriteAdd >> 1)`
+            // here, and as plain `+= dma->WriteAdd` in the two sibling
+            // branches; the asymmetry is real, not an oversight in Yabause.
+            //
+            // This branch is reached when a transfer's destination lives
+            // outside the B-Bus but its source does not -- the mirror image
+            // of the more common B-Bus *destination* upload. Taking the
+            // full `WriteAdd` here would stride the write past its own
+            // 16-bit footprint and leave every other destination word
+            // untouched.
             lvl.write_address = lvl.write_address.wrapping_add(lvl.write_add >> 1);
             lvl.transfer_number = lvl.transfer_number.saturating_sub(2);
         } else {
@@ -2000,6 +2014,70 @@ mod tests {
                 read_lr(&work_ram, dst + copy * 4),
                 0xDEAD_BEEF,
                 "copy {copy}"
+            );
+        }
+    }
+
+    /// §2.4 source-on-B-Bus copy mode: with `WriteAdd = 2` the destination
+    /// advances by `WriteAdd >> 1` = **1 byte** per 16-bit unit, not by 2.
+    ///
+    /// This is the one asymmetric stride in the reference. `scu.c:1198-1213`
+    /// reads `dma->WriteAddress += (dma->WriteAdd >> 1)` while both sibling
+    /// branches (`:1180-1197` destination-on-B-Bus, `:1214-1231` neither)
+    /// read plain `+= dma->WriteAdd`. It is reached when the *source* sits
+    /// in the B-Bus window and the destination does not.
+    ///
+    /// Fixture is a real one: the mirror of the BIOS sound-driver upload,
+    /// SCSP sound RAM `0x05A00000` → High WRAM `0x06002000`, `DnAD = 0x101`.
+    /// With the correct stride the four source words land in consecutive
+    /// destination bytes; with the full `WriteAdd` they land 2 bytes apart,
+    /// leaving every odd destination byte at its previous value.
+    #[test]
+    fn copy_mode_source_on_b_bus_advances_destination_by_half_write_add() {
+        let scu = Scu::new();
+        let work_ram = WorkRam::new();
+
+        // Source in sound RAM -- on the B-Bus. Pre-fill so an unwritten
+        // destination byte is distinguishable from a written one.
+        {
+            let mut ram = work_ram.sound_ram.write().unwrap();
+            ram[0..8].copy_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+        }
+        for i in 0..8 {
+            work_ram.write_high_ram_byte(i, 0xAA);
+        }
+
+        let src_wram = 0x05A0_0000u32;
+        let dst_wram = 0x0600_0000u32;
+
+        scu.write_long(0x00, src_wram);
+        scu.write_long(0x04, dst_wram);
+        scu.write_long(0x08, 8); // four 16-bit units
+        scu.write_long(0x0C, 0x101); // read_add = 4, write_add = 2
+        scu.write_long(0x14, 0x7);
+
+        assert!(trigger_dma(&scu, 0));
+        let arbiter = BusArbiter::new();
+        scu.step_dma_pass(&work_ram, &arbiter, 128);
+        assert!(!scu.dma_active(), "four units must complete in one burst");
+
+        // Hand-derived, not copied from a run: four 16-bit writes each
+        // landing `WriteAdd >> 1` = 1 byte further on, so consecutive
+        // writes *overlap* -- the high byte of each write is immediately
+        // overwritten by the low byte of the next.
+        //
+        //   it0: [11 22] at +0   -> 11 22 AA AA AA AA AA AA
+        //   it1: [33 44] at +1   -> 11 33 44 AA AA AA AA AA
+        //   it2: [55 66] at +2   -> 11 33 55 66 AA AA AA AA
+        //   it3: [77 88] at +3   -> 11 33 55 77 88 AA AA AA
+        for (i, expected) in [0x11u8, 0x33, 0x55, 0x77, 0x88, 0xAA, 0xAA, 0xAA]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(
+                work_ram.read_high_ram_byte(i),
+                *expected,
+                "High WRAM byte {i} -- destination must advance 1 byte per 16-bit unit (WriteAdd >> 1)"
             );
         }
     }

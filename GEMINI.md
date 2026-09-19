@@ -16,21 +16,21 @@ If you cannot implement a component this way, stop and flag it rather than shipp
 
 ## 🧵 The 8 threads (`SaturnSystem::start`, `saturn-core/src/lib.rs`)
 
-| Core | Thread | Loops continuously? | Role / known state |
+| Core | Thread | Loops continuously? | Hardware |
 |---|---|---|---|
-| 0 | `sh2-master` | **Yes** (only exception #1) | Boots from the real BIOS reset vector; drives VBLANK/H-Blank/SCU-timer generation from its own cycle count |
-| 1 | `sh2-slave` | **Yes** (only exception #2) | Starts parked, woken by SMPC `SSHON` |
-| 2 | `vdp1-draw` | No — parked forever | Named for VDP1 but currently does no real work: VDP1 command-list execution actually runs inline from Core 3, not here |
-| 3 | `vdp2-composite` | No — parked, woken at V-Blank IN | Runs both `vdp::execute_vdp1` and `render_backdrop` once per real frame, only when Master SH-2's cycle-driven timing fires V-Blank IN |
-| 4 | `m68k-sound-cpu` | No — parked while `SNDOFF`, woken on `SNDON` | Sound CPU |
-| 5 | `scsp-synth` | Yes — **OPEN VIOLATION, not an exception** | Never reaches `park_while_inactive`. `golden_rules.py` fails on this with **no escape hatch** — no allowlist, no `// golden-rule-ok:`. Do not try to silence it; convert it (wake in batches on the Master's cycle-driven schedule, like Core 3). Costs ~24% of a core at boot |
-| 6 | `scu-dma-dsp` | No — parked, woken on DMA/DSP activity | SCU DMA engine + DSP interpreter |
-| 7 | `smpc-cd-block` | No — parked forever | No SMPC or CD-block logic runs here yet |
+| 0 | `sh2-master` | **Yes** (only exception #1) | Master SH-2; drives V-Blank/H-Blank/SCU-timer generation from its own cycle count |
+| 1 | `sh2-slave` | **Yes** (only exception #2) | Slave SH-2; starts parked, woken by SMPC `SSHON` |
+| 2 | `vdp1-draw` | No — parks | VDP1 |
+| 3 | `vdp2-composite` | No — parks, woken at V-Blank IN | VDP2 |
+| 4 | `m68k-sound-cpu` | No — parks while `SNDOFF` | Sound CPU |
+| 5 | `scsp-synth` | No — parks | SCSP |
+| 6 | `scu-dma-dsp` | No — parks, woken on DMA/DSP work | SCU DMA engine + DSP |
+| 7 | `smpc-cd-block` | No — parks | SMPC command dispatch + CD block |
 
-**Known architecture debt** (see `CLAUDE.md`'s "Known architecture debt" for full detail — don't rediscover these from scratch):
-- VDP1 execution is on Core 3, not Core 2, despite Core 2's name — real hardware has two independent chips, this project runs them serially on one thread for now.
-- Core 3 went through three designs before landing on the cycle-driven one above; don't reintroduce a wall-clock timer there even "temporarily" — it was tried, measured, and reverted.
-- CD-ROM (`cdrom.rs`) reads real CHD sectors correctly but is **not wired into the emulated system at all** — no CS2 register block, no Core 7 logic. Only called from a one-shot demo in `main()`.
+`golden_rules.py` enforces the "No" column, and for this rule there is **no
+escape hatch** — no allowlist, no `// golden-rule-ok:`. What each thread
+implements today, and the known gaps, live in `docs/implementation-plans/` and
+`.development/current_bugs.md` — not in this file.
 
 ---
 
@@ -72,12 +72,12 @@ Format with `cargo fmt --all` before considering work done.
 
 * [`saturn-core/`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/saturn-core/): the emulator engine — CPU cores, peripherals, sync primitives. No I/O, no windowing.
 * [`saturn-frontend-native/`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/saturn-frontend-native/): standalone CLI + a `minifb`-backed live window (`bin/mimas_window.rs`).
-* [`saturn-frontend-libretro/`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/saturn-frontend-libretro/): Libretro cdylib for RetroArch — currently just stub entrypoints, not yet wired to `saturn-core`.
+* [`saturn-frontend-libretro/`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/saturn-frontend-libretro/): Libretro cdylib for RetroArch.
 * [`e2e-tests/`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/e2e-tests/): workspace-level integration tests exercising `saturn-core` directly and spawning the native CLI as a subprocess.
 * `milestone-tests/`: standalone crate (own workspace root), CLIP-based BIOS boot-screen verification. Not part of routine test runs — see Test Commands above.
 * [`tools/sh2dis.py`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/tools/sh2dis.py): standalone SH-2 disassembler for offline RAM-dump analysis.
 * [`.development/`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/.development/): live tracking docs — `current_blocker.md` (the one thing blocking boot progress *right now*, not a log), `current_bugs.md`, `TASKS.md`, `ROADMAP.md`, `phased_development_plan.md`.
-* [`docs/hardware-reference/`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/docs/hardware-reference/): exhaustive real-Saturn-hardware reference, one file per subsystem, sourced only from Yabause C/C++ source with a `file:line` citation on every claim. **Check here first** for exact register/opcode/DMA behavior before reading Yabause source directly.
+* [`docs/hardware-reference/`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/docs/hardware-reference/): exhaustive real-Saturn-hardware reference, one file per subsystem, sourced only from Yabause C/C++ source with a `file:line` citation on every claim. **Check here first** for exact register/opcode/DMA behavior before reading Yabause source directly. It describes behaviour, never implementation — never a reason to port Yabause code.
 * [`docs/implementation-plans/`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/docs/implementation-plans/): phased plan per subsystem closing the gap between that reference and the current Rust code. **Keep these current**: when a phase's work lands, flip its checklist items to `- [x]` (or annotate `- [ ]` with why it's partial/deferred) in the same change.
 * [`history.md`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/history.md): chronological log of *why* non-obvious decisions were made — read before assuming a design choice is accidental; add a chapter when you make one.
 
@@ -98,13 +98,51 @@ Mimas is a **thread-per-hardware-component** model: each real Saturn chip runs o
 * **`Sh2::new()`'s 3-argument signature must not break** — many tests across `e2e-tests` and `saturn-core` depend on it. Add new capability via setter methods/optional fields instead of changing the constructor.
 * **`cargo test --workspace` must stay green after every change** — not just a narrowly-targeted test for the current fix.
 
-### Verify against real hardware behavior, not intuition or the SH-2 manual alone
-Whenever implementing a new opcode or memory-mapped register, cross-check exact semantics against a real, working emulator's source — sibling checkouts `../yabause/` (devMiyax/YabaSanshiro fork) and `../yabauseut/` (upstream Yabause) live alongside this repo.
-- **New opcode** → find its handler in `yabause/src/sh2int.c`. Branch-target formulas, flag updates, push/pop order are the *exact* behavior real BIOS/game code was tested against.
-- **Memory-mapped register** → find its dispatch in `yabause/src/memory.c` plus the relevant peripheral file (`smpc.c`, `scu.c`, `vdp1.cpp`, `vdp2.cpp`). Confirm the *physical* address (strip the cache-through `0x20000000` bit).
-- Prefer `vidsoft.c` over `vidogl.c` for VDP1/VDP2 pixel algorithms — same register semantics, far less GPU-context noise.
-- **Port what the hardware does, never transliterate Yabause's C data structures or control flow** — this project's threaded-core/`BusArbiter`/`LockStepSync` architecture has no equivalent there.
-- **Write regression tests from independently-derived values** (real BIOS bytes, or a hand-traced algorithm computed separately) — never assert a value you haven't independently derived outside the implementation itself.
+### Take Yabause's knowledge, never its code
+
+Two different things live in Yabause, and they get opposite treatment.
+
+**Its knowledge of the hardware is sound — use it.** YabaSanshiro runs the
+Saturn library, and it can only do that because it gets the processors right:
+opcode semantics, branch-target formulas, flag updates, push/pop order,
+register meanings, DMA modes. That knowledge is proven, and it is what
+`docs/hardware-reference/` extracts — check there first.
+
+- **New opcode**: find its handler in `yabause/src/sh2int.c`. Branch-target
+  formulas, flag updates and push/pop order there are the exact behaviour real
+  BIOS and game code runs against — don't infer them from the SH-2 manual alone.
+- **Memory-mapped register**: find its dispatch in `yabause/src/memory.c` plus
+  the peripheral file (`smpc.c`, `scu.c`, `vdp1.cpp`, `vdp2.cpp`). Confirm the
+  *physical* address (strip the cache-through `0x20000000` bit) and cross two
+  independent sources before trusting a number.
+- Prefer `vidsoft.c` over `vidogl.c` for VDP1/VDP2 pixel algorithms — same
+  register semantics, far less GPU-context noise.
+- Disassembly, traces and captures made with it are valid evidence of what the
+  BIOS and games execute (`tools/bios_progress.py` rests on one).
+
+**Its implementation is not — never port it.** Its architecture is nothing like
+Mimas's (no threaded cores, no `BusArbiter`, no `LockStepSync`), it is slow,
+parts of it are broken (FMV), and the code is a patchwork accumulated over thirty
+years. So: no ported code, no data structures, no control flow, no solution
+lifted from it. Understand what the hardware does from it, close it, and write
+Mimas's own implementation in Mimas's own structure.
+
+- **Cite, never copy.** A comment `// understood from yabause/src/memory.c:120`
+  is encouraged; it says where the understanding came from. Its code is not.
+- **Enforced:** `tools/golden_rules.py`'s `no-yabause-code` rule fails on
+  Yabause's implementation vocabulary in Mimas code (`T1ReadLong`,
+  `MappedMemoryReadLong`, `SH2_struct`, `CurrentSH2`, `yabsys`, `c68k_*`, …),
+  with **no escape hatch**. Comments are excluded, so citations are fine.
+- Each `hardware-reference/` file's "known deviations" section records where
+  Yabause's *implementation* hacks around something. Those are the parts not to
+  reproduce.
+- Write regression tests from independently-derived values (real BIOS bytes,
+  addresses, or a hand-traced algorithm computed separately) — never assert a
+  value you have not derived yourself. A self-consistent-but-wrong test is worse
+  than no test; this has bitten this project before (`bt_bf_no_delay_slot`, the
+  first `DIV1` test).
+- Where a real simplification is made, say so explicitly and keep behaviour
+  honest (black screen when unconfigured, not a placeholder colour).
 
 ### Diagnostic recipes (reuse, don't reinvent)
 - `REG_ACCESS_LOG`/`log_reg_access_once` in `sh2.rs`: dedups and logs every distinct SMPC/VDP1/VDP2/SCU/CS2 register access once per run. Grep `[REGACCESS]` output before hypothesizing what's missing.
@@ -112,20 +150,20 @@ Whenever implementing a new opcode or memory-mapped register, cross-check exact 
 
 ---
 
-## 🎯 Current Status
+## 🎯 Where the project's state lives
 
-Check before starting any implementation task:
-1. [`.development/current_blocker.md`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/.development/current_blocker.md) — the current wall preventing boot progress.
-2. [`.development/phased_development_plan.md`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/.development/phased_development_plan.md) — the authoritative, per-subsystem-phase milestone tracker; check which phases are `[x]` before assuming a subsystem is unimplemented.
-3. [`history.md`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/history.md) — chronological development history and rationale.
-4. [`.development/ROADMAP.md`](file:///mnt/jhonatanteixeira/Novo%20volume/projects/jhon/dreams/retroarch-cores/mimas/.development/ROADMAP.md) — high-level milestone status.
-
-As of the latest landed work: `docs/implementation-plans/scu.md`'s SCU subsystem is fully done (all 6 phases — DSP, register file, interrupt controller, DMA controller, timers, DMA start factors/DSP End/Draw End's SCU-side entry point). CD-ROM/CS2 integration (Milestone 3) and SMPC's remaining phases are the next open subsystem work.
+Check before starting any implementation task. These hold the project's state;
+this file holds only how to work, and does not repeat them:
+1. [`docs/unlock_bios.md`](docs/unlock_bios.md) and `docs/unlock_bios/` — how BIOS progress is measured, the current baseline, the current divergence, and the plans to close it. Reproduce the recorded baseline before changing anything.
+2. [`.development/current_bugs.md`](.development/current_bugs.md) — known bugs and debt.
+3. [`docs/current_review.md`](docs/current_review.md) — findings of the latest review.
+4. [`.development/phased_development_plan.md`](.development/phased_development_plan.md) and `docs/implementation-plans/` — per-subsystem phase status; check which phases are `[x]` before assuming a subsystem is unimplemented.
+5. [`history.md`](history.md) — why non-obvious decisions were made.
 
 ## The quality gate — run it before calling work done
 
 ```bash
-bash tools/quality_gate.sh                              # 9 steps, ~6 min
+bash tools/quality_gate.sh                              # deterministic gate
 .venv/bin/python tools/antipattern_scan.py scan         # semantic pass, ~1 min
 ```
 

@@ -84,7 +84,8 @@ clippy is wrong here*.
 `python3 tools/golden_rules.py`, preceded by `--self-test`.
 
 Checks the invariants `docs/mimas-architecture-spec.md` states and no compiler
-enforces. Nine rules, each citing its spec section:
+enforces, plus three project rules that are not in the spec. Eleven rules; the
+two marked below have **no escape hatch** — no `// golden-rule-ok:` marker silences them:
 
 | rule | spec | catches |
 |---|---|---|
@@ -96,13 +97,18 @@ enforces. Nine rules, each citing its spec section:
 | `throttle-cpu-only` | 1.4 | `ClockThrottle` on a non-CPU thread |
 | `no-wall-clock` | 1.5 | `Instant::now()` on a component thread |
 | `no-yield-now` | 1.5 | `thread::yield_now()` in production |
-| `threads-park` | 1.5 | a spawned thread that never reaches `park_while_inactive` |
+| `threads-park` *(no escape hatch)* | 1.5 | a spawned thread that never reaches `park_while_inactive` |
 | `field-is-written` | — | a field declared and read but never assigned |
+| `no-blanket-allow` | — | a crate- or module-wide `#![allow(...)]` |
+| `no-yabause-code` *(no escape hatch)* | methodology | Yabause's own implementation names in Mimas code (`T1ReadLong`, `MappedMemoryReadLong`, `SH2_struct`, `CurrentSH2`, `yabsys`, `c68k_*`, …). Yabause is read to understand the Saturn, never ported. Comments are excluded, so `yabause/src/…:line` citations stay legal. Names both projects share because they name the same hardware (`Vdp2Regs`, `ScuRegs`, `SoundRam`) are deliberately not on the list |
 
 **`--self-test` runs first, and a failure there fails the step.** It replays each
-rule against the commits where the bug actually existed — `9354fd3` must trip
-`atomic-has-producer` and `field-is-written`; `194572f` must stay silent on the
-first and trip `thin-instruction-path`. A check nobody has watched fail is not a
+rule against the commits where the bug actually existed — `079738b` must trip
+`atomic-has-producer` and `field-is-written`; `8025948` must stay silent on the
+first and trip `thin-instruction-path`. (These were `9354fd3` and `194572f`
+before the 2026-09-18 history rewrite that removed the BIOS image.) Synthetic
+cases cover the rules with no historical commit, including that a marker
+cannot excuse `threads-park` or `no-yabause-code`. A check nobody has watched fail is not a
 check, and this one earned its place immediately: it caught two wrong versions of
 `atomic-has-producer` before either shipped. The first counted any `store` as
 production, but the consumer clears the flag with `store(false)`, so every flag

@@ -531,6 +531,79 @@ def rule_no_thread_pool_or_async(tree: Tree) -> list[Finding]:
     return out
 
 
+# Identifiers that exist in Yabause's source and nowhere in Mimas. Every one was
+# checked both ways when the list was made (2026-09-18): present in
+# ../yabause/src, zero occurrences in Mimas code. Names that Mimas uses
+# legitimately because both projects name the same hardware -- `Vdp2Regs`,
+# `Vdp1Regs`, `ScuRegs`, `SoundRam`, `scsp_` -- are deliberately absent: they
+# are the `MemRegion` enum and ordinary variables here, and flagging them would
+# teach whoever meets this rule that it cries wolf.
+YABAUSE_ONLY = [
+    "yabsys", "Cs2Area", "SH2_struct", "CurrentSH2", "MSH2", "SSH2", "SH2Core",
+    "MappedMemoryReadByte", "MappedMemoryReadWord", "MappedMemoryReadLong",
+    "MappedMemoryWriteByte", "MappedMemoryWriteWord", "MappedMemoryWriteLong",
+    "T1ReadByte", "T1ReadWord", "T1ReadLong", "T1WriteByte", "T1WriteWord",
+    "T1WriteLong", "T2ReadWord", "T2WriteWord",
+    "TitanPutPixel", "TitanRenderLines", "Vdp2ColorRam", "Vdp2Lines", "Vdp1Ram",
+    "Vdp2Ram", "LowWram", "HighWram", "BiosRom", "Vdp1External",
+    "Vdp2Internal_struct", "vdp2draw_struct", "yabauseinit_struct", "SmpcRegsT",
+    "YabauseExec", "YabauseInit", "SH2Exec", "SH2InterpreterExec", "ScuExec",
+    "Cs2Exec", "ScspExec", "sh2int", "SCSPLOG", "CDLOG", "VDP2LOG",
+]
+# Prefixes of whole Yabause subsystems (its 68000 core is `C68K_*`/`c68k_*`).
+YABAUSE_ONLY_PREFIXES = ["C68K", "c68k_"]
+
+
+def rule_no_yabause_code(tree: Tree) -> list[Finding]:
+    """Nothing in Mimas is ported from Yabause.
+
+    Yabause's *knowledge* of the hardware is sound -- it runs the Saturn library,
+    so its opcode semantics, flag updates and register meanings are proven, and
+    reading them is encouraged. Its *implementation* is not: an architecture
+    nothing like Mimas's, slow, broken in places (FMV), thirty years of
+    patchwork. Take the knowledge, write the code.
+
+    What this can and cannot see. A port that renamed everything leaves no
+    lexical trace, and no rule catches that -- review does. What a port
+    *usually* leaves is Yabause's own implementation vocabulary: its globals
+    (`yabsys`, `CurrentSH2`), its memory accessors (`T1ReadLong`,
+    `MappedMemoryReadLong`), its structs (`SH2_struct`, `Cs2Area`), its logging
+    macros. Those names are not in any Saturn hardware manual; they exist only
+    because Yabause chose them. Finding one in Mimas code means Yabause's
+    structure came along with its semantics.
+
+    Comments and strings are excluded on purpose: `CLAUDE.md` asks for
+    `yabause/src/<file>:<line>` citations in comments when a behaviour was
+    understood from there, and citing a source is the opposite of hiding a copy.
+
+    Why embeddings were not used: a correct implementation *behaves* like the
+    hardware, and Yabause approximates the same hardware, so behaviour-level
+    similarity is expected and code embeddings mostly measure behaviour. Tried
+    as a lexical check first, even exact name matching hit `Vdp2Regs`/`ScuRegs`
+    collisions -- an embedding would be dominated by exactly that shared
+    hardware vocabulary.
+
+    No escape hatch, like `threads-park`: if a name here is ever legitimately
+    needed, rename it. A marker would let a port through with a sentence.
+    """
+    out = []
+    pats = [(n, re.compile(r"\b" + re.escape(n) + r"\b")) for n in YABAUSE_ONLY]
+    pats += [(p + "*", re.compile(r"\b" + re.escape(p) + r"\w*")) for p in YABAUSE_ONLY_PREFIXES]
+    for f in tree.files():
+        if not f.endswith(".rs") or f.startswith("scratch/"):
+            continue
+        code = strip_literals(tree.read(f))
+        for name, rx in pats:
+            hits = list(rx.finditer(code))
+            if hits:
+                out.append(Finding(
+                    "no-yabause-code", "methodology", f, _line_of(code, hits[0].start()),
+                    f"Yabause implementation identifier `{hits[0].group(0)}` "
+                    f"({len(hits)}x) -- understand Yabause, do not port it",
+                    excusable=False))
+    return out
+
+
 def rule_no_blanket_allow(tree: Tree) -> list[Finding]:
     """No crate- or module-wide `#![allow(...)]`.
 
@@ -570,6 +643,7 @@ def rule_no_blanket_allow(tree: Tree) -> list[Finding]:
 
 RULES = [
     rule_no_blanket_allow,
+    rule_no_yabause_code,
     rule_no_thread_pool_or_async,
     rule_no_wall_clock,
     rule_throttle_is_cpu_only,
@@ -663,7 +737,32 @@ def self_test() -> int:
             });
         }
     """
+    YAB_PORT = """
+        fn step(sh: &mut SH2_struct, ram: &[u8]) -> u32 {
+            T1ReadLong(ram, sh.pc)
+        }
+    """
+    YAB_CITED = """
+        // Behaviour understood from yabause/src/memory.c:120 (T1ReadLong,
+        // SH2_struct) -- citing the source is allowed, porting it is not.
+        fn read_long(ram: &[u8], a: usize) -> u32 { u32::from_be_bytes([ram[a], ram[a+1], ram[a+2], ram[a+3]]) }
+    """
+    YAB_COLLISION = """
+        enum MemRegion { Vdp2Regs, Vdp1Regs, ScuRegs, SoundRam }
+        fn f() { let scsp_c5 = 1; }
+    """
+    YAB_MARKED = """
+        // golden-rule-ok: ported on purpose, it was faster
+        fn step(ram: &[u8]) -> u32 { T1ReadLong(ram, 0) }
+    """
     synthetic = [
+        (YAB_PORT, "no-yabause-code", True, "Yabause struct and accessor in code"),
+        (YAB_CITED, "no-yabause-code", False,
+         "the same names in a citation comment -- understanding is allowed"),
+        (YAB_COLLISION, "no-yabause-code", False,
+         "hardware names both projects share must not trip it"),
+        (YAB_MARKED, "no-yabause-code", True,
+         "a golden-rule-ok marker must NOT excuse a port -- no escape hatch"),
         (PARK_NONE, "threads-park", True, "thread loops forever, never parks"),
         (PARK_MARKED, "threads-park", True,
          "a `golden-rule-ok:` marker must NOT silence this rule -- it has no escape hatch"),

@@ -172,54 +172,41 @@ keeping them; writing them for real is VDP1 Phase 5 work.
 And one semantic tautology no structural tool catches: `vdp2.rs`'s
 `colornumber_2_ignores_paladdr` asserts `pixel.is_some() || pixel.is_none()`.
 
-## Open golden-rule violations (tools/golden_rules.py)
+## Open — VDP2
 
-Both are real and both stay red on purpose; neither is marked `golden-rule-ok`,
-because a known gap that has been silenced is just an unknown gap.
+- **`saturn-core/src/vdp.rs`, `render_nbg_layer` — colour-calculation ratio
+  mapped to the wrong layer.** The two `match layer` tables in the function
+  disagree. The priority table names its registers (`0 => regs.prina_nbg0()`),
+  so `layer 0` is NBG0; the ratio table says `0 => regs.ccrnb() >> 8`, which is
+  NBG3's ratio — the mapping is reversed for all four layers. Correct mapping,
+  from `docs/hardware-reference/vdp2.md` ("Each 5-bit ratio field…" table):
+  NBG0 `CCRNA & 0x1F`, NBG1 `(CCRNA >> 8) & 0x1F`, NBG2 `CCRNB & 0x1F`, NBG3
+  `(CCRNB >> 8) & 0x1F`. No test pins it, which is why it has come back twice;
+  the fix needs one with hand-derived values.
 
-- **`saturn-core/src/lib.rs` — Core 5 (SCSP) never parks.** The loop is
-  continuous on a component thread, which spec §1.5 allows only for the two SH-2
-  cores. The spec itself records this as a "Known gap, not a rule exception".
+## Golden-rule violations (tools/golden_rules.py)
 
-  **As of 2026-09-17 this has no escape hatch.** `rule_spawned_threads_park` used
-  to allowlist `scsp-synth` by name; the entry is gone, and that rule alone takes
-  no `// golden-rule-ok:` marker either, so the only way to turn it green is to
-  fix it. The trigger was an attempt to silence the *neighbouring* rule by
-  reshaping the code (`docs/current_review.md`): when a red can be argued away,
-  it eventually is.
+`golden_rules.py` reports none (2026-09-19). The two entries that used to live
+here closed in different ways:
 
-  Why the old justification did not hold: "real hardware synthesizes audio
-  continuously regardless of what any CPU is doing" is true, and does not single
-  Core 5 out — real VDP2 scans out pixels continuously too, and Core 3 parks,
-  woken at the cycle-driven V-Blank IN moment. The argument is for advancing
-  *emulated state* continuously, not for burning a host thread.
-
-  Measured cost (2.33 s BIOS boot to the settle PC, `telemetry::print_report`):
-  1765.8 ms idle of 2.33 s wall → **0.564 s of CPU, ~24% of one core**,
-  synthesizing near-certain silence (SCSP voices unconfigured at boot). Invisible
-  on the desktop Ryzen; on the R36S's four A53s, already 5-8x short of real time,
-  it is a quarter of a core that is not available to give.
-
-  Closing it means the Core 3 pattern: wake in batches on the Master SH-2's
-  cycle-driven schedule instead of one sample per loop turn.
-
-  Note what is *not* wrong here, since it was misread once: the loop is **not**
-  busy-polling. It blocks in `sync_core`'s `Condvar::wait` for 76% of wall clock,
-  and every iteration synthesizes a full sample. §1.2 is not violated; §1.5 is.
-- **`saturn-core/src/sync.rs:102` — `Instant::now()` on component threads.** Spec
-  §1.5: those threads "may not reference the host wall clock at all". It brackets
-  the Condvar wait to feed `telemetry::record_idle_time`. The instrumentation is
-  genuinely useful — it is what found the `yield_now` and Core 5 problems — so the
-  fix keeps the signal and drops the clock: a per-core *block counter* needs no
-  `Instant`.
+- **Core 5 (SCSP) never parked** — fixed: it now parks and synthesizes in
+  batches from Master SH-2's cycle count (`history.md`, the chapter on SCSP
+  parking).
+- **`saturn-core/src/sync.rs:102`, `Instant::now()` on component threads** —
+  *not* fixed the way this file prescribed (replace the timing with a per-core
+  block counter, which needs no clock). It is excused with
+  `// golden-rule-ok: telemetry measurement, not a deadline pacing timer`. Spec
+  §1.5 says component threads "may not reference the host wall clock at all";
+  whether telemetry is an exception to that is a decision for the human, not
+  for the marker.
 
 ## How these are checked
 
 Most entries above now have a tool that reports them on every run, so this file
 records *why* they are open rather than serving as the only record that they are:
 
-- `bash tools/quality_gate.sh` — 9 steps. Currently red on clippy, golden rules
-  and coverage; all three are the entries above, not new problems.
+- `bash tools/quality_gate.sh` — its summary is the current state; this file
+  records *why* a step is red, not *whether* it is.
 - `.venv/bin/python tools/antipattern_scan.py scan` — architectural patterns with
   no fixed spelling. Review queue, not a verdict.
 
