@@ -19,6 +19,16 @@ const DEN: u64 = 286_364;
 /// 68000 cycles per call into the core. 64 is about a quarter of a sample: small enough to
 /// stay glued to the SH-2, large enough that a single instruction cannot dominate the call.
 const MIN_BATCH: i64 = 64;
+/// Average cycles per instruction for the real BIOS driver, measured (`docs/sound.md`:
+/// 222,897 instructions in 2,000,000 cycles). `run_batch` is the only entry point the
+/// crate's Cranelift JIT compiles through, and it is instruction-budgeted, not
+/// cycle-budgeted — it clobbers `cycles_remaining` and its result reports no cycle count at
+/// all. This constant is how a cycle budget becomes an instruction budget and back; it is
+/// not exact per instruction (real 68000 opcodes run from 4 to 20+ cycles), so this trades a
+/// little pacing precision for real throughput. The audio pipeline has an exact-value gate
+/// (`compare_audio`, step 9, no slack above the measured floor) that would fail if this
+/// estimate drifted audio timing enough to matter — see `docs/current_status.md`.
+const AVG_CYCLES_PER_INSTR: f64 = 2_000_000.0 / 222_897.0;
 
 pub struct SoundCpu {
     cpu: CpuCore,
@@ -95,25 +105,35 @@ impl SoundCpu {
         self.cpu.set_irq(scsp.irq_level());
 
         let mut bus = Bus { ram, scsp };
-        let budget = self.budget.min(i32::MAX as i64) as i32;
-        let r = match self.profile.as_mut() {
-            None => self.cpu.run_for_cycles(&mut bus, budget),
-            Some(hist) => self
+        // `run_batch` has no hook variant, so profiling — off by default, opt-in through
+        // --sound-profile — stays on the cycle-exact interpreter. Every other call goes
+        // through the JIT.
+        let (spent, instructions, exit) = if let Some(hist) = self.profile.as_mut() {
+            let budget = self.budget.min(i32::MAX as i64) as i32;
+            let r = self
                 .cpu
                 .run_for_cycles_with_hook(&mut bus, budget, |cpu, _, _| {
                     *hist.entry(cpu.pc).or_insert(0) += 1;
                     CycleBatchControl::Continue
-                }),
+                });
+            (
+                r.cycles.max(0) as i64,
+                r.instructions as u64,
+                format!("{:?}", r.exit),
+            )
+        } else {
+            let instr_budget = ((self.budget as f64 / AVG_CYCLES_PER_INSTR).floor() as u32).max(1);
+            let r = self.cpu.run_batch(&mut bus, instr_budget, &[]);
+            let spent = (r.instructions as f64 * AVG_CYCLES_PER_INSTR).round() as i64;
+            (spent, r.instructions as u64, format!("{:?}", r.exit))
         };
-        let spent = r.cycles.max(0) as i64;
         self.budget -= spent; // the overrun becomes debt
-        self.cycles += spent as u64;
-        self.instructions += r.instructions as u64;
-        let exit = format!("{:?}", r.exit);
+        self.cycles += spent.max(0) as u64;
+        self.instructions += instructions;
         if exit != "BudgetExhausted" {
             self.last_exit = Some(exit);
         }
-        spent as u64
+        spent.max(0) as u64
     }
 }
 
