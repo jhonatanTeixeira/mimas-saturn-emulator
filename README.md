@@ -45,9 +45,9 @@ weak-hardware goal, not proof of it: nothing here has been measured on a
 handheld yet.
 
 Past the logo the BIOS stalls — the fade-out, the black frames and the licence
-screen all need a detected disc, which is not implemented. The boot sound plays
-at the right pitch and tempo but drones instead of decaying, because the SCSP's
-envelope generator does not exist yet.
+screen all need a detected disc, which is not implemented. The boot sound now
+decays instead of droning, but on a fixed clock rather than the hardware's own
+attack/decay/release rates — see [`docs/sound.md`](docs/sound.md).
 
 Numbers, gaps and the current suspicions live in
 [`docs/status.md`](docs/status.md) and
