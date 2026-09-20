@@ -17,6 +17,8 @@ pub struct Smpc {
     mem: [u8; 0x80],
     /// A BIOS espera a interrupção "system manager" do SCU ao fim do INTBACK.
     pub irq_pending: bool,
+    /// Pending request to power the sound 68000 on (`SNDON`) or off (`SNDOFF`).
+    pub sound_on: Option<bool>,
     pub commands: Vec<u8>,
 }
 
@@ -34,6 +36,7 @@ impl Smpc {
         Self {
             mem,
             irq_pending: false,
+            sound_on: None,
             commands: Vec::new(),
         }
     }
@@ -45,6 +48,8 @@ impl Smpc {
     fn execute(&mut self, cmd: u8) {
         self.commands.push(cmd);
         match cmd {
+            0x06 => self.sound_on = Some(true), // SNDON: release the 68000 from reset
+            0x07 => self.sound_on = Some(false), // SNDOFF
             0x10 => self.intback(),
             _ => {}
         }
@@ -97,5 +102,30 @@ impl MemoryDevice for Smpc {
             SR | 0x21..=0x5F if o >= OREG0 => {} // somente leitura
             _ => self.mem[o] = v,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `SNDON` and `SNDOFF` are how the BIOS releases and halts the sound 68000. Losing
+    /// either one leaves the driver either never started or never stopped, and the mailbox
+    /// handshake then goes one-sided.
+    #[test]
+    fn sndon_and_sndoff_raise_the_power_request() {
+        let mut smpc = Smpc::new();
+        assert_eq!(smpc.sound_on, None, "nada pedido antes de um comando");
+
+        smpc.write_byte(COMREG as u32, 0x06);
+        assert_eq!(smpc.sound_on.take(), Some(true), "SNDON liga o 68000");
+
+        smpc.write_byte(COMREG as u32, 0x07);
+        assert_eq!(smpc.sound_on.take(), Some(false), "SNDOFF o desliga");
+
+        // An unknown command is recorded and changes nothing else.
+        smpc.write_byte(COMREG as u32, 0x99);
+        assert_eq!(smpc.sound_on, None);
+        assert_eq!(smpc.commands, vec![0x06, 0x07, 0x99]);
     }
 }

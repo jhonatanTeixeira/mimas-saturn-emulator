@@ -1,10 +1,4 @@
-mod bus;
-mod cpu;
-mod debug;
-mod devices;
-mod machine;
-mod timing;
-mod video;
+use mimasv2::{cpu, debug, machine, video};
 
 use std::time::Instant;
 
@@ -26,6 +20,10 @@ struct Args {
     video: bool,
     vram: Vec<u32>,
     dump_sound_ram: Option<String>,
+    dump_audio: Option<String>,
+    dump_dsp: Option<String>,
+    sound_profile: bool,
+    no_sound: bool,
     dump: Option<String>,
     dump_from: u32,
     dump_to: u32,
@@ -62,6 +60,10 @@ fn parse_args() -> Args {
         video: false,
         vram: vec![],
         dump_sound_ram: None,
+        dump_audio: None,
+        dump_dsp: None,
+        sound_profile: false,
+        no_sound: false,
         dump: None,
         dump_from: 0,
         dump_to: u32::MAX,
@@ -101,6 +103,10 @@ fn parse_args() -> Args {
                     .expect("--dump-every <n>")
             }
             "--dump-sound-ram" => a.dump_sound_ram = it.next(),
+            "--dump-audio" => a.dump_audio = it.next(),
+            "--dump-dsp" => a.dump_dsp = it.next(),
+            "--sound-profile" => a.sound_profile = true,
+            "--no-sound" => a.no_sound = true,
             "--vram" => {
                 a.vram = it
                     .next()
@@ -140,6 +146,10 @@ fn main() {
     let bios =
         std::fs::read(&args.bios).unwrap_or_else(|e| panic!("não consegui ler {}: {e}", args.bios));
     let mut saturn = Saturn::new(&bios);
+    saturn.sound_enabled = !args.no_sound;
+    if args.sound_profile {
+        saturn.sound_cpu.profile = Some(Default::default());
+    }
     if let Some(dir) = &args.dump {
         match video::dumper::FrameDumper::new(
             dir,
@@ -232,6 +242,123 @@ fn main() {
                 }
             }
             Err(e) => println!("não consegui ler a referência {path}: {e}"),
+        }
+    }
+
+    {
+        let cpu = &saturn.sound_cpu;
+        let scsp = saturn.scsp.borrow();
+        println!(
+            "SOUND: 68000 {} | {} instructions, {} cycles, PC={:08X} | SCIEB seen={:04X} | {} samples",
+            if cpu.running { "running" } else { "halted" },
+            cpu.instructions,
+            cpu.cycles,
+            cpu.pc(),
+            scsp.scieb_seen,
+            saturn.audio.len()
+        );
+        if let Some(exit) = &cpu.last_exit {
+            println!("SOUND: last core exit: {exit}");
+        }
+        if let Some(hist) = &cpu.profile {
+            let mut top: Vec<_> = hist.iter().collect();
+            top.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+            let total: u64 = hist.values().sum();
+            println!("SOUND: hottest driver PCs ({total} instructions):");
+            for (pc, n) in top.iter().take(15) {
+                println!(
+                    "   {pc:06X}  {n:>10}  {:5.1}%",
+                    100.0 * **n as f64 / total as f64
+                );
+            }
+        }
+        println!(
+            "SOUND: DSP {} passos | canais de envio usados {:04X}\n         picos de entrada {:?}\n         picos de saída   {:?}",
+            scsp.dsp.steps_run, scsp.isel_seen, scsp.mixs_peak, scsp.efreg_peak
+        );
+        println!(
+            "SOUND: {} key-ons, {} slots still playing",
+            scsp.key_ons,
+            scsp.active_slots()
+        );
+        {
+            let ram = saturn.scsp_ram.borrow();
+            for (m68k, off, width, v) in ram.mailbox_log.iter().take(40) {
+                let who = if *m68k { "68000" } else { "SH-2 " };
+                let w = (*width as usize) * 2;
+                println!("SOUND: mailbox {who} {off:03X} = {v:0w$X}");
+            }
+            println!("SOUND: {} mailbox writes total", ram.mailbox_log.len());
+        }
+        for line in scsp.slot0_log.iter() {
+            println!("SOUND: slot0 {line}");
+        }
+        for line in scsp.key_log.iter().take(8) {
+            println!("SOUND: key-on — {line}");
+        }
+        if !scsp.common_writes.is_empty() {
+            println!("SOUND: common registers written by the driver (offset = value, count):");
+            for (off, (v, n)) in scsp.common_writes.iter() {
+                let name = match off {
+                    0x400 => " MVOL/MEM4MB",
+                    0x418 => " TIMA",
+                    0x41A => " TIMB",
+                    0x41C => " TIMC",
+                    0x41E => " SCIEB",
+                    0x420 => " SCIPD",
+                    0x422 => " SCIRE",
+                    0x42A => " MCIEB",
+                    0x42C => " MCIPD",
+                    0x42E => " MCIRE",
+                    _ => "",
+                };
+                println!("  {off:03X}{name} = {v:04X} ({n}x)");
+            }
+        }
+        let peak = saturn
+            .audio
+            .iter()
+            .map(|(l, r)| l.unsigned_abs().max(r.unsigned_abs()))
+            .max()
+            .unwrap_or(0);
+        println!("SOUND: peak amplitude {peak} of 32767");
+    }
+
+    if let Some(path) = &args.dump_dsp {
+        let scsp = saturn.scsp.borrow();
+        let mut txt = String::new();
+        let w = |o: usize| -> u16 { u16::from_be_bytes([scsp.regs[o], scsp.regs[o + 1]]) };
+        txt.push_str(&format!(
+            "rbp {} rbl {}\n",
+            w(0x402) & 0x7F,
+            (w(0x402) >> 7) & 3
+        ));
+        for k in 0..64 {
+            txt.push_str(&format!(
+                "coef {} {}\n",
+                k,
+                ((w(0x700 + k * 2) >> 3) & 0x1FFF) as i16
+            ));
+        }
+        for k in 0..32 {
+            txt.push_str(&format!("madrs {} {}\n", k, w(0x780 + k * 2)));
+        }
+        for k in 0..128 {
+            let b = 0x800 + k * 8;
+            let v = ((w(b) as u64) << 48)
+                | ((w(b + 2) as u64) << 32)
+                | ((w(b + 4) as u64) << 16)
+                | w(b + 6) as u64;
+            txt.push_str(&format!("mpro {k} {v:016X}\n"));
+        }
+        let _ = std::fs::write(path, txt);
+        println!("SOUND: estado do DSP escrito em {path}");
+    }
+
+    if let Some(path) = &args.dump_audio {
+        match write_wav(path, &saturn.audio) {
+            Ok(()) => println!("SOUND: {} samples written to {path}", saturn.audio.len()),
+            Err(e) => println!("SOUND: could not write {path}: {e}"),
         }
     }
 
@@ -329,4 +456,28 @@ fn main() {
             println!("  {:08X} {} n={n}", page, if *w { "W" } else { "R" });
         }
     }
+}
+
+/// 16-bit stereo PCM WAV at 44.1 kHz: a 44-byte header followed by the samples.
+fn write_wav(path: &str, samples: &[(i16, i16)]) -> std::io::Result<()> {
+    use std::io::Write;
+    let data_len = (samples.len() * 4) as u32;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    f.write_all(b"RIFF")?;
+    f.write_all(&(36 + data_len).to_le_bytes())?;
+    f.write_all(b"WAVEfmt ")?;
+    f.write_all(&16u32.to_le_bytes())?; // fmt chunk size
+    f.write_all(&1u16.to_le_bytes())?; // PCM
+    f.write_all(&2u16.to_le_bytes())?; // channels
+    f.write_all(&44100u32.to_le_bytes())?;
+    f.write_all(&(44100u32 * 4).to_le_bytes())?; // bytes per second
+    f.write_all(&4u16.to_le_bytes())?; // block align
+    f.write_all(&16u16.to_le_bytes())?; // bits per sample
+    f.write_all(b"data")?;
+    f.write_all(&data_len.to_le_bytes())?;
+    for (l, r) in samples {
+        f.write_all(&l.to_le_bytes())?;
+        f.write_all(&r.to_le_bytes())?;
+    }
+    f.flush()
 }

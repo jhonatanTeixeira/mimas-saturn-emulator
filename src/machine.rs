@@ -10,8 +10,10 @@ use crate::cpu::sh2_bus::Tracer;
 use crate::cpu::{Fault, Sh2Cpu};
 use crate::devices::cd_block::CdBlock;
 use crate::devices::ram::{Ram, Rom, SoundRam};
+use crate::devices::scsp::Scsp;
 use crate::devices::scu::*;
 use crate::devices::smpc::Smpc;
+use crate::devices::sound_cpu::SoundCpu;
 use crate::devices::stub::{AccessLog, OpenBus, RegisterStub, SharedLog};
 use crate::devices::vdp1::{Vdp1, Vdp1Area, Vdp1Port};
 use crate::devices::vdp2::{Vdp2, Vdp2Area, Vdp2Port};
@@ -27,6 +29,12 @@ pub struct Saturn {
     pub vdp1: Rc<RefCell<Vdp1>>,
     pub vdp2: Rc<RefCell<Vdp2>>,
     pub scsp_ram: Rc<RefCell<SoundRam>>,
+    /// Off only for measurement: it is what tells how much of a frame the sound costs.
+    pub sound_enabled: bool,
+    pub scsp: Rc<RefCell<Scsp>>,
+    pub sound_cpu: SoundCpu,
+    /// Stereo samples produced by the SCSP at 44.1 kHz.
+    pub audio: Vec<(i16, i16)>,
     pub timing: VideoTiming,
     pub stub_log: SharedLog,
     /// Contador de quadros visível a quem observa (ex.: verificador de traces).
@@ -117,12 +125,13 @@ impl Saturn {
             Box::new(scsp_ram_port),
             false,
         );
+        let (scsp_port, scsp) = Shared::new(Scsp::new());
         bus.map(
             "scsp_regs",
             0x05B0_0000,
             0x0010_0000,
-            0x1_0000,
-            Box::new(RegisterStub::new("scsp_regs", 0x1_0000).with_log(log.clone())),
+            0x1000,
+            Box::new(scsp_port),
             false,
         );
 
@@ -225,6 +234,10 @@ impl Saturn {
             vdp1,
             vdp2,
             scsp_ram,
+            sound_enabled: true,
+            scsp,
+            sound_cpu: SoundCpu::new(),
+            audio: Vec::new(),
             timing: VideoTiming::new(),
             stub_log: log,
             frame_cell: Rc::new(Cell::new(0)),
@@ -249,6 +262,25 @@ impl Saturn {
         Ok(())
     }
 
+    /// Runs the sound 68000 for the equivalent of the cycles the SH-2 just executed, and
+    /// generates the SCSP samples in the same step. Sound never runs ahead of the SH-2.
+    fn sound_step(&mut self, sh2_cycles: u64) {
+        if !self.sound_enabled || !self.sound_cpu.running {
+            return;
+        }
+        let cycles = {
+            let mut ram = self.scsp_ram.borrow_mut();
+            let mut scsp = self.scsp.borrow_mut();
+            ram.m68k_side = true;
+            let c = self.sound_cpu.advance(sh2_cycles, &mut ram, &mut scsp);
+            ram.m68k_side = false;
+            c
+        };
+        let mut ram = self.scsp_ram.borrow_mut();
+        let mut scsp = self.scsp.borrow_mut();
+        scsp.generate(cycles, ram.data_mut(), &mut self.audio);
+    }
+
     fn advance(&mut self, cycles: u64) {
         self.cd.borrow_mut().tick(cycles);
         self.timing.advance(cycles, &mut self.events);
@@ -260,6 +292,16 @@ impl Saturn {
             self.smpc.borrow_mut().irq_pending = false;
             self.scu.borrow_mut().raise(IRQ_SMPC);
         }
+        if let Some(on) = self.smpc.borrow_mut().sound_on.take() {
+            let mut ram = self.scsp_ram.borrow_mut();
+            let mut scsp = self.scsp.borrow_mut();
+            if on {
+                self.sound_cpu.power_on(&mut ram, &mut scsp);
+            } else {
+                self.sound_cpu.power_off();
+            }
+        }
+        self.sound_step(cycles);
         self.service_vdp1();
         self.run_dmas();
         self.deliver_interrupt();
