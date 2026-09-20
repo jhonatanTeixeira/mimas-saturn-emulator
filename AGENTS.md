@@ -1,4 +1,11 @@
-# CLAUDE.md
+# AGENTS.md
+
+**Arquivo único de instruções, para todos os agentes.** Claude Code, Qwen Code e
+Antigravity descobrem `AGENTS.md` sozinhos; não existe `CLAUDE.md`, `GEMINI.md`
+nem `QWEN.md` neste repositório, de propósito. Arquivo por ferramenta significa
+três cópias que divergem, e um ponteiro ("leia o outro arquivo") é instrução
+mole: só funciona se o agente resolver obedecer, e falha calado quando não
+obedece.
 
 Guia para agentes trabalhando neste repositório. Ele diz **como trabalhar
 aqui**, e não o que está acontecendo agora: números, resultados e lacunas vivem
@@ -58,6 +65,8 @@ cargo run --release --bin gl_probe                           # sanidade: context
 cargo run --release --bin m68k_probe -- som.bin              # roda esse driver no núcleo 68000 e mostra o que ele faz
 DSP_STATE=x_dsp_state.txt DSP_RAM=x_dsp_ram.bin DSP_STEPS=x_dsp_steps.txt \
   ./target/release/dsp_check x_dsp_program.txt x_dsp_io.txt  # DSP de efeitos contra a captura real, passo a passo
+./target/release/mimasv2 --frames 750 --dump-audio nosso.wav
+./target/release/compare_audio stubs/captures/audio/boot.wav nosso.wav  # forma do envelope contra a captura real
 bash tools/quality_gate.sh                                   # antes de dar qualquer trabalho por pronto
 ```
 
@@ -80,8 +89,11 @@ composição, o único lugar que conhece tipos concretos) → `cpu` / `bus` /
 `devices` / `video`.
 
 - **`src/cpu/`** — `state.rs` (`Sh2State`, `#[repr(C)]`), `decode.rs` (`u16` →
-  `Insn`, sem executar), `jit/compiler.rs` (compilador de bloco), `jit/mod.rs`
-  (cache de blocos e invalidação), `sh2_bus.rs` (trait `Sh2Bus`, `Sh2Runtime` e
+  `Insn`, sem executar), `jit/backend/x64.rs` (compilador de bloco, x86-64;
+  único backend hoje — `jit/backend/mod.rs` seleciona por `cfg(target_arch)` e
+  documenta o que um segundo backend, ARM64 por exemplo, precisaria
+  implementar), `jit/mod.rs` (cache de blocos e invalidação, não conhece
+  arquitetura nenhuma), `sh2_bus.rs` (trait `Sh2Bus`, `Sh2Runtime` e
   os auxiliares `rt_*`), `address_space.rs` (decodificação A31-A29 do SH-2:
   espelhos cache-through, purge, tag/dados do cache, registradores internos),
   `onchip.rs` (registradores do SH7604; DIVU e FRT reais, o resto são bancos de
@@ -192,11 +204,12 @@ anotado é dívida; um palpite disfarçado de fato é armadilha.
 bash tools/quality_gate.sh
 ```
 
-São 8 passos determinísticos, sem modelo e sem rede: formatação, catraca de
+São 9 passos determinísticos, sem modelo e sem rede: formatação, catraca de
 avisos do clippy, testes, testes que não afirmam nada, regras do projeto,
-cobertura das linhas que você mudou, erro médio do vídeo contra as capturas, e
-porcentagem do trace real reproduzida. Detalhe de cada passo e dos limiares em
-`docs/quality-gate.md`.
+cobertura das linhas que você mudou, erro médio do vídeo contra as capturas,
+porcentagem do trace real reproduzida, e correlação do envelope de áudio contra
+uma captura real (`stubs/captures/audio/boot.wav`). Detalhe de cada passo e dos
+limiares em `docs/quality-gate.md`.
 
 **Um passo vermelho é um resultado, não um obstáculo.** As únicas correções
 honestas: escrever o teste, consertar o código, ou baixar o teto de avisos
@@ -239,3 +252,10 @@ medir; nunca force a entrada deles no git.
 do projeto, são pixels de saída e não contêm código. Sem eles o passo 7 do gate
 não roda. Já `stubs/captures-game/` são 116 quadros de gameplay de um jogo
 comercial, fora do escopo e ignorados.
+
+`stubs/captures/audio/boot.wav` também está **versionado**: 12 s de PCM,
+gravados por loopback da saída de áudio do YabaSanshiro instrumentado, rodando
+a BIOS real dentro do RetroArch (a exceção da regra 4: saída de um emulador
+instrumentado, não o código dele — não é hardware real, é a mesma referência
+usada para o trace e para o DSP). Sem ele o passo 9 do gate não roda. Ver a
+proveniência completa e as lacunas conhecidas em `docs/sound.md`.
