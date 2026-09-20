@@ -8,6 +8,14 @@
 /saturn_bios.bin
 /bios_trace_*.txt
 /branch_trace_*.txt
+# Mesma regra para traces de um jogo comercial (qualquer prefixo, não só
+# bios_/branch_): desmontagem de código com copyright de terceiros, nunca
+# versionado. Cobre trace de SH-2, de desvios e de registradores do SCSP.
+/*_trace.txt
+/*_branch_trace.txt
+/*_scsp_regs.txt
+/*_frame_*.png
+/*.chd
 # Gameplay de um jogo comercial, fora do escopo do projeto. As capturas da
 # BIOS em si (stubs/captures/) ficam versionadas: são o oráculo do projeto,
 # são pixels de saída e não contêm programa nenhum.

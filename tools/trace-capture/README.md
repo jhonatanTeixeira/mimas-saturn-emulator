@@ -24,16 +24,33 @@ implementação do Yabause dentro de `src/`.
 
 ## Passo a passo
 
-O patch é contra o [YabaSanshiro](https://github.com/devmiyax/yabause) e toca
-três arquivos: `yabause/src/sh2int.c` (o interpretador de SH-2),
-`yabause/src/memory.c` (os acessos à memória) e
-`yabause/src/libretro/libretro.c` (uma linha, para permitir bandeja vazia).
+O patch é contra o YabaSanshiro e toca cinco arquivos:
+`yabause/src/sh2int.c` (o interpretador de SH-2), `yabause/src/memory.c` (os
+acessos à memória), `yabause/src/scsp.c` (captura do DSP de efeitos e dos
+registradores do SCSP — ver "Capturando os registradores do SCSP" abaixo),
+`yabause/src/libretro/libretro.c` (bandeja vazia e a captura de quadros — ver
+"Capturando quadros" abaixo) e `yabause/src/libretro/Makefile.common` (as
+dependências de PNG/zlib que a captura de quadros usa).
+
+`https://github.com/devmiyax/yabause` (o upstream original) não existe mais
+como esse nome — testado em 2026-09-20, `git ls-remote` devolve "Repository
+not found". O fork usado por este projeto é
+[`jhonatanTeixeira/yabassanshiro`](https://github.com/jhonatanTeixeira/yabassanshiro):
 
 ```bash
-git clone https://github.com/devmiyax/yabause
-cd yabause
+git clone https://github.com/jhonatanTeixeira/yabassanshiro
+cd yabassanshiro
 patch -p1 < <caminho>/tools/trace-capture/yabasanshiro-trace.patch
 ```
+
+O patch foi gerado e confirmado contra o commit `9ce24c0` desse fork (branch
+`perf/r36s-improvements`) e aplica **sem fuzz**. Se o fork tiver avançado
+desde então, `patch -p1 --fuzz=3` costuma bastar — foi assim que a versão
+atual deste patch foi produzida, hunk por hunk, contra uma divergência real de
+código (o fork reorganizou `scsp.c` bastante); depois de aplicar com fuzz,
+`git diff` no checkout do Yabause vira o patch novo, verificado por reaplicar
+limpo contra o mesmo commit (`git stash` → `git apply --check` → `git stash
+pop`) antes de substituir este arquivo.
 
 Compile o núcleo libretro (ou qualquer porta que use o **interpretador**, não o
 dynarec — a instrumentação vive no interpretador):
@@ -95,6 +112,82 @@ traces bem diferentes.
 | `MIMAS_TRACE_NO_DISC` | desligado | `1` força a bandeja vazia (o caminho do CD Player) |
 | `MIMAS_DSP_CAPTURE` | desligado | `1` liga a captura do DSP de efeitos (abaixo) |
 | `MIMAS_DSP_ROWS` | `60000` | quantas amostras de entrada/saída do DSP gravar |
+| `MIMAS_REG_TRACE` | desligado | `1` liga a captura dos registradores do SCSP (abaixo) |
+| `MIMAS_FRAME_CAPTURE` | desligado | `1` liga a captura de quadros em PNG (abaixo) |
+| `MIMAS_FRAME_INTERVAL` | `30` | de quantos em quantos quadros um PNG é gravado |
+
+### Capturando os registradores do SCSP
+
+`MIMAS_DSP_CAPTURE` grava o DSP de efeitos — o *caminho* do som. O que ele não
+grava é o que um jogo manda tocar: volume, tom, key-on, pan, os registradores
+comuns (`MVOL` entre eles). Com `MIMAS_REG_TRACE=1` o patch grava, para dentro
+da mesma janela de quadros que o trace de SH-2 (`MIMAS_TRACE_MIN/MAX_FRAME`),
+uma linha por escrita em `<prefixo>_scsp_regs.txt`:
+
+```
+740 w 010 1800
+741 w 010 0C08
+753 w 016 E000
+```
+
+`quadro tamanho(b/w/l) offset valor` — offset já mascarado do jeito que o
+hardware mascara (`scsp_w_b`/`scsp_w_w`/`scsp_w_d` reais, não a fila de posts
+do worker de som deste fork). Área do DSP (`offset >= 0x700`) fica de fora de
+propósito — isso já é o `MIMAS_DSP_CAPTURE`, e misturar os dois deixaria este
+arquivo do tamanho da captura de amostra a amostra por nenhum motivo.
+
+```bash
+MIMAS_TRACE_PREFIX=mkr MIMAS_TRACE_MIN_FRAME=740 MIMAS_TRACE_MAX_FRAME=4294967295 \
+MIMAS_REG_TRACE=1 \
+  retroarch -L .../yabasanshiro_libretro.so mkr.chd
+# → mkr_trace.txt, mkr_branch_trace.txt, mkr_scsp_regs.txt
+```
+
+### Capturando quadros
+
+Para comparar a nossa emulação de um jogo contra a referência num ponto
+específico — o equivalente de `stubs/captures/` para um jogo, só que não
+versionado. Com `MIMAS_FRAME_CAPTURE=1` o patch grava um PNG a cada
+`MIMAS_FRAME_INTERVAL` quadros (padrão 30, ~meio segundo de jogo), dentro da
+mesma janela de `MIMAS_TRACE_MIN/MAX_FRAME`, nomeado
+`<prefixo>_frame_<quadro>.png` — o mesmo número de quadro que já rotula o
+trace de SH-2 e a captura de registradores, então um PNG casa com os outros
+dois sem precisar de alinhamento à parte.
+
+**Por que intervalo fixo, não "quadros-chave".** Não existe atalho de
+keyframe aqui: cada quadro é uma renderização completa a partir da VRAM e dos
+registradores do VDP2, sem estrutura de GOP como vídeo comprimido tem. E a
+comparação já existente (`src/bin/compare.rs`, que faz busca do quadro mais
+parecido em vez de casar por índice, porque a numeração do nosso emulador
+deriva da referência ao longo do tempo) funciona melhor com espaçamento
+uniforme do que com amostras "importantes" espalhadas — onde quer que se
+precise olhar, tem uma amostra perto.
+
+A captura lê o framebuffer do renderer OpenGL do próprio core
+(`YuiGetFB()` + `glReadPixels`), não uma cópia de tela do driver de vídeo do
+RetroArch — funciona igual com `video_driver=null` (ver abaixo, sobre
+velocidade) e não depende de nada estar sendo mostrado numa janela.
+
+```bash
+MIMAS_TRACE_PREFIX=mkr MIMAS_TRACE_MIN_FRAME=740 MIMAS_TRACE_MAX_FRAME=4294967295 \
+MIMAS_REG_TRACE=1 MIMAS_FRAME_CAPTURE=1 \
+  retroarch -L .../yabasanshiro_libretro.so mkr.chd
+# → mkr_trace.txt, mkr_branch_trace.txt, mkr_scsp_regs.txt, mkr_frame_*.png
+```
+
+### Sobre velocidade de captura
+
+Em 2026-09-20, capturando Magic Knight Rayearth com este fork: `pause_nonactive
+= "true"` na config do RetroArch pausa o core inteiro se a janela nunca ganha
+foco (comum numa captura sem interação) — sem sintoma nenhum além de nada
+avançar; desligue com `--appendconfig` apontando para um arquivo com
+`pause_nonactive = "false"`. Além disso, a renderização OpenGL/Wayland deste
+build específico rodou ~50× mais devagar que tempo real (17 quadros em 15 s).
+`video_driver = "null"` e `audio_driver = "null"` (a captura de quadros lê o
+FBO do core direto, não depende do driver de vídeo do RetroArch) tiraram isso
+para ~28 fps — ainda abaixo de tempo real, mas suficiente. Não investiguei a
+causa raiz da lentidão do GL/Wayland; é uma característica deste build, não
+do mimasv2.
 
 ### O DSP de efeitos
 
