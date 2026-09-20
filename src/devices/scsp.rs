@@ -16,10 +16,18 @@
 //! Nothing here came from another emulator: the fields were derived from the hardware map
 //! and checked against what the real BIOS driver writes (see `docs/sound.md`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::rc::Rc;
 
 use crate::bus::MemoryDevice;
 use crate::devices::scsp_dsp::ScspDsp;
+
+/// Tier 2c cache key: everything that determines a non-looping voice's per-sample core
+/// output (RAM fetch, TL, the time-based envelope — none of which reads a register besides
+/// these). Pan, send level and ISEL are deliberately left out: they are applied *after* the
+/// cached core, and caching them too would hide the part of a repeat play that is actually
+/// allowed to differ (a game can send the same hit sound to a different pan/channel).
+type SfxKey = (u32, u32, u32, u16, u8, bool); // sa, lsa, lea, pitch_reg, tl, pcm8
 
 pub const SLOTS: usize = 32;
 pub const REG_SIZE: usize = 0x1000;
@@ -61,10 +69,19 @@ const EG_DECAY_PER_SAMPLE: f32 = 0.999_921_7;
 /// resolution of an i16 sample.
 const EG_SILENCE_FLOOR: f32 = 1e-4;
 
+/// Tier 2c: how many one-shot voices (menu blips, hit sounds) stay cached at once. Small on
+/// purpose — a scene has dozens of distinct effects, not thousands; oldest entry evicted
+/// first when full.
+const SFX_CACHE_MAX_ENTRIES: usize = 64;
+/// A voice longer than this (in output samples, roughly 1.5s at 44.1kHz) is not worth
+/// caching: the odds of an exact-parameter repeat drop as a sound gets longer, and the
+/// buffer itself gets big enough to matter.
+const SFX_CACHE_MAX_SAMPLES: usize = 0x1_0000;
+
 /// Playback state of one slot. Only what changes per sample lives here; level, pan and
 /// pitch are read from the registers every sample, because a sound driver keeps writing
 /// them while a note plays.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct Slot {
     active: bool,
     /// Read position in sound RAM, in samples, 16.16 fixed point.
@@ -79,6 +96,27 @@ struct Slot {
     eg_gain: f32,
     /// Samples since key-on, used to time the hold-then-decay envelope.
     eg_age: u64,
+    /// Everything below is derived from registers that usually do not change between two
+    /// samples of the same note — cached at key-on and refreshed in `after_write` when the
+    /// owning register moves, instead of recomputed 44,100 times a second regardless. A game
+    /// driving the mixer hard (hundreds of register writes a frame) rewrites these far less
+    /// often than it renders samples, so this turns "recompute every sample" into "recompute
+    /// on the write that actually changed something."
+    attenuation: f32,
+    pitch_step: u64,
+    dry_shift: u32,
+    dry_pan: (u32, u32),
+    send_shift: u32,
+    isel: usize,
+    /// Tier 2c. `Some` when this key-on hit the cache: the core output replays from here
+    /// instead of touching RAM or the envelope at all. `sfx_cursor` is the read position.
+    sfx_playback: Option<Rc<Vec<i32>>>,
+    sfx_cursor: usize,
+    /// `Some` while building a new cache candidate (a loop-mode-0 voice short enough to be
+    /// worth caching, with no cached entry yet) — the core output is pushed here every
+    /// sample and handed to `Scsp::sfx_cache` when the voice reaches its natural end.
+    sfx_capture: Option<Vec<i32>>,
+    sfx_key: Option<SfxKey>,
 }
 
 pub struct Scsp {
@@ -116,6 +154,16 @@ pub struct Scsp {
     pub samples_out: u64,
     /// Timeline of writes to slot 0, to see what the driver does to a playing note.
     pub slot0_log: Vec<String>,
+    /// Off by default: `common_writes`/`key_log`/`slot0_log` exist only for `--sound-profile`
+    /// to report on, and a real game rewrites registers hundreds of times a frame — bookkeeping
+    /// a `String` and a `BTreeMap` entry on every one of those writes for a report nobody asked
+    /// for is wasted work in the hottest path this chip has. `set_diagnostics` turns it on.
+    pub diag_enabled: bool,
+    /// Tier 2c: cached core output for one-shot (non-looping) voices, keyed by the register
+    /// tuple that determines it. `sfx_cache_order` tracks insertion order for eviction — a
+    /// `VecDeque` of keys, oldest first, since a plain `HashMap` has no order of its own.
+    sfx_cache: HashMap<SfxKey, Rc<Vec<i32>>>,
+    sfx_cache_order: VecDeque<SfxKey>,
 }
 
 impl Default for Scsp {
@@ -128,7 +176,7 @@ impl Scsp {
     pub fn new() -> Self {
         Self {
             regs: [0; REG_SIZE],
-            slots: [Slot::default(); SLOTS],
+            slots: std::array::from_fn(|_| Slot::default()),
             timer_count: [0; 3],
             cycle_carry: 0,
             scieb_seen: 0,
@@ -147,7 +195,32 @@ impl Scsp {
             isel_seen: 0,
             samples_out: 0,
             slot0_log: Vec::new(),
+            diag_enabled: false,
+            sfx_cache: HashMap::new(),
+            sfx_cache_order: VecDeque::new(),
         }
+    }
+
+    /// Inserts a finished one-shot capture into the cache, evicting the oldest entry first if
+    /// full. A no-op if the key is already cached (can happen if two slots finish an
+    /// identical, previously-uncached voice on the same sample).
+    fn sfx_cache_insert(&mut self, key: SfxKey, buf: Vec<i32>) {
+        if self.sfx_cache.contains_key(&key) {
+            return;
+        }
+        if self.sfx_cache_order.len() >= SFX_CACHE_MAX_ENTRIES
+            && let Some(oldest) = self.sfx_cache_order.pop_front()
+        {
+            self.sfx_cache.remove(&oldest);
+        }
+        self.sfx_cache_order.push_back(key);
+        self.sfx_cache.insert(key, Rc::new(buf));
+    }
+
+    /// Turns the `--sound-profile` bookkeeping (`common_writes`, `key_log`, `slot0_log`) on
+    /// or off. Off by default; nothing that plays sound reads these fields back.
+    pub fn set_diagnostics(&mut self, on: bool) {
+        self.diag_enabled = on;
     }
 
     fn word(&self, off: usize) -> u16 {
@@ -200,7 +273,7 @@ impl Scsp {
             if on && !self.slots[i].active {
                 self.slots[i] = self.start_slot(i);
                 self.key_ons += 1;
-                if self.key_log.len() < 16 {
+                if self.diag_enabled && self.key_log.len() < 16 {
                     self.key_log.push(format!(
                         "slot {i:2}: ctrl={:04X} SA={:05X} LSA={:04X} LEA={:04X} eg1={:04X} eg2={:04X} TL={:02X} pitch={:04X} imxl={:04X} disdl={:04X}",
                         self.word(base),
@@ -224,16 +297,64 @@ impl Scsp {
     fn start_slot(&self, i: usize) -> Slot {
         let base = i * 0x20;
         let ctrl = self.word(base);
+        let (dry_shift, dry_pan) = self.slot_dry(i);
+        let (send_shift, isel) = self.slot_send(i);
+        let sa = (((ctrl & 0x0F) as u32) << 16) | self.word(base + 0x02) as u32;
+        let lsa = self.word(base + 0x04) as u32;
+        let lea = self.word(base + 0x06) as u32;
+        let loop_mode = ((ctrl >> 5) & 0x03) as u8;
+        let pcm8 = ctrl & (1 << 4) != 0;
+        let pitch_step = self.step(i);
+
+        // Tier 2c: only non-looping voices are candidates — a looping one never reaches a
+        // "finished, cache it" moment the way this is wired. On a hit, replay instead of
+        // computing; on a miss short enough to be worth it, start building one.
+        let (sfx_playback, sfx_capture, sfx_key) = if loop_mode == 0 {
+            let key: SfxKey = (
+                sa,
+                lsa,
+                lea,
+                self.word(base + 0x10),
+                (self.word(base + 0x0C) & 0xFF) as u8,
+                pcm8,
+            );
+            if let Some(cached) = self.sfx_cache.get(&key) {
+                (Some(cached.clone()), None, None)
+            } else {
+                // Rough estimate of how many output samples this voice will take: LEA in
+                // 16.16 fixed point divided by the per-sample position step. Only used to
+                // decide whether to bother — `sample()` still guards the real push.
+                let estimate = (lea as u64).saturating_mul(0x1_0000) / pitch_step.max(1) + 1;
+                if estimate <= SFX_CACHE_MAX_SAMPLES as u64 {
+                    (None, Some(Vec::with_capacity(estimate as usize)), Some(key))
+                } else {
+                    (None, None, None)
+                }
+            }
+        } else {
+            (None, None, None)
+        };
+
         Slot {
             active: true,
             pos: 0,
-            sa: (((ctrl & 0x0F) as u32) << 16) | self.word(base + 0x02) as u32,
-            lsa: self.word(base + 0x04) as u32,
-            lea: self.word(base + 0x06) as u32,
-            loop_mode: ((ctrl >> 5) & 0x03) as u8,
-            pcm8: ctrl & (1 << 4) != 0,
+            sa,
+            lsa,
+            lea,
+            loop_mode,
+            pcm8,
             eg_gain: 1.0,
             eg_age: 0,
+            attenuation: self.slot_attenuation(i),
+            pitch_step,
+            dry_shift,
+            dry_pan,
+            send_shift,
+            isel,
+            sfx_playback,
+            sfx_cursor: 0,
+            sfx_capture,
+            sfx_key,
         }
     }
 
@@ -244,6 +365,28 @@ impl Scsp {
         let oct = if oct > 7 { oct - 16 } else { oct };
         let fns = (pitch & 0x7FF) as f64;
         (((1.0 + fns / 1024.0) * 2f64.powi(oct)) * 65536.0) as u64
+    }
+
+    /// TL is the one piece of the envelope this build has: a static attenuation where the
+    /// hardware has four timed phases. Declared simplification.
+    fn slot_attenuation(&self, i: usize) -> f32 {
+        let tl = (self.word(i * 0x20 + 0x0C) & 0xFF) as f32;
+        10f32.powf(-(tl / 255.0) * 2.0)
+    }
+
+    /// DISDL/pan for the dry path, decoded once instead of every sample.
+    fn slot_dry(&self, i: usize) -> (u32, (u32, u32)) {
+        let dry = self.regs[i * 0x20 + 0x16];
+        (
+            Self::sdl_shift((dry >> 5) & 0x07),
+            Self::panning(dry & 0x1F),
+        )
+    }
+
+    /// IMXL/ISEL for the effect-bus send, decoded once instead of every sample.
+    fn slot_send(&self, i: usize) -> (u32, usize) {
+        let send = self.regs[i * 0x20 + 0x15];
+        (Self::sdl_shift(send & 0x07), ((send >> 3) & 0x0F) as usize)
     }
 
     /// A send level is an attenuation in shifts, not a ratio: level 7 is unity and level 0
@@ -312,57 +455,94 @@ impl Scsp {
             if !self.slots[i].active {
                 continue;
             }
-            let base = i * 0x20;
-            let step = self.step(i);
-            // TL is the one piece of the envelope this build has: a static attenuation
-            // where the hardware has four timed phases. Declared simplification.
-            let tl = (self.word(base + 0x0C) & 0xFF) as f32;
-            let attenuation = 10f32.powf(-(tl / 255.0) * 2.0);
-            let dry = self.regs[base + 0x16];
-            let send = self.regs[base + 0x15];
+            // Tier 2c: filled in below only on the branch that finishes building a new cache
+            // entry, then handed to `sfx_cache_insert` after `slot`'s borrow ends — inserting
+            // needs `&mut self` as a whole, which cannot happen while `slot` still borrows
+            // `self.slots[i]`.
+            let mut new_cache_entry: Option<(SfxKey, Vec<i32>)> = None;
 
             let slot = &mut self.slots[i];
-            let idx = (slot.pos >> 16) as u32;
-            let raw = if slot.pcm8 {
-                let a = (slot.sa + idx) as usize & 0x7_FFFF;
-                (ram[a] as i8 as i32) << 8
+            let (dry_shift, (pl, pr)) = (slot.dry_shift, slot.dry_pan);
+            let (send_shift, isel) = (slot.send_shift, slot.isel);
+
+            let output = if let Some(cached) = slot.sfx_playback.clone() {
+                // Same (SA, LSA, LEA, pitch, TL, pcm8) played before: the core output is a
+                // pure function of those and of samples-since-key-on, so replay it instead of
+                // touching RAM or the envelope at all.
+                let v = cached.get(slot.sfx_cursor).copied().unwrap_or(0);
+                slot.sfx_cursor += 1;
+                if slot.sfx_cursor >= cached.len() {
+                    slot.active = false; // matches reaching LEA on the non-cached path
+                }
+                v
             } else {
-                let a = (slot.sa + idx * 2) as usize & 0x7_FFFE;
-                i16::from_be_bytes([ram[a], ram[a + 1]]) as i32
+                let step = slot.pitch_step;
+                let attenuation = slot.attenuation;
+                let idx = (slot.pos >> 16) as u32;
+                let raw = if slot.pcm8 {
+                    let a = (slot.sa + idx) as usize & 0x7_FFFF;
+                    (ram[a] as i8 as i32) << 8
+                } else {
+                    let a = (slot.sa + idx * 2) as usize & 0x7_FFFE;
+                    i16::from_be_bytes([ram[a], ram[a + 1]]) as i32
+                };
+                slot.pos += step;
+                let end = slot.lea.max(1);
+                let mut finished = false;
+                if (slot.pos >> 16) as u32 >= end {
+                    match slot.loop_mode {
+                        0 => {
+                            slot.active = false; // no loop: stop at the end
+                            finished = true;
+                        }
+                        _ => slot.pos = (slot.lsa as u64) << 16,
+                    }
+                }
+
+                slot.eg_age += 1;
+                if slot.eg_age > EG_HOLD_SAMPLES && slot.eg_gain > 0.0 {
+                    slot.eg_gain *= EG_DECAY_PER_SAMPLE;
+                    if slot.eg_gain < EG_SILENCE_FLOOR {
+                        slot.eg_gain = 0.0;
+                    }
+                }
+                let eg_gain = slot.eg_gain;
+                let v = ((raw as f32 * attenuation * eg_gain) as i32).clamp(-32768, 32767);
+
+                if let Some(buf) = slot.sfx_capture.as_mut() {
+                    if buf.len() < SFX_CACHE_MAX_SAMPLES {
+                        buf.push(v);
+                    } else {
+                        // The length estimate at key-on was wrong (non-integer pitch step
+                        // rounding can do that) — abandon the capture rather than grow
+                        // unbounded for a voice that turned out too long to be worth caching.
+                        slot.sfx_capture = None;
+                        slot.sfx_key = None;
+                    }
+                }
+                if finished {
+                    if let (Some(buf), Some(key)) = (slot.sfx_capture.take(), slot.sfx_key.take()) {
+                        new_cache_entry = Some((key, buf));
+                    }
+                }
+                v
             };
-            slot.pos += step;
-            let end = slot.lea.max(1);
-            if (slot.pos >> 16) as u32 >= end {
-                match slot.loop_mode {
-                    0 => slot.active = false, // no loop: stop at the end
-                    _ => slot.pos = (slot.lsa as u64) << 16,
-                }
-            }
 
-            slot.eg_age += 1;
-            if slot.eg_age > EG_HOLD_SAMPLES && slot.eg_gain > 0.0 {
-                slot.eg_gain *= EG_DECAY_PER_SAMPLE;
-                if slot.eg_gain < EG_SILENCE_FLOOR {
-                    slot.eg_gain = 0.0;
-                }
-            }
-            let eg_gain = slot.eg_gain;
-
-            let output = ((raw as f32 * attenuation * eg_gain) as i32).clamp(-32768, 32767);
-
-            let disdl = Self::attenuate(output, Self::sdl_shift((dry >> 5) & 0x07));
-            let (pl, pr) = Self::panning(dry & 0x1F);
+            let disdl = Self::attenuate(output, dry_shift);
             left += Self::attenuate(disdl, pl) >> 1;
             right += Self::attenuate(disdl, pr) >> 1;
 
             // IMXL is the level into the effect bus and ISEL the channel it lands on. The
             // mixer bus is 20 bits wide, which is where the `<< 4` comes from.
-            let mixs_input = Self::attenuate(output, Self::sdl_shift(send & 0x07));
-            let isel = ((send >> 3) & 0x0F) as usize;
+            let mixs_input = Self::attenuate(output, send_shift);
             self.dsp.mixs[isel] = self.dsp.mixs[isel].saturating_add(mixs_input << 4);
             self.max_send = self.max_send.max((mixs_input << 4).abs());
             self.isel_seen |= 1 << isel;
             self.mixs_peak[isel] = self.mixs_peak[isel].max((mixs_input << 4).abs());
+
+            if let Some((key, buf)) = new_cache_entry {
+                self.sfx_cache_insert(key, buf);
+            }
         }
 
         self.mixs_min = self.mixs_min.min(self.dsp.mixs[0]);
@@ -391,7 +571,11 @@ impl Scsp {
     /// Write side effects: slot keys, interrupt clearing, and a log of what the driver
     /// programmed in the common registers.
     fn after_write(&mut self, off: usize) {
-        if matches!(off, 0x00 | 0x10 | 0x16) && self.slots[0].active && self.slot0_log.len() < 40 {
+        if self.diag_enabled
+            && matches!(off, 0x00 | 0x10 | 0x16)
+            && self.slots[0].active
+            && self.slot0_log.len() < 40
+        {
             self.slot0_log.push(format!(
                 "{:7.3}s off={:02X} = {:04X}{}",
                 self.samples_out as f64 / SAMPLE_RATE as f64,
@@ -405,26 +589,53 @@ impl Scsp {
             ));
         }
         if off < SLOTS * 0x20 {
-            if off % 0x20 == 0 && self.word(off) & (1 << 12) != 0 {
-                self.apply_keys();
-                let v = self.word(off) & !(1 << 12);
-                self.set_word(off, v);
+            let i = off / 0x20;
+            match off % 0x20 {
+                0x00 => {
+                    if self.word(off) & (1 << 12) != 0 {
+                        self.apply_keys();
+                        let v = self.word(off) & !(1 << 12);
+                        self.set_word(off, v);
+                    }
+                }
+                // Refresh whatever `sample()` cached from this register, instead of leaving
+                // it stale until the next key-on. A slot playing keeps its position and
+                // envelope, so key-on is the only place those get reset — but level, pitch
+                // and routing keep getting rewritten by the driver while a note plays, and
+                // the whole point of caching them is that they must not go stale.
+                0x0C if self.slots[i].active => {
+                    self.slots[i].attenuation = self.slot_attenuation(i)
+                }
+                0x10 if self.slots[i].active => self.slots[i].pitch_step = self.step(i),
+                0x14 if self.slots[i].active => {
+                    let (send_shift, isel) = self.slot_send(i);
+                    self.slots[i].send_shift = send_shift;
+                    self.slots[i].isel = isel;
+                }
+                0x16 if self.slots[i].active => {
+                    let (dry_shift, dry_pan) = self.slot_dry(i);
+                    self.slots[i].dry_shift = dry_shift;
+                    self.slots[i].dry_pan = dry_pan;
+                }
+                _ => {}
             }
             return;
         }
         let v = self.word(off);
-        // First non-zero write into the DSP area: if a program arrives, this is where.
-        if v != 0 && (0x600..0xC00).contains(&off) && self.key_log.len() < 16 {
-            self.key_log.push(format!(
-                "DSP {:6.3}s off={:03X} = {:04X}",
-                self.samples_out as f64 / SAMPLE_RATE as f64,
-                off,
-                v
-            ));
+        if self.diag_enabled {
+            // First non-zero write into the DSP area: if a program arrives, this is where.
+            if v != 0 && (0x600..0xC00).contains(&off) && self.key_log.len() < 16 {
+                self.key_log.push(format!(
+                    "DSP {:6.3}s off={:03X} = {:04X}",
+                    self.samples_out as f64 / SAMPLE_RATE as f64,
+                    off,
+                    v
+                ));
+            }
+            let entry = self.common_writes.entry(off).or_insert((v, 0));
+            entry.0 = v;
+            entry.1 += 1;
         }
-        let entry = self.common_writes.entry(off).or_insert((v, 0));
-        entry.0 = v;
-        entry.1 += 1;
         match off {
             0x402 => self.dsp.set_ring(v),
             0x700..=0x77F => self.dsp.set_coef((off - 0x700) / 2, v),
@@ -542,6 +753,39 @@ mod tests {
         );
     }
 
+    /// Proof that the second play actually comes from the cache, not just that the numbers
+    /// happen to match: the RAM changes between the two plays. A recompute would read the new
+    /// content and produce a different answer; a cache hit replays the first play's output
+    /// regardless.
+    #[test]
+    fn a_repeated_one_shot_replays_from_cache_instead_of_rereading_ram() {
+        let mut ram = ram_with_ramp();
+        let mut scsp = Scsp::new();
+        program_slot0(&mut scsp, 0); // LPCTL = 0: one-shot, the only mode Tier 2c caches
+        let mut out = Vec::new();
+        scsp.generate(M68K_CYCLES_PER_SAMPLE * 4, &mut ram, &mut out);
+        let first: Vec<i16> = out.iter().map(|(l, _)| *l).collect();
+        assert_eq!(first, vec![128, 256, 384, 512]);
+        assert_eq!(
+            scsp.active_slots(),
+            0,
+            "a one-shot must have finished by now"
+        );
+
+        // Same exact parameters, but the RAM this slot reads from now holds something else.
+        for b in ram[0x1000..0x1008].iter_mut() {
+            *b = 0;
+        }
+        scsp.write_word(0x00, 0x1800); // KYONEX | KYONB, same SA/LSA/LEA/pitch/TL as before
+        out.clear();
+        scsp.generate(M68K_CYCLES_PER_SAMPLE * 4, &mut ram, &mut out);
+        let second: Vec<i16> = out.iter().map(|(l, _)| *l).collect();
+        assert_eq!(
+            second, first,
+            "a cache hit must replay the first play's output, not read the RAM that changed"
+        );
+    }
+
     #[test]
     fn a_looping_slot_returns_to_the_loop_start() {
         let mut ram = ram_with_ramp();
@@ -560,12 +804,59 @@ mod tests {
 
     #[test]
     fn key_off_silences_the_slot() {
-        let mut ram = ram_with_ramp();
         let mut scsp = Scsp::new();
         program_slot0(&mut scsp, 1);
         assert_eq!(scsp.active_slots(), 1);
         scsp.write_word(0x00, 0x1020); // KYONEX with KYONB clear
         assert_eq!(scsp.active_slots(), 0);
+    }
+
+    #[test]
+    fn diagnostics_are_off_by_default_and_only_the_flag_turns_them_on() {
+        let mut scsp = Scsp::new();
+        assert!(!scsp.diag_enabled);
+        program_slot0(&mut scsp, 1); // several register writes, including a key-on
+        assert!(
+            scsp.common_writes.is_empty(),
+            "bookkeeping must stay off unless set_diagnostics(true) was called"
+        );
+        assert!(scsp.key_log.is_empty());
+
+        scsp.set_diagnostics(true);
+        scsp.write_word(0x400, 0x0001); // any common-register write
+        assert!(
+            !scsp.common_writes.is_empty(),
+            "once on, the same write path must record again"
+        );
+
+        // With diagnostics on and slot 0 playing, the timeline and the DSP-area log record
+        // too — the two branches the previous checks did not reach.
+        scsp.write_word(0x10, 0x0001); // slot 0's own pitch register, while it is active
+        assert!(!scsp.slot0_log.is_empty());
+        scsp.write_word(0x600, 0x0001); // non-zero write inside the DSP area
+        assert!(scsp.key_log.iter().any(|l| l.starts_with("DSP")));
+    }
+
+    /// TL is cached at key-on (Tier 2a) and must be refreshed whenever the driver rewrites it
+    /// mid-note, not just read once — a driver that fades a note by lowering TL depends on
+    /// this.
+    #[test]
+    fn tl_written_while_a_note_plays_changes_the_cached_attenuation() {
+        let mut ram = ram_with_ramp();
+        let mut scsp = Scsp::new();
+        program_slot0(&mut scsp, 1); // TL = 0, no attenuation
+        let mut out = Vec::new();
+        scsp.generate(M68K_CYCLES_PER_SAMPLE, &mut ram, &mut out);
+        let full = out[0].0;
+
+        scsp.write_word(0x0C, 0x0080); // raise TL well past halfway while the note is playing
+        out.clear();
+        scsp.generate(M68K_CYCLES_PER_SAMPLE, &mut ram, &mut out);
+        assert!(
+            out[0].0.abs() < full.abs(),
+            "raising TL after key-on must quiet the note, got {} against {full}",
+            out[0].0
+        );
     }
 
     #[test]
