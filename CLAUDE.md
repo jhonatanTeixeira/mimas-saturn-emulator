@@ -10,8 +10,12 @@ medição, **a medição vence**.
 `mimasv2` é um emulador de Sega Saturn em Rust (edição 2024) com um objetivo
 estreito: **bootar a BIOS real (`saturn_bios.bin`) sobre um JIT x86-64 e
 reproduzir a saída de vídeo dela, sem tela**, quadro a quadro, contra as
-capturas reais em `stubs/captures`. Comentários e mensagens de log estão em
-português — siga isso ao editar código em volta.
+capturas reais em `stubs/captures`.
+
+**Código e comentários em inglês.** Vale para tudo que se escreve daqui em
+diante, inclusive mensagens de log novas. O código anterior a 2026-09-19 está em
+português e não precisa ser traduzido em massa; quando mexer num trecho, escreva
+o novo em inglês.
 
 ## As regras do projeto
 
@@ -35,8 +39,10 @@ português — siga isso ao editar código em volta.
    diferente e abandonada. Não leia, não copie, não cite, não dependa. As
    permissões em `.claude/settings.json` bloqueiam a leitura, e
    `tools/project_rules.py` reprova qualquer referência a ele.
-7. **O Claude não commita neste repositório.** Deixe o trabalho na árvore e
-   reporte o que mudou; quem commita é o humano.
+7. **Nunca commite por iniciativa própria — só quando pedirem.** Terminou um
+   trabalho, deixe na árvore e reporte o que mudou. Quando pedirem, commite:
+   commits pequenos, frase curta, sem título e sem linha em branco, **em
+   inglês**, e sem marca d'água de ferramenta.
 
 ## Comandos
 
@@ -46,9 +52,12 @@ cargo test
 ./target/release/mimasv2 --frames 620 --dump out             # roda a BIOS, escreve out/frameN.png
 ./target/release/compare stubs/captures out --max-frame 728  # nota os quadros contra as capturas reais
 ./target/release/mimasv2 --frames 700 --trace-check bios_trace_no_game.txt
+cargo run --release --bin live                               # janela: BIOS em tempo real, com vídeo e som
 cargo run --release --bin gl_probe                           # sanidade: contexto EGL surfaceless + leitura do FBO
 ./target/release/mimasv2 --frames 300 --dump-sound-ram som.bin   # despeja a RAM de som (o driver que a BIOS carregou)
 cargo run --release --bin m68k_probe -- som.bin              # roda esse driver no núcleo 68000 e mostra o que ele faz
+DSP_STATE=x_dsp_state.txt DSP_RAM=x_dsp_ram.bin DSP_STEPS=x_dsp_steps.txt \
+  ./target/release/dsp_check x_dsp_program.txt x_dsp_io.txt  # DSP de efeitos contra a captura real, passo a passo
 bash tools/quality_gate.sh                                   # antes de dar qualquer trabalho por pronto
 ```
 
@@ -57,7 +66,9 @@ mapeados), `--profile` (PCs de entrada dos blocos mais quentes — acha laço de
 espera rápido), `--break <pc[,pc]> --break-n N --break-depth D` (as últimas D
 instruções com todos os registradores na N-ésima batida; exige modo trace),
 `--video` (registradores do VDP1/VDP2 e resumo da lista de comandos), `--vram
-<hex,hex>`, `--dump-from/--dump-to/--dump-every`. `VDP_LAYER=0..4` renderiza uma
+<hex,hex>`, `--dump-from/--dump-to/--dump-every`, `--sound-profile` (PCs mais
+quentes do driver de som — acha o 68000 preso em laço de espera),
+`--dump-audio`, `--dump-dsp`, `--dump-sound-ram`. `VDP_LAYER=0..4` renderiza uma
 camada só (0-3 = NBG0-3, 4 = sprites). O `saturn_bios.bin` precisa estar no
 diretório atual. O quadro `N` é despejado no VBlank-in, então `--frames N`
 escreve até o quadro `N-1`.
@@ -81,9 +92,14 @@ composição, o único lugar que conhece tipos concretos) → `cpu` / `bus` /
   marca os trechos com código compilado para invalidação e registra acessos não
   mapeados).
 - **`src/devices/`** — reais: `scu.rs` (interrupções IST/IMS, DMA 0-2 direto e
-  indireto), `vdp1.rs`, `vdp2.rs`, `ram.rs`. Stubs: `smpc.rs`, `cd_block.rs`,
-  `scu_dsp.rs`, `SoundRam` (em `ram.rs`), `stub.rs` (`RegisterStub`, `OpenBus`).
-- **`src/video/`** — `egl.rs` (contexto), `renderer.rs` (duas passadas GL),
+  indireto), `vdp1.rs`, `vdp2.rs`, `ram.rs`, `scsp.rs` (registradores, 32 slots
+  de PCM, temporizadores) e `sound_cpu.rs` (o 68000 que roda o driver de som da
+  BIOS, do crate `m68k`). Stubs: `smpc.rs`, `cd_block.rs`, `scu_dsp.rs`,
+  `stub.rs` (`RegisterStub`, `OpenBus`). O `scsp_dsp.rs` (DSP de efeitos) é
+  validado contra a captura real por `src/bin/dsp_check.rs`.
+- **`src/video/`** — `egl.rs` (contexto headless, usado pelo gravador de PNG e
+  pelo gate), `renderer.rs` (duas passadas GL; `in_current_context()` desenha no
+  contexto de quem chama, que é como a janela funciona),
   `dumper.rs` (`FrameSink` → PNG). `timing.rs` gera os eventos de HBlank/VBlank
   (263 linhas × 1820 ciclos).
 - **`src/debug/`** — `trace_check.rs`, `break_trace.rs`, `video_state.rs`.
@@ -199,6 +215,7 @@ Ao reportar, diga o que aconteceu: "6 de 8 verdes, cobertura e vídeo vermelhos"
 | o que | onde |
 |---|---|
 | resultado atual do vídeo e do trace, lacunas conhecidas | `docs/status.md` |
+| performance medida, e as desconfianças de otimização e de som | `docs/current_status.md` |
 | o que cada stub modela e de onde veio cada valor | `docs/stubs.md` |
 | o briefing original do projeto | `docs/mission-brief.md` |
 | como capturar trace novo a partir de uma BIOS sua | `tools/trace-capture/README.md` |

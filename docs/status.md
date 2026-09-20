@@ -4,7 +4,7 @@ Este arquivo muda a cada sessão. Os arquivos de agente (`CLAUDE.md`,
 `GEMINI.md`) não repetem nada daqui, de propósito: número em arquivo de regra
 envelhece e vira ruído.
 
-**Medido em 2026-09-19**, `cargo build --release`, nesta máquina.
+**Medido em 2026-09-20**, `cargo build --release`, nesta máquina.
 
 ## Vídeo contra as capturas reais
 
@@ -58,6 +58,55 @@ Medido em 2026-09-19, detalhe e método em `docs/sound.md`:
   e a mixagem. E a exatidão do crate ainda não foi conferida contra um trace
   real do 68000.
 
+### Som dentro do emulador (2026-09-19, noite)
+
+A BIOS boota com som, em tempo real, na janela `live`. O driver real roda no
+68000 e programa o SCSP; a nota toca de 0,634 s a 8,779 s do boot. Vídeo e trace
+não regrediram (1,66 e 92,1%).
+
+Falta, com causa identificada: a reverberação (DSP de efeitos, não implementado
+— o slot está roteado para ele) e o segundo som do boot (só uma chave de slot é
+ligada no boot inteiro). Detalhe em `docs/sound.md`.
+
+**Cobertura daquela mudança: 13%.** O gate mede e reprova, como deve. A maior
+parte do que falta é fiação (`machine.rs`), interface de linha de comando
+(`main.rs`) e o caminho GL (`renderer.rs`), que não têm teste de unidade. O SCSP
+e o 68000 têm: 12 testes com valores derivados à mão.
+
+**Correção no próprio harness:** o passo de cobertura rodava o tarpaulin com o
+perfil de debug do projeto, que compila com `opt-level = 1`. Com otimização ele
+perde a atribuição de linha e media 13 linhas de uma mudança de 113 — dando 85%
+onde a verdade era 13%. Agora roda com `CARGO_PROFILE_DEV_OPT_LEVEL=0`.
+
+### DSP de efeitos e mixagem (2026-09-20)
+
+O DSP de efeitos **bate com a referência bit a bit**: 99,7% de amostras idênticas
+em 60.000, pico 4004 igual, correlação 1,000000, e **0 passos divergentes em
+108** no trace passo a passo das quatro primeiras amostras. Medido por
+`src/bin/dsp_check.rs` contra a captura de `tools/trace-capture/`.
+
+Quatro defeitos reais caíram no caminho:
+
+| defeito | efeito |
+|---|---|
+| `last_step` do DSP (rodávamos 128 passos; o hardware para no último não-zero) | `shift_reg` errado no fim de cada amostra |
+| `io_addr` só recalculado em passos com `mrd`/`mwt` | trace por passo não fechava |
+| nível de interrupção fixo em 4, ignorando `SCILV0/1/2` | 68000 entrava pelo autovetor errado; driver ia a 2,59 M em vez de 11,08 M instruções e nunca subia o programa do DSP |
+| `SoundRam` zerava o byte de comando da caixa de correio | BIOS lia "consumido" para comandos que o driver nunca viu |
+
+A cadeia de mixagem passou a ser a do hardware, em inteiros: seco por DISDL, envio
+ao DSP por **IMXL/ISEL** (era EFSDL, registrador errado), retorno por EFSDL/EFPAN
+do slot, mestre por MVOL. Pico da saída caiu de **32767 (saturando) para 7528**.
+
+**O que ainda soa errado:** o toque se arrasta 8,5 s em vez de decair, porque não
+há gerador de envelope — só TL estático. É o próximo item de `docs/sound.md`.
+
+**Gate em 2026-09-20: 7 verdes, 1 vermelho.** O vermelho é cobertura do diff,
+13,4% contra piso de 90%: `main.rs` (92 linhas de CLI e impressão), `machine.rs`
+(21 de fiação) e `renderer.rs` (15 do caminho GL), que não têm teste de unidade.
+`scsp.rs`, `scsp_dsp.rs`, `ram.rs` e `smpc.rs` estão em 100%. Vídeo (1,66/255) e
+trace (92,1%) não regrediram.
+
 ## Lacunas conhecidas
 
 - **Fade-out (708–709), preto (710–713) e tela de licença (720+)** precisam de
@@ -75,7 +124,10 @@ Medido em 2026-09-19, detalhe e método em `docs/sound.md`:
   triângulos, exato para paralelogramos e aproximado para distorcidos em geral.
 - **Modos 1 e 2 de RAM de cor do VDP2 e nomes de padrão de 1 palavra** estão
   escritos, mas não testados.
-- **35 avisos do clippy** (código morto de andaime). É o teto atual da catraca
+- **Gerador de envelope do SCSP ausente.** Temos TL estático onde o hardware tem
+  ataque, dois decaimentos e liberação, com taxas de KRS/OCT/FNS. É por isso que
+  o toque de boot se arrasta em vez de decair.
+- **28 avisos do clippy** (código morto de andaime). É o teto atual da catraca
   do gate; quando cair, baixe `MIMAS_MAX_WARNINGS`.
 - **Cobertura da árvore inteira em 2,4%** (385 de 16.207 linhas contadas pelo
   tarpaulin; a expansão das macros do dynasm infla o denominador). O gate mede
