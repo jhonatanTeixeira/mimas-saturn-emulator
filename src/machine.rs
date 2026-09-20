@@ -20,6 +20,11 @@ use crate::devices::vdp2::{Vdp2, Vdp2Area, Vdp2Port};
 use crate::timing::{VideoEvent, VideoTiming};
 use crate::video::{FrameSink, NullSink};
 
+/// How many SH-2 cycles accumulate before the CD block's clock is fed. Under one scanline
+/// (1820 cycles), so nothing that depends on video timing can tell the difference; see
+/// `cd_cycle_carry` for why this batching is safe.
+const CD_TICK_BATCH_CYCLES: u64 = 1024;
+
 pub struct Saturn {
     pub cpu: Sh2Cpu,
     pub space: Sh2AddressSpace,
@@ -43,6 +48,12 @@ pub struct Saturn {
     events: Vec<VideoEvent>,
     /// Contagem de execuções por PC de entrada de bloco (só quando o profiler está ligado).
     pub profile: Option<std::collections::HashMap<u32, u64>>,
+    /// SH-2 cycles not yet fed to the CD block's clock. Its only visible effect, `HIRQ_SCDQ`,
+    /// fires once every 381,800 cycles (~1/75 s); ticking it every JIT block, often under a
+    /// hundred cycles long, is a `RefCell` borrow and a call for no observable change most of
+    /// the time. Batched to `CD_TICK_BATCH_CYCLES` — under one scanline (1820 cycles), and
+    /// three orders of magnitude under the period it feeds — see `docs/current_status.md`.
+    cd_cycle_carry: u64,
 }
 
 impl Saturn {
@@ -244,6 +255,7 @@ impl Saturn {
             sink: Box::new(NullSink),
             events: Vec::new(),
             profile: None,
+            cd_cycle_carry: 0,
         }
     }
 
@@ -282,17 +294,33 @@ impl Saturn {
     }
 
     fn advance(&mut self, cycles: u64) {
-        self.cd.borrow_mut().tick(cycles);
-        self.timing.advance(cycles, &mut self.events);
-        let events = std::mem::take(&mut self.events);
-        for ev in events {
-            self.on_video_event(ev);
+        self.cd_cycle_carry += cycles;
+        if self.cd_cycle_carry >= CD_TICK_BATCH_CYCLES {
+            self.cd.borrow_mut().tick(self.cd_cycle_carry);
+            self.cd_cycle_carry = 0;
         }
-        if self.smpc.borrow().irq_pending {
-            self.smpc.borrow_mut().irq_pending = false;
+        self.timing.advance(cycles, &mut self.events);
+        // `mem::take` and drain, not `mem::take` and consume: consuming would hand back an
+        // empty, zero-capacity Vec, and the next `timing.advance` would grow it from scratch
+        // every single block. Draining keeps the allocation and just empties it.
+        if !self.events.is_empty() {
+            let mut events = std::mem::take(&mut self.events);
+            for ev in events.drain(..) {
+                self.on_video_event(ev);
+            }
+            self.events = events;
+        }
+        // One borrow of the SMPC for both checks, not two: on most blocks nothing here fires,
+        // and re-borrowing a `RefCell` for that is pure overhead run millions of times.
+        let (irq_pending, sound_on) = {
+            let mut smpc = self.smpc.borrow_mut();
+            let irq = std::mem::take(&mut smpc.irq_pending);
+            (irq, smpc.sound_on.take())
+        };
+        if irq_pending {
             self.scu.borrow_mut().raise(IRQ_SMPC);
         }
-        if let Some(on) = self.smpc.borrow_mut().sound_on.take() {
+        if let Some(on) = sound_on {
             let mut ram = self.scsp_ram.borrow_mut();
             let mut scsp = self.scsp.borrow_mut();
             if on {
@@ -377,5 +405,68 @@ impl Saturn {
                 self.scu.borrow_mut().acknowledge(bit);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Content does not matter here: these tests drive `advance()` directly and never run a
+    /// JIT block, so the ROM only needs to be the size `Saturn::new` expects to map.
+    fn saturn() -> Saturn {
+        Saturn::new(&[0u8; 0x8_0000])
+    }
+
+    #[test]
+    fn the_cd_clock_still_advances_despite_batching() {
+        use crate::bus::MemoryDevice;
+        let mut s = saturn();
+        const HIRQ_OFF: u32 = 0x9_0008;
+        const HIRQ_SCDQ: u16 = 0x0400;
+        assert_eq!(s.cd.borrow_mut().read_word(HIRQ_OFF) & HIRQ_SCDQ, 0);
+        // SCDQ's period is 381_800 cycles; drive well past it in steps far smaller than
+        // CD_TICK_BATCH_CYCLES, to prove batching does not drop cycles on the floor.
+        for _ in 0..(381_800 / 200 + 10) {
+            s.advance(200);
+        }
+        assert_ne!(
+            s.cd.borrow_mut().read_word(HIRQ_OFF) & HIRQ_SCDQ,
+            0,
+            "SCDQ must still fire even though the CD clock is only fed every few blocks"
+        );
+    }
+
+    #[test]
+    fn advancing_past_a_video_event_does_not_reset_the_event_queues_capacity() {
+        let mut s = saturn();
+        // One scanline (1820 cycles) crosses at least a LineStart event.
+        s.advance(1820);
+        let cap_after_first = s.events.capacity();
+        assert!(
+            cap_after_first > 0,
+            "the first batch of video events must have allocated something"
+        );
+        s.advance(1820);
+        assert_eq!(
+            s.events.capacity(),
+            cap_after_first,
+            "the event queue must keep its allocation across steps, not restart at zero every \
+             block — that was the whole point of draining instead of consuming it"
+        );
+    }
+
+    #[test]
+    fn a_full_frame_of_stepping_does_not_panic() {
+        let mut s = saturn();
+        // One frame is 263 lines * 1820 cycles; run a couple to exercise VBlank in and out,
+        // the SMPC borrow consolidation, DMA and interrupt delivery along the way.
+        for _ in 0..(263 * 1820 * 2 / 256 + 1) {
+            s.advance(256);
+        }
+        assert!(
+            s.frame() >= 1,
+            "two frames' worth of cycles must have advanced the counter"
+        );
     }
 }
