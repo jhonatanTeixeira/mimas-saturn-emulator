@@ -389,3 +389,160 @@ precisar redescobrir isso do zero.
 Gate depois da mudança: 9/9 verde, 0 linhas novas de cobertura pendente (é
 reorganização de arquivo — só comentários mudaram de conteúdo, `diff_coverage.py`
 não encontrou nada executável para medir).
+
+---
+
+# 5. SCSP para um jogo que "sintetiza tudo": Tiers 0–4 (2026-09-20)
+
+Capturamos 10 minutos de Magic Knight Rayearth via YabaSanshiro instrumentado
+(seção anterior, e `docs/sound.md`). Achado que motiva tudo isto: o jogo
+escreve nos registradores do SCSP em média **215 vezes por quadro**, sem
+parar — a BIOS mal toca o SCSP depois do primeiro segundo (1 key-on). Passei
+um menu de 5 opções (JIT, SIMD, cache, threading), o usuário escolheu
+**Tiers 1–4 juntos, Tier 5 (mais JIT no 68000 via TrackedMem) só se ainda
+precisarmos espremer mais depois**.
+
+## Feito e verificado nesta sessão (Tiers 0, 1, 2a, 2c)
+
+Ordem real de implementação: 0 → 1 → 2a → 2c. Gate 9/9 verde (2 pulados, ver
+Tier 0) depois de cada um, testes bit-exatos preservados o tempo todo.
+
+- **Tier 0 — comparação de jogo no gate.** `stubs/captures-game/frames/frame<N>.png`
+  (259 quadros migrados da captura do MKR) e `stubs/captures-game/audio.wav`
+  (ainda não existe) são os caminhos padronizados — um jogo por vez, sem nome
+  de jogo no caminho. Passos 10/11 do gate (`tools/quality_gate.sh`) leem
+  desses lugares e **pulam** (não falham) enquanto faltar referência ou
+  enquanto o mimasv2 não souber rodar um jogo de verdade (CD Block é stub).
+  `docs/quality-gate.md` documenta os dois passos.
+- **Tier 1 — `Scsp::diag_enabled`.** `common_writes`/`key_log`/`slot0_log`
+  (só usados pelo relatório de `--sound-profile`) agora ficam atrás de uma
+  flag, padrão `false`. Zero custo fora do modo diagnóstico.
+- **Tier 2a — valores derivados de registrador cacheados em `Slot`**
+  (`attenuation`, `pitch_step`, `dry_shift`, `dry_pan`, `send_shift`, `isel`),
+  calculados uma vez no key-on e recalculados em `after_write` só quando o
+  registrador dono muda — em vez de recomputados a cada amostra (44100×/s),
+  incluindo o `powf` de TL que antes rodava sempre.
+- **Tier 2c — cache de conteúdo para efeitos de um tiro.** Voz sem loop
+  (`loop_mode == 0`) que termina de tocar guarda a saída "núcleo" (RAM +
+  TL + envelope, antes de pan/envio) cacheada por
+  `(SA, LSA, LEA, pitch, TL, pcm8)`; a próxima vez que a mesma chave tocar,
+  reproduz do cache em vez de tocar RAM ou rodar o envelope de novo.
+  Teste `a_repeated_one_shot_replays_from_cache_instead_of_rereading_ram`
+  prova que é cache de verdade, não coincidência: muda a RAM entre as duas
+  execuções e confirma que a segunda ainda bate com a primeira.
+  Música em loop **fica de fora de propósito**: o envelope declarado hoje só
+  decai, nunca sustenta, então não existe estado periódico não-silencioso
+  para cachear ainda — isso espera o gerador de envelope de verdade (já listado
+  em `docs/sound.md`). A chave de cache já está no formato certo para essa
+  extensão quando ele existir.
+
+**O que não dá para medir ainda:** o gate de hoje só exercita a carga do boot
+da BIOS (1 key-on). O ganho de verdade destes quatro itens é sob a carga
+sustentada de um jogo — só se mede depois que o driver do MKR rodar dentro do
+nosso próprio emulador, que é trabalho declarado fora de escopo aqui.
+
+## Ainda por fazer: Tiers 2b, 4 e 3 — desenho já validado, guardado aqui
+
+O usuário pediu para parar a implementação aqui e só guardar o resto do plano
+em docs, para retomar depois sem perder o desenho já resolvido.
+
+### Tier 2b — SIMD no laço de mixagem, com escopo honesto
+
+Sem `std::simd`/nightly no projeto (edition 2024, stable). Dois passos, nessa
+ordem:
+
+1. **Primeiro corte: reestruturar para autovetorização.** Separar a
+   aritmética sem branch de dado (atenuação, pan por shift, clamp) num laço
+   apertado sobre um buffer pequeno, sem `continue` cedo, para o LLVM
+   vetorizar sozinho — zero `unsafe` novo, zero `cfg(target_arch)` novo.
+2. **Só se o passo 1 não bastar:** intrínsecos `std::arch::x86_64` explícitos,
+   atrás de `is_x86_feature_detected!("avx2")` com fallback escalar
+   obrigatório. Escopo deliberado: só atenuação/pan/clamp entram em SIMD; a
+   busca de amostra na RAM (gather, endereço depende de estado por slot) e o
+   `mixs[isel] +=` (scatter-add de 32 fontes em até 16 destinos) **ficam
+   escalares** — dizer isso explicitamente, não é omissão.
+
+Oráculo: os testes bit-exatos de `scsp.rs` (`key_on_plays_the_sample_at_unity_pitch`
+→ `vec![128, 256, 384, 512]` e companhia) não podem mudar por reassociação de
+ponto flutuante.
+
+### Tier 4 — JIT do microcódigo do DSP de efeitos
+
+Arquivo: `src/devices/scsp_dsp.rs`. `Op` (26 campos), `ops: [Op; 128]`,
+`run_sample` chama `exec(step, ram)` num laço reto `for step in 0..last_step`,
+`exec` (~170 linhas) branch pesado sobre os campos de `Op`.
+
+**Por que é seguro e o do 68000 não era:** o DSP roda exatamente uma vez por
+amostra, sem acoplamento de ritmo/ciclo — deixar mais rápido não tem risco de
+correção, só ganho de velocidade. `set_program` é raro (poucas vezes por
+boot).
+
+**Recomendação: especialização por closures, não um JIT `dynasm` de verdade,
+como primeiro corte.** Os ~15 campos booleanos/pequenos de `Op` são
+constantes de compilação para o programa carregado agora — construir, a cada
+recompilação (disparada por um `dirty: bool`, checado uma vez no topo de
+`run_sample`, **não** a cada uma das 512 escritas de um upload de programa),
+uma lista de funções especializadas por passo remove os branches em runtime
+sem gerar código de máquina, sem `unsafe` novo, e é bem menor que replicar o
+padrão `dynasm` de `src/cpu/jit/backend/x64.rs` para ~15 campos × 128 passos.
+Se depois de medir ainda sobrar custo relevante, um JIT `dynasm` de verdade é
+o próximo passo natural.
+
+Oráculo: `src/bin/dsp_check.rs` — 0 passos divergentes em 108, antes/depois,
+mesma disciplina do experimento de bloco maior do JIT SH-2.
+
+### Tier 3 — som (68000 + SCSP + DSP) em thread própria (o maior risco, de longe)
+
+Desenho já especificado em `docs/sound.md` ("O desenho da thread de som"):
+sincronização de mão única, RAM de som pertence à thread de som, escritas
+chegam como mensagens carimbadas por ciclo numa fila SPSC, caixa de correio
+sai de um retrato publicado, a SH-2 nunca espera o som.
+
+**Estado atual confirmado:** `scsp_ram`/`scsp` são `Rc<RefCell<T>>` via
+`Shared<T>` (`src/bus/device.rs:27`), registrados no barramento em
+`Saturn::new`. `sound_cpu: SoundCpu` é dono direto em `Saturn`. `sound_step`/
+`advance` (`src/machine.rs`) chamam tudo de forma síncrona, todo bloco do JIT.
+
+**A questão de determinismo — decidida, não para adiar de novo quando isto
+for retomado:** o gate inteiro depende do caminho headless produzir saída
+idêntica byte a byte a cada execução. Decisão: implementar com uma **barreira
+de dreno** — o caminho headless espera a thread de som drenar até o último
+ciclo publicado pela SH-2 antes de ler `saturn.audio` ou despejar arquivo.
+Isso preserva determinismo lógico (toda mensagem carimbada por ciclo, consumida
+em ordem) sem exigir que o SO agende as duas threads de um jeito específico.
+**Rede de segurança já aprovada:** se `dsp_check`/`compare_audio` não
+reproduzirem bit a bit em 5–10 execuções seguidas mesmo com a barreira, cair
+para: threading só como opt-in no `live`, caminho headless continua síncrono
+como hoje.
+
+**Caixa de correio:** sound RAM `0x700..0x73A` (handshake, `docs/sound.md`).
+Retrato de tamanho fixo (`[u8; 0x40]`) atrás de um seqlock, atualizado uma vez
+por lote drenado.
+
+**Fila SPSC:** sem dependência disso hoje (`Cargo.toml`: 6 deps nomeadas).
+Recomendação: fila própria à mão (~100 linhas), não puxar `ringbuf` — combina
+com o apetite do projeto de possuir código de escopo apertado.
+
+**Arquivos que mudam:** `src/devices/sound_thread.rs` (novo — spawna a
+thread, mensagens, filas, seqlock, API de dreno); `src/devices/ram.rs` e
+`src/devices/scsp.rs` (dono passa a ser a thread de som); `src/machine.rs`
+(`Saturn::new` troca o tipo de porta nos dois `bus.map`, `sound_step`/
+`advance` encolhem para "publicar ciclo"); `src/main.rs`,
+`src/bin/dsp_check.rs`, `src/bin/compare_audio.rs`, `src/bin/live.rs` (chamar
+a barreira de dreno antes de ler `saturn.audio`).
+
+**Por que fica por último quando isto for retomado:** maior risco do plano
+inteiro, e sua reescrita do caminho de escrita (`after_write` → mensagem
+enfileirada) precisa carregar adiante a lógica já simplificada pelos Tiers 1 e
+2a — não redesenhá-la sob threading ao mesmo tempo.
+
+## Verificação, quando cada tier for retomado
+
+- **2b:** testes bit-exatos de `scsp.rs`; `bash tools/quality_gate.sh`
+  completo olhando o passo 9 (`compare_audio`); A/B intercalado de
+  `mimasv2 --frames 1800`, mesmo método usado para o JIT do 68000.
+- **4:** `dsp_check` antes/depois, 0/108 divergências exigido.
+- **3:** `dsp_check`/`compare_audio` rodados 5–10 vezes seguidas exigindo
+  saída idêntica — esse é o checkpoint de determinismo, uma rodada verde não
+  basta. Para `live`: fps/CPU em tempo real, mesmo formato da tabela na
+  seção 1 deste arquivo.
