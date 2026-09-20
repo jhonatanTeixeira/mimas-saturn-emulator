@@ -1,54 +1,50 @@
-# Mimas: Sega Saturn Distributed Emulator in Rust
+# Mimas v2 — emulador de Sega Saturn em Rust, escrito por IA
 
-Mimas is a distributed Sega Saturn emulator designed to leverage multi-threaded architectures (specifically targeted at devices like the R36S).
+Todo o código deste repositório foi escrito por IA. A pesquisa, a arquitetura e
+a direção de engenharia — o que construir, em que ordem, que compromisso
+aceitar, e como conferir uma correção contra o comportamento real do hardware em
+vez de confiar num teste auto-consistente — vêm de um engenheiro humano
+conduzindo o processo.
 
-## About this project
+## O que é
 
-Every line of code in this repository was written by AI (Claude, via
-Claude Code). The research, the architecture, and the engineering
-direction — what to build and in what order, which trade-offs to accept,
-how to cross-check a claimed fix against real hardware behavior instead of
-trusting a self-consistent test — came from a human engineer driving the
-process, not the AI on its own.
+O objetivo é estreito e mensurável: **bootar a BIOS real do Saturn sobre um JIT
+x86-64 e reproduzir a saída de vídeo dela, sem tela, quadro a quadro, contra
+capturas reais**.
 
-The motivation is direct: Saturn emulation remains one of the weaker
-corners of the emulation scene, precisely because the hardware is
-genuinely hard (two SH-2 CPUs running in lockstep, a custom DSP, VDP1/VDP2,
-an onboard 68000 just for sound). This project is a deliberate test of a
-specific claim — that AI can carry out a task this complex correctly, as
-long as a human engineer is actually steering: setting the architecture,
-deciding what "correct" means, and catching the difference between a bug
-that looks fixed and a bug that is fixed. `CLAUDE.md` and `history.md`
-document that process as it actually happened, including the mistakes and
-the corrections, not just the result.
+O método é o que diferencia este projeto:
 
-## Architecture
-- **Distributed block model**: Each major hardware component (SH-2 Master, SH-2 Slave, SCU, VDP1/VDP2, SCSP/68000, SMPC/CS2) runs in its own system thread context.
-- **Lock-free shared buffers**: Utilizes `arc-swap` and atomic primitives for efficient inter-thread communication.
-- **Physical bus locking**: Replicates the physical bus lock overhead of DMA/SCU operations using `BusArbiter` with system condition variables (`Condvar`).
-- **Bounded-slack lockstep**: Maintains synchrony between threads through bounded clock counters.
+- **A verdade vem da execução real**, não de outro emulador. Traces de execução
+  da BIOS (primeira execução de cada endereço, com os valores lidos) e capturas
+  de tela do console são a referência. Nenhum emulador vizinho é consultado:
+  trace é comportamento sem implementação, e por isso não há de onde copiar
+  arquitetura.
+- **Todo avanço é medido**: erro médio de pixel contra as capturas e
+  porcentagem do trace real reproduzida. Um `tools/quality_gate.sh` de 8 passos
+  determinísticos guarda os dois pisos, junto com formatação, avisos, testes e
+  cobertura das linhas alteradas.
+- **Só vídeo é real**; o resto são stubs que devolvem exatamente o que a máquina
+  real respondeu naquele ponto do trace, cada um com a procedência anotada.
 
-## Workspace Layout
-- `saturn-core/`: Pure emulator engine with core component definitions (`SH-2`, `SCU`, `BusArbiter`, buffers, etc.).
-- `saturn-frontend-native/`: Standalone application frontend.
-- `saturn-frontend-libretro/`: Dynamic library core exposing the Libretro API interfaces.
+Estado atual, lacunas e números: [`docs/status.md`](docs/status.md).
 
-## Building
+## Como rodar
+
+As capturas de referência estão no repositório (`stubs/captures/`). A BIOS e os
+traces não: eles são o programa da BIOS. Para produzir os seus traces a partir
+de uma BIOS que você já tenha, há um patch de instrumentação e as instruções em
+[`tools/trace-capture/`](tools/trace-capture/). Com os dois em disco:
+
 ```bash
 cargo build --release
+./target/release/mimasv2 --frames 620 --dump out
+./target/release/compare stubs/captures out --max-frame 728
 ```
 
-## Continuing this work
+## Histórico
 
-If you're picking this project up (human or agent), read in this order:
-
-1. **`CLAUDE.md`** — the work loop: how to find and clear the next real
-   boot wall, and the exact current wall as of the last session.
-2. **`history.md`** — how the project got here and why specific
-   non-obvious decisions were made.
-3. **`.development/ROADMAP.md`** — milestone status (done/in-progress/not
-   started).
-4. **`.development/TASKS.md`** — the same, at finer granularity.
-5. **`docs/`** — background reference: `PROJECT.md` and
-   `saturn_architecture_report.md` (architecture), `ORIGINAL_REQUEST.md`
-   (the original ask), `TEST_INFRA.md`/`TEST_READY.md` (test setup).
+Este repositório começou como **mimas**, um emulador de Saturn com uma thread
+por chip. Aquela árvore está em [`archived/`](archived/), preservada com o
+histórico do git e fora dos limites dos agentes. O que se aprendeu lá, e por que
+o projeto recomeçou, está em [`docs/status.md`](docs/status.md) e no
+[`CLAUDE.md`](CLAUDE.md).

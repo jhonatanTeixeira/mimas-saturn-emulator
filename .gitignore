@@ -1,28 +1,46 @@
 /target
-# milestone-tests is its own workspace root (see its Cargo.toml), so it
-# gets an independent build dir, not the root one above.
-/milestone-tests/target
-**/*.rs.bk
-*.pdb
+/out
 
-# Model weights for tools/antipattern_scan.py. Kept beside the repo because
-# $HOME is on a 93%-full disk; see MODEL_CACHE in that script.
-.models/
+# A BIOS e os traces *são* o programa: o trace traz opcode e desmontagem de
+# cada instrução executada, e a imagem da BIOS já teve de ser removida do
+# histórico uma vez. As capturas de tela não entram nesta regra — são pixels de
+# saída, não contêm código, e estão versionadas em stubs/captures/.
+/saturn_bios.bin
+/bios_trace_*.txt
+/branch_trace_*.txt
+# Gameplay de um jogo comercial, fora do escopo do projeto. As capturas da
+# BIOS em si (stubs/captures/) ficam versionadas: são o oráculo do projeto,
+# são pixels de saída e não contêm programa nenhum.
+/stubs/captures-game/
+/dumped_frame_*.png
+# Despejos da RAM de som: contêm o driver de som que a BIOS carrega, e o trace
+# decodificado é a BIOS desmontada. Mesma regra da imagem e dos traces.
+/som*.bin
+/*soundram*.bin
+/decoded*.txt
+# Áudio despejado para comparação
+/*.wav
 
-# Project-local venv for tools/antipattern_scan.py (torch CPU + transformers +
-# torchao, ~1.2 GB). Kept here rather than under $HOME for the same reason as
-# .models/ above.
-.venv/
-.mutants-tmp/
+# Sobras da fase de geração do interpretador, mantidas em disco e fora do build
+/legacy_src/
+/dump_data.rs
+/dump_loop.rs
+/test_offset.rs
+/test_dynasm.rs
+/decode.s
+/gen_sh2.py
+/generate_sh2.py
+/scratch.py
+/instruction_sh2.md
+/run_log.txt
 
-# cargo-mutants output and its copied build trees
-mutants.out*/
-.mutants-tmp/
-scratch/ra_system/*.bin
-/*.py
-/*.log
-/*.bin
-/*.html
-lcov.info
-tmp.json
-scratch
+# Binários e objetos soltos gerados por aquelas sobras
+/dump_data
+/dump_loop
+/test_offset
+/decode.o
+
+# Ferramentas de medição
+/.venv
+/lcov.info
+/tarpaulin-report.html

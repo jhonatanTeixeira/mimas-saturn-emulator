@@ -1,0 +1,324 @@
+diff --git a/yabause/src/libretro/libretro.c b/yabause/src/libretro/libretro.c
+index 09888fe..9a8f4d9 100644
+--- a/yabause/src/libretro/libretro.c
++++ b/yabause/src/libretro/libretro.c
+@@ -1298,8 +1298,20 @@ bool retro_load_game(const struct retro_game_info *info)
+ 
+    environ_cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, desc);
+ 
+-   yinit.cdcoretype       = CDCORE_ISO;
+-   yinit.cdpath           = full_path;
++   /* captura de trace: MIMAS_TRACE_NO_DISC=1 força a bandeja vazia. O core
++      DUMMY responde "CD not present" (cdbase.c: dmy_status = 2), que é o
++      caminho do CD Player da BIOS. O libretro exige conteúdo para carregar,
++      então continue passando um arquivo qualquer; ele é ignorado neste modo. */
++   {
++      const char *mimas_sem_disco = getenv("MIMAS_TRACE_NO_DISC");
++      if (mimas_sem_disco && *mimas_sem_disco && *mimas_sem_disco != '0') {
++         yinit.cdcoretype    = CDCORE_DUMMY;
++         yinit.cdpath        = NULL;
++      } else {
++         yinit.cdcoretype    = CDCORE_ISO;
++         yinit.cdpath        = full_path;
++      }
++   }
+    yinit.biospath         = (hle_bios_force ? NULL : bios_path);
+    yinit.syslanguageid    = system_language;
+    yinit.carttype         = addon_cart_type;
+diff --git a/yabause/src/memory.c b/yabause/src/memory.c
+index 9982e35..7b98d79 100644
+--- a/yabause/src/memory.c
++++ b/yabause/src/memory.c
+@@ -50,6 +50,77 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
+ #include <ctype.h>
+ 
+ #include "memory.h"
++
++/* ===== captura de trace (mimasv2/tools/trace-capture) =====================
++   Só instrumentação: guarda o último acesso mapeado num buffer que a linha do
++   trace, emitida em sh2int.c, consome. Janela de quadros lida do ambiente. */
++#include <stdio.h>
++#include <stdlib.h>
++
++char current_mem_access[128] = {0};
++
++extern u32 YabauseGetFrameCount();
++
++static u32 MimasTraceEnv(const char *name, u32 padrao) {
++    const char *v = getenv(name);
++    return (v && *v) ? (u32)strtoul(v, NULL, 0) : padrao;
++}
++
++u32 MimasTraceMinFrame(void) {
++    static int lido = 0; static u32 v = 0;
++    if (!lido) { v = MimasTraceEnv("MIMAS_TRACE_MIN_FRAME", 0); lido = 1; }
++    return v;
++}
++
++u32 MimasTraceMaxFrame(void) {
++    /* 740 cobre o boot da BIOS. Para jogo, suba pelo ambiente. */
++    static int lido = 0; static u32 v = 0;
++    if (!lido) { v = MimasTraceEnv("MIMAS_TRACE_MAX_FRAME", 740); lido = 1; }
++    return v;
++}
++
++int MimasTraceWindow(void) {
++    u32 f = YabauseGetFrameCount();
++    return f >= MimasTraceMinFrame() && f <= MimasTraceMaxFrame();
++}
++
++const char* GetSubsystemName(u32 addr) {
++    /* Mapa físico do Saturn; o bit cache-through 0x20000000 já sai no masked.
++       Esta tabela é paralela ao roteamento real do emulador — ela não decide
++       nada, só rotula. A primeira versão dela estava deslocada de uma região
++       (chamava o CD Block de SCSP, a RAM de som de CD Block e os registradores
++       do SCU de VDP2), e é por isso que os traces antigos trazem rótulo errado
++       com endereço certo. Faixa não listada não recebe rótulo nenhum. */
++    u32 masked = addr & 0x0FFFFFFF;
++    if (masked < 0x00100000)                         return "BIOS ROM";
++    if (masked >= 0x00100000 && masked < 0x00180000) return "SMPC";
++    if (masked >= 0x00180000 && masked < 0x00200000) return "Backup RAM";
++    if (masked >= 0x00200000 && masked < 0x00300000) return "Work RAM Low";
++    if (masked >= 0x01000000 && masked < 0x01800000) return "MINIT";
++    if (masked >= 0x01800000 && masked < 0x02000000) return "SINIT";
++    if (masked >= 0x02000000 && masked < 0x04000000) return "A-Bus CS0";
++    if (masked >= 0x04000000 && masked < 0x05000000) return "A-Bus CS1";
++    if (masked >= 0x05800000 && masked < 0x05900000) return "CD Block";
++    if (masked >= 0x05A00000 && masked < 0x05B00000) return "Sound RAM";
++    if (masked >= 0x05B00000 && masked < 0x05C00000) return "SCSP Regs";
++    if (masked >= 0x05C00000 && masked < 0x05C80000) return "VDP1 RAM";
++    if (masked >= 0x05C80000 && masked < 0x05D00000) return "VDP1 FB";
++    if (masked >= 0x05D00000 && masked < 0x05E00000) return "VDP1 Regs";
++    if (masked >= 0x05E00000 && masked < 0x05F00000) return "VDP2 RAM";
++    if (masked >= 0x05F00000 && masked < 0x05F80000) return "VDP2 CRAM";
++    if (masked >= 0x05F80000 && masked < 0x05FC0000) return "VDP2 Regs";
++    if (masked >= 0x05FE0000 && masked < 0x05FF0000) return "SCU Regs";
++    if (masked >= 0x06000000 && masked < 0x06100000) return "Work RAM High";
++    return "";
++}
++
++void LogMemAccess(u32 addr, const char* type) {
++    const char* sub;
++    if (!MimasTraceWindow()) return;
++    sub = GetSubsystemName(addr);
++    if (sub[0] != 0) snprintf(current_mem_access, 128, "%s %08X (%s)", type, addr, sub);
++}
++/* ===== fim da instrumentação ============================================= */
+ #include "coffelf.h"
+ #include "cs0.h"
+ #include "cs1.h"
+@@ -890,6 +961,7 @@ u8 FASTCALL MappedMemoryReadByteNocache(u32 addr)
+ u8 FASTCALL MappedMemoryReadByte(u32 addr, u32 * cycle)
+ #endif
+ {
++  LogMemAccess(addr, "READ");
+   if (cycle != NULL) { 
+     //*cycle = getMemCycle(addr); 
+     GET_MEM_CYCLE_R
+@@ -954,6 +1026,7 @@ u16 FASTCALL MappedMemoryReadWordNocache(u32 addr)
+ u16 FASTCALL MappedMemoryReadWord(u32 addr, u32 * cycle)
+ #endif
+ {
++  LogMemAccess(addr, "READ");
+   if (cycle != NULL) { 
+     //*cycle = getMemCycle(addr); 
+     GET_MEM_CYCLE_R
+@@ -1017,6 +1090,7 @@ u32 FASTCALL MappedMemoryReadLongNocache(u32 addr)
+ u32 FASTCALL MappedMemoryReadLong(u32 addr, u32 * cycle)
+ #endif
+ {
++  LogMemAccess(addr, "READ");
+   if (cycle != NULL) { 
+     //*cycle = getMemCycle(addr); 
+     GET_MEM_CYCLE_R
+@@ -1083,6 +1157,7 @@ void FASTCALL MappedMemoryWriteByteNocache(u32 addr, u8 val)
+ void FASTCALL MappedMemoryWriteByte(u32 addr, u8 val, u32 * cycle)
+ #endif
+ {
++  LogMemAccess(addr, "WRITE");
+   if (cycle != NULL) { 
+     //*cycle = getMemCycle(addr); ]
+     GET_MEM_CYCLE_W
+@@ -1147,6 +1222,7 @@ void FASTCALL MappedMemoryWriteWordNocache(u32 addr, u16 val)
+ void FASTCALL MappedMemoryWriteWord(u32 addr, u16 val, u32 * cycle )
+ #endif
+ {
++  LogMemAccess(addr, "WRITE");
+   if (cycle != NULL) { 
+     //*cycle = getMemCycle(addr); 
+     GET_MEM_CYCLE_W
+@@ -1211,6 +1287,7 @@ void FASTCALL MappedMemoryWriteLongNocache(u32 addr, u32 val)
+ void FASTCALL MappedMemoryWriteLong(u32 addr, u32 val, u32 * cycle )
+ #endif
+ {
++  LogMemAccess(addr, "WRITE");
+   if (cycle != NULL) { 
+     //*cycle = getMemCycle(addr); 
+     GET_MEM_CYCLE_W
+diff --git a/yabause/src/sh2int.c b/yabause/src/sh2int.c
+index 3a8ff45..c7019a2 100644
+--- a/yabause/src/sh2int.c
++++ b/yabause/src/sh2int.c
+@@ -43,6 +43,81 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
+ */
+ 
+ #include "sh2core.h"
++
++/* ===== captura de trace (mimasv2/tools/trace-capture) =====================
++   Emite duas coisas, ambas filtradas por novidade:
++     <prefixo>_trace.txt         — primeira execução de cada PC, por núcleo
++     <prefixo>_branch_trace.txt  — primeira ocorrência de cada aresta de desvio
++   Nada aqui altera a emulação. */
++#include <stdio.h>
++#include <stdlib.h>
++#include <signal.h>
++
++extern char current_mem_access[128];
++extern u32 YabauseGetFrameCount();
++extern int MimasTraceWindow(void);
++
++#define MIMAS_BRANCH_SLOTS 131072
++static u32 mimas_branch_from[MIMAS_BRANCH_SLOTS];
++static u32 mimas_branch_to[MIMAS_BRANCH_SLOTS];
++static int mimas_branch_cheia = 0;
++static u8 *mimas_visited_pcs = NULL;
++static FILE *mimas_trace_f = NULL;
++static FILE *mimas_branch_f = NULL;
++/* Última instrução vista, para o trace dizer onde a execução parou quando o
++   emulador morre no meio. */
++static volatile u32 mimas_ultimo_pc = 0;
++static volatile u32 mimas_ultimo_frame = 0;
++static volatile char mimas_ultimo_core = '?';
++
++static void MimasTraceEncerra(const char *motivo) {
++    /* Melhor esforço: stdio não é seguro em manipulador de sinal, mas um build
++       de captura que perde o fim do arquivo não serve para diagnosticar nada,
++       e o processo está morrendo de qualquer forma. */
++    if (mimas_trace_f) {
++        fprintf(mimas_trace_f, "# fim: %s | ultimo Frame: %u | Core: %c | PC: %08X\n",
++                motivo, (u32)mimas_ultimo_frame, (char)mimas_ultimo_core, (u32)mimas_ultimo_pc);
++        fflush(mimas_trace_f);
++    }
++    if (mimas_branch_f) fflush(mimas_branch_f);
++}
++
++static void MimasTraceAoSair(void) { MimasTraceEncerra("saida normal"); }
++
++static void MimasTraceSinal(int sig) {
++    char motivo[64];
++    snprintf(motivo, sizeof(motivo), "sinal %d", sig);
++    MimasTraceEncerra(motivo);
++    signal(sig, SIG_DFL);   /* deixa o crash aparecer como sempre apareceu */
++    raise(sig);
++}
++
++static FILE *MimasTraceOpen(const char *sufixo) {
++    static int ganchos = 0;
++    char caminho[256];
++    const char *prefixo = getenv("MIMAS_TRACE_PREFIX");
++    FILE *f;
++    snprintf(caminho, sizeof(caminho), "%s%s",
++             (prefixo && *prefixo) ? prefixo : "bios", sufixo);
++    f = fopen(caminho, "w");
++    if (!f) { fprintf(stderr, "[trace] nao consegui abrir %s\n", caminho); return NULL; }
++    if (!ganchos) {
++        int sinais[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGINT, SIGTERM };
++        unsigned i;
++        ganchos = 1;
++        atexit(MimasTraceAoSair);
++        for (i = 0; i < sizeof(sinais) / sizeof(sinais[0]); i++)
++            signal(sinais[i], MimasTraceSinal);
++    }
++    return f;
++}
++
++/* Sessão longa costuma ser encerrada à força; sem isto o fim fica no buffer. */
++static void MimasTraceFlush(FILE *f) {
++    static u32 linhas = 0;
++    if (++linhas % 1000 == 0) fflush(f);
++}
++/* ===== fim da instrumentação ============================================= */
+ #include "sh2int.h"
+ #include "sh2idle.h"
+ #include "cs0.h"
+@@ -3200,8 +3275,78 @@ FASTCALL void SH2InterpreterExec(SH2_struct *context, u32 cycles)
+          break;
+       }
+ 
+-      // Execute it
+-      opcodes[context->instruction](context);
++      /* ---- captura de trace ---- */
++      {
++         u32 exec_pc = context->regs.PC;
++         u16 exec_op = context->instruction;
++         u32 quadro = YabauseGetFrameCount();
++         int na_janela = MimasTraceWindow();
++         int pc_novo = 0;
++         int core_bit = (context == MSH2) ? 1 : 2;
++         static char disasm_buf[1024];
++
++         mimas_ultimo_pc = exec_pc;
++         mimas_ultimo_frame = quadro;
++         mimas_ultimo_core = (context == MSH2) ? 'M' : 'S';
++
++         if (na_janela) {
++            if (!mimas_visited_pcs) mimas_visited_pcs = (u8 *)calloc(0x8000000, 1);
++            if (mimas_visited_pcs) {
++               u32 pc_idx = (exec_pc >> 1) & 0x7FFFFFF;
++               if (!(mimas_visited_pcs[pc_idx] & core_bit)) {
++                  mimas_visited_pcs[pc_idx] |= core_bit;
++                  pc_novo = 1;
++                  current_mem_access[0] = '\0';
++                  SH2Disasm(exec_pc, exec_op, 0, &context->regs, disasm_buf);
++               }
++            }
++         }
++
++         // Execute it
++         opcodes[context->instruction](context);
++
++         if (pc_novo) {
++            if (!mimas_trace_f) mimas_trace_f = MimasTraceOpen("_trace.txt");
++            if (mimas_trace_f) {
++               if (current_mem_access[0] != '\0')
++                  fprintf(mimas_trace_f, "Frame: %u | Core: %c | PC: %08X | Opcode: %04X | %-25s | Mem: %s\n",
++                          quadro, (context == MSH2) ? 'M' : 'S',
++                          exec_pc, exec_op, disasm_buf, current_mem_access);
++               else
++                  fprintf(mimas_trace_f, "Frame: %u | Core: %c | PC: %08X | Opcode: %04X | %-25s\n",
++                          quadro, (context == MSH2) ? 'M' : 'S',
++                          exec_pc, exec_op, disasm_buf);
++               MimasTraceFlush(mimas_trace_f);
++            }
++         }
++
++         if (na_janela && !mimas_branch_cheia && context->regs.PC != exec_pc + 2) {
++            u32 destino = context->regs.PC;
++            u32 hash = ((exec_pc >> 1) ^ (destino >> 1)) & (MIMAS_BRANCH_SLOTS - 1);
++            int sondas = 0;
++            while (mimas_branch_from[hash] != 0 && sondas < MIMAS_BRANCH_SLOTS) {
++               if (mimas_branch_from[hash] == exec_pc && mimas_branch_to[hash] == destino) break;
++               hash = (hash + 1) & (MIMAS_BRANCH_SLOTS - 1);
++               sondas++;
++            }
++            /* Tabela cheia para de registrar. A versão anterior girava para
++               sempre aqui, o que basta um jogo para alcançar. */
++            if (sondas >= MIMAS_BRANCH_SLOTS) {
++               mimas_branch_cheia = 1;
++               fprintf(stderr, "[trace] tabela de desvios cheia (%d arestas); branch_trace para aqui\n",
++                       MIMAS_BRANCH_SLOTS);
++            } else if (mimas_branch_from[hash] == 0) {
++               mimas_branch_from[hash] = exec_pc;
++               mimas_branch_to[hash] = destino;
++               if (!mimas_branch_f) mimas_branch_f = MimasTraceOpen("_branch_trace.txt");
++               if (mimas_branch_f) {
++                  fprintf(mimas_branch_f, "Core: %c | Branch: %08X -> %08X | Opcode: %04X\n",
++                          (context == MSH2) ? 'M' : 'S', exec_pc, destino, exec_op);
++                  MimasTraceFlush(mimas_branch_f);
++               }
++            }
++         }
++      }
+    }
+ 
+    context->pre_cycle = context->cycles - target_cycle;

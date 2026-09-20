@@ -1,0 +1,28 @@
+/target
+# milestone-tests is its own workspace root (see its Cargo.toml), so it
+# gets an independent build dir, not the root one above.
+/milestone-tests/target
+**/*.rs.bk
+*.pdb
+
+# Model weights for tools/antipattern_scan.py. Kept beside the repo because
+# $HOME is on a 93%-full disk; see MODEL_CACHE in that script.
+.models/
+
+# Project-local venv for tools/antipattern_scan.py (torch CPU + transformers +
+# torchao, ~1.2 GB). Kept here rather than under $HOME for the same reason as
+# .models/ above.
+.venv/
+.mutants-tmp/
+
+# cargo-mutants output and its copied build trees
+mutants.out*/
+.mutants-tmp/
+scratch/ra_system/*.bin
+/*.py
+/*.log
+/*.bin
+/*.html
+lcov.info
+tmp.json
+scratch

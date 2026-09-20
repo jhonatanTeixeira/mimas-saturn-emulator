@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./archived/**)",
+      "Edit(./archived/**)",
+      "Bash(cat *archived*)",
+      "Bash(head *archived*)",
+      "Bash(tail *archived*)",
+      "Bash(less *archived*)",
+      "Bash(grep *archived*)",
+      "Bash(rg *archived*)"
+    ]
+  }
+}

@@ -78,7 +78,7 @@ def find(root: Path):
 
 
 def main() -> int:
-    hits = list(find(Path(".")))
+    hits = list(find(Path("src")))
     if not hits:
         print("✅ No assertion-free tests")
         return 0

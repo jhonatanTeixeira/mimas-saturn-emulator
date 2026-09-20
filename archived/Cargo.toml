@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "saturn-core",
+    "saturn-frontend-native",
+    "saturn-frontend-libretro",
+    "e2e-tests",
+]
+resolver = "2"
