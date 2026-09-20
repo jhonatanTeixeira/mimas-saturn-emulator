@@ -18,9 +18,9 @@ skip() { SKIP=$((SKIP+1)); RESULTS+=("⏭  $1"); echo "⏭  $1"; }
 step() { echo; echo "── $1"; }
 
 # --- limiares ---------------------------------------------------------------
-# Medidos neste repositório em 2026-09-19. Só descem (erro, avisos) ou sobem
+# Medidos neste repositório em 2026-09-20. Só descem (erro, avisos) ou sobem
 # (cobertura, trace) — nunca o contrário sem justificativa.
-MAX_WARNINGS="${MIMAS_MAX_WARNINGS:-34}"        # avisos do clippy
+MAX_WARNINGS="${MIMAS_MAX_WARNINGS:-28}"        # avisos do clippy
 MAX_MEAN_ERR="${MIMAS_MAX_MEAN_ERR:-1.66}"      # erro médio contra as capturas
 MIN_TRACE_PCT="${MIMAS_MIN_TRACE_PCT:-92.1}"    # % do trace de referência
 MIN_DIFF_COV="${MIMAS_MIN_DIFF_COV:-90}"        # cobertura das linhas mudadas
@@ -45,7 +45,7 @@ check_loosening() { # nome, valor_atual, padrão, direção(min|max)
         fi
     fi
 }
-check_loosening "MIMAS_MAX_WARNINGS"  "$MAX_WARNINGS"  34    max
+check_loosening "MIMAS_MAX_WARNINGS"  "$MAX_WARNINGS"  28    max
 check_loosening "MIMAS_MAX_MEAN_ERR"  "$MAX_MEAN_ERR"  1.66  max
 check_loosening "MIMAS_MIN_TRACE_PCT" "$MIN_TRACE_PCT" 92.1  min
 check_loosening "MIMAS_MIN_DIFF_COV"  "$MIN_DIFF_COV"  90    min
@@ -113,7 +113,11 @@ if ! command -v cargo-tarpaulin >/dev/null; then
 elif [ "${MIMAS_SKIP_COVERAGE:-0}" = "1" ]; then
     skip "cobertura: desligada por MIMAS_SKIP_COVERAGE=1"
 else
-    if cargo tarpaulin --out Lcov --ignore-tests --output-dir . --timeout 300 >/tmp/mimasv2_tarpaulin.log 2>&1; then
+    # opt-level 0 na marra: o perfil de debug deste projeto compila otimizado, e com
+    # otimização o tarpaulin perde a atribuição de linha — mediu 13 linhas de uma mudança
+    # que tem 113, e as que faltavam apareciam como "cobertas" por não existirem no mapa.
+    if CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo tarpaulin --out Lcov --ignore-tests \
+        --output-dir . --timeout 600 >/tmp/mimasv2_tarpaulin.log 2>&1; then
         if python3 tools/diff_coverage.py --lcov lcov.info --range "$COVERAGE_RANGE" --min "$MIN_DIFF_COV"; then
             pass "cobertura do diff ≥ ${MIN_DIFF_COV}% ($COVERAGE_RANGE)"
         else
