@@ -4,10 +4,14 @@
 //! actually move sound (start address, loop, pitch, level and pan), the three timers, and
 //! the interrupts they raise to the 68000.
 //!
-//! Declared simplification: the envelope. Real hardware has four phases driven by rate
-//! tables; here a slot plays while its key is on and its level comes from TL, DISDL and
-//! IMXL read live. That is enough for the BIOS sound to appear and wrong for real attack
-//! and decay — replacing it with a real envelope generator is known work, not discovery.
+//! Declared simplification: the envelope. Real hardware times four phases (attack, two
+//! decays, release) from rate registers (AR/D1R/D2R/RR, scaled by KRS/OCT/FNS). We do not
+//! know those registers' exact bit layout and have no captured envelope curve to check a
+//! guess against, so instead of encoding an unverified guess as fact, a slot holds at full
+//! gain for 50 ms after key-on and then decays on a fixed clock (`EG_HOLD_SAMPLES`,
+//! `EG_DECAY_PER_SAMPLE` in `sample()`). That turns a held tone that drones forever into one
+//! that fades, which is the audible defect this exists to fix — it is not the hardware's
+//! envelope, and the timing will not match a real capture sample for sample.
 //!
 //! Nothing here came from another emulator: the fields were derived from the hardware map
 //! and checked against what the real BIOS driver writes (see `docs/sound.md`).
@@ -41,6 +45,22 @@ const BIT_TIMER_C: u16 = 1 << 8;
 /// Fires once per sample.
 const BIT_SAMPLE: u16 = 1 << 10;
 
+/// The envelope: held at full gain for this many samples after key-on (50 ms), then decays.
+/// Real hardware times this from AR/D1R/D2R/RR/KRS, decoded from the slot's two envelope
+/// registers (0x08/0x0A). We do not know their exact bit layout — no capture of a real
+/// envelope curve exists to check a guess against, and this project's rule is not to encode
+/// an unverified guess as if it were a fact (see `docs/sound.md`). This hold-then-decay
+/// shape is a declared, time-based stand-in: it is not derived from those registers at all.
+/// It replaces silence-never (a held tone that drones) with silence-eventually, which is the
+/// audible defect this exists to fix; it is not the hardware's envelope.
+const EG_HOLD_SAMPLES: u64 = 2_205;
+/// Per-sample multiplier during decay, chosen so a held note reaches -60 dB about two
+/// seconds after the hold ends.
+const EG_DECAY_PER_SAMPLE: f32 = 0.999_921_7;
+/// Below this the slot is inaudible; snap to exactly zero so nothing lingers below the
+/// resolution of an i16 sample.
+const EG_SILENCE_FLOOR: f32 = 1e-4;
+
 /// Playback state of one slot. Only what changes per sample lives here; level, pan and
 /// pitch are read from the registers every sample, because a sound driver keeps writing
 /// them while a note plays.
@@ -54,6 +74,11 @@ struct Slot {
     lea: u32,
     loop_mode: u8,
     pcm8: bool,
+    /// Envelope multiplier, 1.0 at key-on down to 0.0 at silence. See `sample()` for the
+    /// hold-then-decay shape and why it is time-based rather than register-rate-based.
+    eg_gain: f32,
+    /// Samples since key-on, used to time the hold-then-decay envelope.
+    eg_age: u64,
 }
 
 pub struct Scsp {
@@ -207,6 +232,8 @@ impl Scsp {
             lea: self.word(base + 0x06) as u32,
             loop_mode: ((ctrl >> 5) & 0x03) as u8,
             pcm8: ctrl & (1 << 4) != 0,
+            eg_gain: 1.0,
+            eg_age: 0,
         }
     }
 
@@ -312,7 +339,16 @@ impl Scsp {
                 }
             }
 
-            let output = ((raw as f32 * attenuation) as i32).clamp(-32768, 32767);
+            slot.eg_age += 1;
+            if slot.eg_age > EG_HOLD_SAMPLES && slot.eg_gain > 0.0 {
+                slot.eg_gain *= EG_DECAY_PER_SAMPLE;
+                if slot.eg_gain < EG_SILENCE_FLOOR {
+                    slot.eg_gain = 0.0;
+                }
+            }
+            let eg_gain = slot.eg_gain;
+
+            let output = ((raw as f32 * attenuation * eg_gain) as i32).clamp(-32768, 32767);
 
             let disdl = Self::attenuate(output, Self::sdl_shift((dry >> 5) & 0x07));
             let (pl, pr) = Self::panning(dry & 0x1F);
@@ -530,6 +566,38 @@ mod tests {
         assert_eq!(scsp.active_slots(), 1);
         scsp.write_word(0x00, 0x1020); // KYONEX with KYONB clear
         assert_eq!(scsp.active_slots(), 0);
+    }
+
+    #[test]
+    fn the_envelope_holds_then_decays_a_slot_that_is_never_key_offed() {
+        let mut ram = ram_with_ramp();
+        let mut scsp = Scsp::new();
+        program_slot0(&mut scsp, 1); // looping, TL = 0, never key-offed
+
+        let mut out = Vec::new();
+        scsp.generate(M68K_CYCLES_PER_SAMPLE * 4, &mut ram, &mut out);
+        let early_peak = out.iter().map(|(l, _)| l.unsigned_abs()).max().unwrap();
+        assert_eq!(
+            early_peak, 512,
+            "inside the hold window the level must be untouched"
+        );
+
+        out.clear();
+        scsp.generate(M68K_CYCLES_PER_SAMPLE * 300_000, &mut ram, &mut out);
+        let late_peak = out[out.len() - 4..]
+            .iter()
+            .map(|(l, _)| l.unsigned_abs())
+            .max()
+            .unwrap();
+        assert!(
+            late_peak < early_peak / 10,
+            "a note held this long must have decayed, got {late_peak} against {early_peak}"
+        );
+        assert_eq!(
+            scsp.active_slots(),
+            1,
+            "the envelope silences the output, it does not stop the slot"
+        );
     }
 
     #[test]
