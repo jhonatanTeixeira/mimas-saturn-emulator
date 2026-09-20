@@ -1,8 +1,13 @@
-//! Compilador de blocos SH-2 -> x86-64 (dynasm). Não existe interpretador: toda instrução
-//! é traduzida para código nativo. Só acesso a memória/MMIO passa por funções auxiliares
-//! (`rt_*`), que pertencem ao barramento e não à CPU.
+//! The x86-64 backend: compiles a block of SH-2 to native code with `dynasm`. No
+//! interpreter exists — every instruction is translated to native code. Only memory/MMIO
+//! access goes through runtime helpers (`rt_*`), which belong to the bus, not the CPU.
 //!
-//! Convenção dentro de um bloco (System V):
+//! This is the only backend today (see `backend/mod.rs` for what a second one — ARM64 for
+//! the weak-hardware targets this project cares about — would need to implement, and the
+//! one piece of this file's control flow that is not simply "x86-64 syntax" and needs
+//! reading first: the delay-slot ordering inside `emit_branch`).
+//!
+//! Convention inside a block (System V):
 //!   r14 = *mut Sh2State     r15 = *mut Sh2Runtime
 //!   rbx, r12, r13           guardam valores através de chamadas ao runtime
 //!   eax, ecx, edx, esi, r8-r11  temporários (destruídos por chamadas)
@@ -955,6 +960,12 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// The target is computed and stashed in a register **before** `emit_slot` runs, on
+    /// every arm below. That order is SH-2 semantics, not an x86-64 quirk: the delay slot
+    /// executes using the pre-branch register state, and can overwrite the very register
+    /// the target was read from (`jmp @rN` with the slot doing `mov rN, ...` is legal and
+    /// the branch must still go to the old value). A future backend has to preserve this
+    /// ordering — compute-target-then-emit-slot — not just port the instruction selection.
     fn emit_branch(&mut self, insn: Insn, pc: u32) {
         use Insn::*;
         let ep = self.epilogue;

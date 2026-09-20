@@ -1,14 +1,19 @@
 //! Cache de blocos compilados e despacho. Um bloco vai do PC de entrada até um desvio (com
 //! delay slot) ou até `MAX_BLOCK_INSNS`. Blocos em RAM são invalidados quando o barramento
 //! informa que a memória de código foi sobrescrita.
+//!
+//! Nada aqui conhece a arquitetura de destino: só fala com `backend::Compiler` e trata
+//! `CompiledBlock` como opaco. Ver `backend/mod.rs` para a seleção de backend por
+//! `cfg(target_arch)` — é o que faz um segundo backend (ARM64, por exemplo) custar zero
+//! linhas aqui.
 
-pub mod compiler;
+pub mod backend;
 #[cfg(test)]
 mod tests;
 
 use std::collections::HashMap;
 
-use compiler::{CompiledBlock, Compiler};
+use backend::{CompiledBlock, Compiler};
 
 use crate::cpu::sh2_bus::{Sh2Bus, Sh2Runtime, Tracer};
 use crate::cpu::state::Sh2State;
