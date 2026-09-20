@@ -24,8 +24,10 @@ MAX_WARNINGS="${MIMAS_MAX_WARNINGS:-28}"        # avisos do clippy
 MAX_MEAN_ERR="${MIMAS_MAX_MEAN_ERR:-1.66}"      # erro médio contra as capturas
 MIN_TRACE_PCT="${MIMAS_MIN_TRACE_PCT:-92.1}"    # % do trace de referência
 MIN_DIFF_COV="${MIMAS_MIN_DIFF_COV:-90}"        # cobertura das linhas mudadas
+MIN_AUDIO_CORR="${MIMAS_MIN_AUDIO_CORR:-0.707}" # correlação do envelope de áudio
 COVERAGE_RANGE="${MIMAS_COVERAGE_COMMITS:-HEAD}"
 FRAMES="${MIMAS_FRAMES:-620}"
+AUDIO_FRAMES="${MIMAS_AUDIO_FRAMES:-750}"
 
 loosened=0
 check_loosening() { # nome, valor_atual, padrão, direção(min|max)
@@ -49,10 +51,11 @@ check_loosening "MIMAS_MAX_WARNINGS"  "$MAX_WARNINGS"  28    max
 check_loosening "MIMAS_MAX_MEAN_ERR"  "$MAX_MEAN_ERR"  1.66  max
 check_loosening "MIMAS_MIN_TRACE_PCT" "$MIN_TRACE_PCT" 92.1  min
 check_loosening "MIMAS_MIN_DIFF_COV"  "$MIN_DIFF_COV"  90    min
+check_loosening "MIMAS_MIN_AUDIO_CORR" "$MIN_AUDIO_CORR" 0.707 min
 [ -n "${MIMAS_OVERRIDE_REASON:-}" ] && echo "⚠️  motivo declarado: $MIMAS_OVERRIDE_REASON"
 
 # --- 1. formatação ----------------------------------------------------------
-step "1/8 formatação"
+step "1/9 formatação"
 if cargo fmt --check >/dev/null 2>&1; then
     pass "formatação"
 else
@@ -60,7 +63,7 @@ else
 fi
 
 # --- 2. clippy: catraca de avisos ------------------------------------------
-step "2/8 clippy (teto de $MAX_WARNINGS avisos)"
+step "2/9 clippy (teto de $MAX_WARNINGS avisos)"
 CLIPPY_OUT=$(cargo clippy --all-targets 2>&1)
 if echo "$CLIPPY_OUT" | grep -qE '^error'; then
     fail "clippy: erro de compilação"
@@ -79,7 +82,7 @@ fi
 # neste projeto-irmão enquanto calava o aviso que apontava o problema.
 
 # --- 3. testes --------------------------------------------------------------
-step "3/8 testes"
+step "3/9 testes"
 if TEST_OUT=$(cargo test 2>&1); then
     # `cargo test` imprime uma linha de resultado por alvo (lib, bins, doc);
     # somar é a única contagem que não mente quando um alvo tem zero testes.
@@ -90,7 +93,7 @@ else
 fi
 
 # --- 4. testes que não afirmam nada ----------------------------------------
-step "4/8 testes que não afirmam nada"
+step "4/9 testes que não afirmam nada"
 if python3 tools/assertionless_tests.py; then
     pass "todo teste afirma algo"
 else
@@ -98,7 +101,7 @@ else
 fi
 
 # --- 5. regras do projeto ---------------------------------------------------
-step "5/8 regras do projeto"
+step "5/9 regras do projeto"
 python3 tools/project_rules.py --self-test >/dev/null || { fail "project_rules.py: self-test quebrado (o verificador está errado, não o código)"; }
 if python3 tools/project_rules.py; then
     pass "regras do projeto"
@@ -107,7 +110,7 @@ else
 fi
 
 # --- 6. cobertura das linhas mudadas ---------------------------------------
-step "6/8 cobertura do diff ($COVERAGE_RANGE, piso ${MIN_DIFF_COV}%)"
+step "6/9 cobertura do diff ($COVERAGE_RANGE, piso ${MIN_DIFF_COV}%)"
 if ! command -v cargo-tarpaulin >/dev/null; then
     skip "cobertura: cargo-tarpaulin não instalado (cargo install cargo-tarpaulin)"
 elif [ "${MIMAS_SKIP_COVERAGE:-0}" = "1" ]; then
@@ -129,7 +132,7 @@ else
 fi
 
 # --- 7. vídeo contra as capturas reais -------------------------------------
-step "7/8 vídeo: erro médio contra as capturas (teto $MAX_MEAN_ERR/255)"
+step "7/9 vídeo: erro médio contra as capturas (teto $MAX_MEAN_ERR/255)"
 if [ ! -f saturn_bios.bin ]; then
     fail "vídeo: saturn_bios.bin não está na raiz — sem ele não há medição"
 elif [ ! -d stubs/captures ]; then
@@ -155,7 +158,7 @@ else
 fi
 
 # --- 8. execução contra o trace real ---------------------------------------
-step "8/8 trace: % dos PCs da referência (piso ${MIN_TRACE_PCT}%)"
+step "8/9 trace: % dos PCs da referência (piso ${MIN_TRACE_PCT}%)"
 if [ ! -f bios_trace_no_game.txt ]; then
     fail "trace: bios_trace_no_game.txt não está na raiz"
 else
@@ -171,6 +174,35 @@ else
     else
         pass "trace: $PCT% dos PCs da referência, 0 opcodes divergentes"
         awk -v p="$PCT" -v m="$MIN_TRACE_PCT" 'BEGIN{if(p>m) print "   suba MIMAS_MIN_TRACE_PCT para " p}'
+    fi
+fi
+
+# --- 9. áudio: forma do envelope contra a captura real -----------------------
+# Não é diagnóstico (docs/sound.md já avisa: um sample de diferença no ataque
+# muda o arquivo inteiro sem dizer o que quebrou) — é piso, como o erro de
+# vídeo. Compara loudness ao longo do tempo (RMS por janela de 50 ms),
+# buscando o deslocamento de tempo que melhor alinha as duas curvas, porque a
+# gravação de referência não começa no mesmo instante que a amostra 0 nossa.
+step "9/9 áudio: correlação do envelope contra a captura real (piso $MIN_AUDIO_CORR)"
+if [ ! -f saturn_bios.bin ]; then
+    fail "áudio: saturn_bios.bin não está na raiz — sem ele não há medição"
+elif [ ! -f stubs/captures/audio/boot.wav ]; then
+    fail "áudio: stubs/captures/audio/boot.wav não existe — sem referência não há medição"
+else
+    if ./target/release/mimasv2 --frames "$AUDIO_FRAMES" --dump-audio /tmp/mimasv2_audio.wav >/tmp/mimasv2_audio_run.log 2>&1; then
+        CMP=$(./target/release/compare_audio stubs/captures/audio/boot.wav /tmp/mimasv2_audio.wav 2>&1)
+        CORR=$(echo "$CMP" | grep -oE 'best: [0-9.-]+' | grep -oE '[0-9.-]+$')
+        if [ -z "$CORR" ]; then
+            fail "áudio: não consegui ler a correlação da saída do compare_audio"
+            echo "   saída: $CMP"
+        elif awk -v c="$CORR" -v m="$MIN_AUDIO_CORR" 'BEGIN{exit !(c>=m)}'; then
+            pass "áudio: correlação $CORR (piso $MIN_AUDIO_CORR)"
+            awk -v c="$CORR" -v m="$MIN_AUDIO_CORR" 'BEGIN{if(c>m) print "   suba MIMAS_MIN_AUDIO_CORR para " c}'
+        else
+            fail "áudio: correlação $CORR, piso é $MIN_AUDIO_CORR — o som piorou"
+        fi
+    else
+        fail "áudio: a execução da BIOS falhou (veja /tmp/mimasv2_audio_run.log)"
     fi
 fi
 

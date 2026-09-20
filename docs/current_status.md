@@ -59,7 +59,150 @@ o som. Quando as duas contas batem, dá para confiar nas outras linhas.
 
 ---
 
-# 2. Desconfiança de otimização (palpite, não medido isoladamente)
+# 2. Otimização de orquestração
+
+**Atualização (2026-09-20): os dois primeiros caminhos abaixo foram feitos e
+medidos.** `advance()` em `src/machine.rs` agora preserva a capacidade do vetor
+de eventos (drena em vez de consumir) e faz um único empréstimo do SMPC por
+passo em vez de três. Medido com `mimasv2 --frames 1800` (CPU + som, sem GL),
+três rodadas de cada lado, binário `--release`:
+
+| | antes | depois |
+|---|---|---|
+| tempo de parede | 17,62 s (média de 3) | 16,55 s (média de 3) |
+| `Saturn::step` no `perf` (auto-amostragem, 999 Hz) | 25,16% | 24,02% |
+
+**6,1% mais rápido**, e o `perf` concorda: caiu, não só o tempo de parede. Não
+é o "só o perfil mudou de nome" que a seção original avisava para desconfiar —
+os dois lados moveram juntos. `bash tools/quality_gate.sh` continua 9/9 verde
+depois da mudança (vídeo e trace inalterados: é otimização, não comportamento
+diferente). Dois testes novos em `src/machine.rs` (`advancing_past_a_video_event_does_not_reset_the_event_queues_capacity`,
+`a_full_frame_of_stepping_does_not_panic`) cobrem o caminho.
+
+**Atualização (mesma sessão): o item 3 (serviço por prazo) também foi feito, só
+que só para o CD block — não para DMA/interrupção, por motivo explicado abaixo.
+O item 4 (blocos maiores no JIT) foi tentado e revertido: mediu, não ajudou.**
+
+- **Item 3, versão restrita — `cd.tick()` em lote.** O único efeito visível do
+  relógio do CD block é `HIRQ_SCDQ`, que sobe uma vez a cada 381.800 ciclos
+  (~1/75 s). Chamá-lo a cada bloco do JIT — muitas vezes sob cem ciclos — é um
+  empréstimo de `RefCell` e uma chamada para nenhuma mudança observável na
+  maioria das vezes. Agora os ciclos se acumulam em `cd_cycle_carry` e só são
+  entregues ao CD block quando passam de `CD_TICK_BATCH_CYCLES` (1024, menos de
+  uma linha de varredura — três ordens de grandeza abaixo do período que
+  alimenta). Teste novo (`the_cd_clock_still_advances_despite_batching`) prova
+  que o lote não perde ciclos: avança em passos de 200, bem menores que o lote,
+  até passar do período do SCDQ, e confirma que o bit ainda sobe.
+
+  **DMA e entrega de interrupção ficaram como estavam, de propósito.** Ao
+  contrário do CD block, os dois são sensíveis a atraso: interrupção só é
+  aceita entre blocos do JIT (invariante documentada), então adiar a entrega
+  encolheria ainda mais uma janela que já é a mais larga que existe; e DMA na nossa
+  emulação é instantâneo (sem estados de espera de barramento modelados), então
+  um laço de espera do driver conta com ver o efeito logo depois do evento que
+  o disparou. Nenhum dos dois aparecia no `perf` como custo relevante — a
+  chamada em si é barata quando não há nada pronto — então adiá-los trocaria
+  risco de regressão de trace por um ganho que a medição não mostrou existir.
+
+- **Item 4 — blocos maiores no JIT, tentado e revertido.** Dobrei
+  `MAX_BLOCK_INSNS` de 64 para 128 e medi: trace idêntico (92,1%, mesmo drift),
+  vídeo idêntico (1,66/255), e tempo de parede **sem diferença mensurável**
+  (16,64/16,62/16,55 s contra 16,55/16,59/16,50 s antes — dentro do ruído).
+  Revertido para 64. Explicação provável: o código da BIOS desvia com
+  frequência, então a maioria dos blocos já termina bem antes do teto atual —
+  dobrar um teto que quase nunca é atingido não muda o tamanho médio do bloco.
+  Fica registrado porque é exatamente o tipo de "parece que devia ajudar" que
+  só a medição desmente — e a regra do projeto é reportar isso, não escondê-lo.
+
+Medido de novo depois de tudo isso (CPU + som, sem GL, `--frames 1800`, média
+de 5 rodadas): **16,09 s**, contra 17,62 s antes de qualquer mudança desta
+seção — **8,7% mais rápido no total**, com vídeo e trace bit a bit iguais ao
+que eram antes de mexer em qualquer coisa aqui.
+
+O texto abaixo é a análise original, mantida como registro do raciocínio; os
+itens 1, 2 e 3 (na sua versão restrita) da lista não são mais pendência, e o
+item 4 foi tentado e descartado por medição, não por suposição.
+
+## JIT no 68000 (som): ligado, medido, mantido (2026-09-20)
+
+O 68000 é a única outra CPU de verdade que executa código de propósito geral
+neste emulador — o SH-1 do CD block não roda nada (é stub comportamental) e o
+`scu_dsp` executa um programa de 32 palavras uma vez no boot, não um fluxo
+contínuo. O `SoundCpu::advance` soma com o resto do `m68k::core::*` cerca de
+**13% do tempo de parede** no `perf` — candidato real, e o único.
+
+O crate `m68k` tem um recurso `jit` (Cranelift), mas ele **só se liga através
+de `run_batch`** — verifiquei no fonte (`core/execute.rs`): o `trace_jit` só é
+chamado dentro de `run_batch`/`run_batch_inner`; `run_for_cycles`, que era o
+que usávamos, nunca passa por ali. E `run_batch` **abre mão da contagem de
+ciclos** (a própria doc do crate diz: "`cycles_remaining` is clobbered";
+`BatchResult` só devolve instruções) — e a taxa de amostragem do SCSP depende
+exatamente do número de ciclos que `SoundCpu::advance` devolve
+(`Scsp::generate`, `M68K_CYCLES_PER_SAMPLE`). Não dava para trocar sem
+reconciliar isso.
+
+**Primeiro um microbenchmark**, fora da emulação, rodando o driver real da
+BIOS (`--dump-sound-ram`) pelos dois caminhos, orçamento grande (favorece o
+JIT o máximo possível):
+
+```
+run_for_cycles: 5.736.411 instruções em 226 ms (25,4 Minsn/s)
+run_batch (jit): 5.555.555 instruções em 174 ms (31,9 Minsn/s)
+```
+
+26% mais throughput de instrução — sem `FastMem`/`TrackedMem` (a RAM de som
+vive atrás de `Rc<RefCell<SoundRam>>` compartilhado com a SH-2; expor um
+ponteiro bruto para dentro disso durante o `run_batch` seria o tipo de
+`unsafe` que arrisca UB por aliasagem, não tentei). Por essa conta isolada,
+26% de um pedaço que já é 13% do total dava uma estimativa pessimista de
+3–4% no tempo de parede total — parecia pouco para o risco de reescrever a
+régua de tempo do som.
+
+**Liguei mesmo assim e medi o sistema inteiro, porque o microbenchmark usa
+orçamentos grandes e a integração real usa orçamentos de ~64 ciclos (~7
+instruções) por chamada — o cenário real é bem pior para o JIT do que o
+benchmark isolado, e só medir o sistema inteiro diz a verdade.** Troquei
+`run_for_cycles`/`run_for_cycles_with_hook` por `run_batch` em
+`SoundCpu::advance` (`src/devices/sound_cpu.rs`), convertendo o orçamento em
+ciclos para um orçamento em instruções via uma média medida (`AVG_CYCLES_PER_INSTR`,
+2.000.000 ciclos / 222.897 instruções — a mesma medição de `docs/sound.md`,
+não um palpite novo) e reconstruindo o número de ciclos "gastos" a partir de
+quantas instruções o lote realmente rodou. O perfil (`--sound-profile`, que
+precisa de um PC por instrução) não tem variante com esse gancho em
+`run_batch`, então fica no caminho antigo, exato — é diagnóstico, não o
+caminho quente.
+
+**O risco real não era velocidade, era a taxa de amostragem do áudio
+depender de uma estimativa em vez de um número exato.** É exatamente o tipo
+de regressão que passaria batido num teste funcional e apareceria só como
+"o som está sutilmente errado" — e é exatamente o que o passo 9 do gate
+(`compare_audio`, piso 0,707, sem folga acima do valor medido) existe para
+pegar. Depois da troca: **gate 9/9 verde, correlação de áudio 0,707 —
+idêntica**, vídeo e trace inalterados, 79 testes passando. Se a aproximação
+tivesse deslocado a cadência do som o suficiente para importar, esse piso
+sem folga teria caído.
+
+**Tempo de parede, medido A/B intercalado** (o mesmo binário-JIT e o
+binário-intérprete rodados alternados, 6 pares, para cancelar ruído do
+sistema — a comparação sequencial simples tinha dado números inconsistentes
+por causa de builds e testes rodando entre uma medição e outra):
+
+| rodada | JIT | intérprete |
+|---|---|---|
+| 1–6 | 16,84 / 16,86 / 16,74 / 16,73 / 16,82 / 16,74 s | 17,11 / 17,01 / 16,99 / 17,05 / 17,10 / 17,01 s |
+| média | **16,79 s** | 17,05 s |
+
+**JIT ganhou nas 6 de 6 rodadas** — pequeno (~1,5%), mas consistente, não
+ruído. Menor que os itens 1–3 de orquestração, maior que zero, e sem folga
+perdida no piso de áudio. Mantido. `m68k = { version = "0.14.0", features =
+["jit"] }` no `Cargo.toml`.
+
+Caminho que aumentaria o ganho, se algum dia vier a valer o risco:
+`TrackedMem` para a RAM de som (leitura direta, escrita ainda passando pelo
+barramento). Não tentei — a aliasagem compartilhada com a SH-2 torna o
+`unsafe` arriscado demais para medir "de brincadeira", e o ganho de 26% já
+medido no microbenchmark isolado é o teto otimista, não o que a integração
+real entregaria.
 
 **A orquestração custa mais que a emulação.** `Saturn::step` tem quatro linhas;
 os 25,4% são o `advance` inlinado nela, e ele roda **uma vez por bloco do JIT**.
@@ -107,13 +250,19 @@ somos limitados por núcleo: usamos um, e cinco estão ociosos.
 
 ---
 
-# 3. Desconfiança do erro de som (palpite, não medido)
+# 3. Erro de som: o que era desconfiança agora está resolvido em parte (2026-09-20)
 
-Sintoma relatado: **tonalidade e velocidade estão certas, mas o som fica em loop,
-sem cauda e sem o "shuuuan"**.
+Sintoma relatado originalmente: **tonalidade e velocidade estão certas, mas o som
+fica em loop, sem cauda e sem o "shuuuan"**.
 
-Isso é consistente com o que já está medido e documentado em `docs/sound.md`, e
-a minha principal desconfiança é **uma coisa só**:
+**Atualização:** um envelope por tempo (não o das quatro fases do hardware —
+ver `docs/sound.md`, seção "2026-09-20: um envelope, mas não o do hardware") já
+está implementado em `src/devices/scsp.rs`. Medido com `--dump-audio` em 620
+quadros: o pico cai de 2214 (0,8 s) para 36 (2,0 s) e para um piso quase
+inaudível por volta de 2,6 s, em vez de tocar cheio até 8,5 s. O loop e a falta
+de cauda, como sintomas, estão corrigidos. O texto abaixo é a análise que levou
+até ali; fica como registro do raciocínio, não como trabalho pendente na parte
+do loop/cauda.
 
 ## Desconfiança principal: não existe gerador de envelope
 
@@ -139,32 +288,44 @@ consequências, e elas explicam os três sintomas na ordem em que foram relatado
 
 ## Desconfiança secundária: pode faltar uma segunda nota
 
-Está medido que **há uma única chave de slot em todo o boot** (`1 key-ons`). Se a
-máquina real liga mais de um slot, o "shuuuan" pode ser um **som próprio**, e aí
-o envelope resolve o loop e a cauda mas não ele.
+Está medido, na nossa própria emulação (não na referência), que **há uma única
+chave de slot em todo o boot** (`1 key-ons`). Como o nosso driver de 68000 é o
+programa real da BIOS rodando sobre o crate `m68k` — não uma reimplementação —
+esse número já é uma medição do que o programa real manda fazer, não uma
+suposição. Se a máquina real ligasse um segundo slot, teria de ser por um
+caminho que este driver não percorre, o que é pouco provável mas não
+impossível de descartar sem instrumentar a referência.
 
-Não sei qual das duas é, e **não vou adivinhar**: as duas previsões são
-distinguíveis por medição, e a medição é barata.
+**Atualização mais forte (2026-09-20, depois de obter PCM real de referência):**
+`stubs/captures/audio/boot.wav` — 12 s gravados por loopback do YabaSanshiro
+instrumentado, não uma suposição — mostra **dois picos**, não um: o primeiro
+(5,75–8,0 s, pico ~3455) é a nota; depois de uma baixa, um segundo pico **mais
+alto que o primeiro** (8,5–9,75 s, pico 7781), e só então a queda limpa até o
+silêncio por volta de 11,75 s. Uma segunda nota de slot apareceria como um
+evento independente, não como esse formato de "nota, baixa, pico maior,
+decaimento junto" — a forma é exatamente o que "reverb atrasado e mascarado"
+prevê. Isso não é mais leitura do nosso próprio despejo (que é o que a versão
+anterior deste parágrafo comparava) — é a gravação real. Ainda não é prova
+definitiva (seria preciso a captura por amostra do envelope para separar as
+duas hipóteses sem ambiguidade), mas é evidência bem mais forte do que a
+anterior, e aponta na mesma direção.
 
-## Como decidir entre as duas, sem chutar
+## O que ficou faltando, e por quê
 
-A ordem que eu seguiria, e o que cada passo responde:
-
-1. **Contar as chaves de slot na referência.** A instrumentação de
-   `tools/trace-capture/` já grava eventos de chave. Se a referência liga um
-   slot só, a desconfiança secundária morre e sobra o envelope. Se liga dois, o
-   "shuuuan" tem dono e é outro trabalho. **É o passo mais barato e o que mais
-   separa os caminhos — faça este primeiro.**
-2. **Capturar a atenuação do slot, amostra a amostra**, pelo mesmo padrão que já
-   usamos para o DSP: dado, não código. Isso vira o oráculo do envelope, do jeito
-   que `dsp_check` virou o oráculo do DSP.
-3. **Implementar as quatro fases** e validar contra essa captura, em vez de
-   validar de ouvido.
-
-Vale lembrar a lição que esta sessão já cobrou caro: **a captura tem de ser
-coerente**. Programa gravado num instante e estado em outro custou horas
-caçando um bug de matemática que não existia. Se a captura do envelope não sair
-do mesmo instante que o resto, o mesmo erro se repete de outra forma.
+O envelope implementado é **por tempo, não por registrador** — ver
+`docs/sound.md`. Agora existe um piso mensurável para ele: `compare_audio`
+contra `stubs/captures/audio/boot.wav` dá correlação 0,707 (passo 9 do gate), e
+a gravação mostra que a forma real tem duas corcovas, não um decaimento
+monótono — o que o relógio fixo atual não reproduz. Isso já é o suficiente para
+guiar ajuste do formato (quanto tempo segurar, quanto tempo decair) e medir a
+cada tentativa. O que continua faltando é mais fino: decodificar AR/D1R/D2R/RR/KRS
+dos registradores 0x08/0x0A do slot exigiria um oráculo por amostra (curva de
+envelope real, não só o PCM final) que não existe. Sem ele, qualquer layout de
+bits seria palpite travestido de fato — o mesmo erro que já custou caro nesta
+sessão (o `envKey` do Qwen, confiado por documentação em vez de medido). Fica
+como próximo item
+em `docs/sound.md`, com o mesmo padrão de captura que já validou o DSP de
+efeitos: dado, não código.
 
 ## O que já está certo, e não deve ser mexido ao perseguir isto
 
@@ -180,3 +341,51 @@ do mesmo instante que o resto, o mesmo erro se repete de outra forma.
 
 Ou seja: o que falta é o **contorno do volume no tempo**, e nada mais do caminho
 de sinal. É trabalho conhecido, não descoberta.
+
+---
+
+# 4. JIT SH-2: backend separado do despacho, para um segundo backend não custar do zero (2026-09-20)
+
+Pergunta que veio de fora: o JIT roda em ARM64? A resposta curta é não — o
+`m68k` (som) sim, via Cranelift, mas o nosso próprio compilador SH-2
+(`dynasmrt::x64::Assembler`) é x86-64 só, e trocar de arquitetura significa
+escrever um segundo backend, não virar uma flag. Isso é esperado de qualquer
+emulador com JIT (cada arquitetura de host precisa do seu), mas o pedido foi
+específico: organizar para reaproveitar o máximo de código quando esse segundo
+backend existir.
+
+**O que já era verdade, sem eu ter desenhado assim:** `src/cpu/jit/mod.rs` (o
+cache de blocos e o despacho) nunca tocava em nada específico de x86-64 — só
+chamava `Compiler::compile(...)` e tratava `CompiledBlock` como opaco
+(`buf: ExecutableBuffer`, `entry: AssemblyOffset`, ambos tipos já
+arquitetura-agnósticos no próprio `dynasmrt`, não só `dynasmrt::x64`). Isso
+significa que o padrão de estratégia já existia na prática; só não estava
+declarado como tal.
+
+**O que mudou:** `src/cpu/jit/compiler.rs` virou `src/cpu/jit/backend/x64.rs`,
+e `src/cpu/jit/backend/mod.rs` (novo) seleciona o backend por
+`cfg(target_arch)` e reexporta `CompiledBlock`/`Compiler`/`MAX_BLOCK_INSNS`. É
+seleção em tempo de compilação, não um objeto de trait: só um backend é
+compilado por vez, então um `Box<dyn _>` custaria despacho dinâmico no caminho
+mais quente do emulador por uma escolha que já está fixa no build. Um alvo que
+não seja x86-64 falha a compilação com `compile_error!` explicando a interface
+que um novo backend precisa implementar — falhar cedo, não silenciosamente
+rodar sem JIT (a regra 2 do projeto é sem interpretador).
+
+**O que não foi extraído, e por quê — isso é o achado real, não o refactor em
+si.** O laço que decide onde um bloco termina (decodifica, conta custo,
+verifica `MAX_BLOCK_INSNS`) está interligado com a emissão de código, não
+separado dela. Tentei separar e parei ao ler `emit_branch`: o alvo do desvio é
+calculado e guardado num registrador **antes** de emitir o delay slot, porque
+o delay slot roda com o estado de registrador de antes do desvio e pode
+sobrescrever o próprio registrador de onde o alvo foi lido — isso é semântica
+do SH-2, não sintaxe de x86-64. Um "planeje o bloco, depois emita" compartilhado
+precisaria carregar essa ordem como dado, não só a lista de instruções, e
+errar isso é o tipo de bug que o trace-check não pegaria de cara (muda tempo
+de execução sutilmente, não o PC visitado). Documentado como comentário em
+`backend/mod.rs` e em `emit_branch`, para quem escrever o segundo backend não
+precisar redescobrir isso do zero.
+
+Gate depois da mudança: 9/9 verde, 0 linhas novas de cobertura pendente (é
+reorganização de arquivo — só comentários mudaram de conteúdo, `diff_coverage.py`
+não encontrou nada executável para medir).

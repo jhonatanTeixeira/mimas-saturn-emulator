@@ -285,19 +285,41 @@ retorno entrando a nível cheio. Agora é inteira e na ordem certa:
 `sdl_shift(0)` é silêncio, `sdl_shift(7)` é unidade — atenuação em deslocamentos,
 não razão. O pico da saída caiu de **32767 (saturando) para 7528**.
 
-### O que ainda falta: o gerador de envelope
+### 2026-09-20: um envelope, mas não o do hardware
 
-Com tudo acima, o toque de boot sai, mas **se arrasta por 8,5 s** em vez de
-decair. É a lacuna declarada no topo deste arquivo: temos TL estático onde o
-hardware tem quatro fases (ataque, decaimento 1, decaimento 2, liberação) com
-taxas derivadas de KRS, OCT e FNS. O driver não toca nos registradores do slot
-entre 0,634 s e 8,779 s — quem devia baixar o volume é o envelope, e ele não
-existe aqui. É o próximo item, e é trabalho conhecido, não descoberta.
+Com tudo acima, o toque de boot saía mas **se arrastava por 8,5 s** em vez de
+decair. O driver não toca nos registradores do slot entre 0,634 s e 8,779 s —
+quem devia baixar o volume é o envelope, e ele não existia aqui.
 
-O caminho honesto para ele segue a regra do projeto: **capturar o dado, não o
-código**. A instrumentação já grava estado do DSP; o mesmo padrão serve para
-despejar a atenuação do slot amostra a amostra e validar o nosso gerador contra
-ela.
+O caminho honesto era capturar a atenuação real do slot, amostra a amostra, e
+validar um gerador de quatro fases (ataque, decaimento 1, decaimento 2,
+liberação) contra ela, decodificando AR/D1R/D2R/RR/KRS dos dois registradores
+de envelope do slot (offsets 0x08/0x0A). Isso ficou de fora **por falta de
+dado, não por falta de tempo**: não existe captura de uma curva de envelope
+real para checar um palpite de layout de bits contra ela, e a regra do projeto
+é não travestir um palpite de fato — foi exatamente esse erro (confiar em
+documentação genérica de chip em vez de medir) que já custou caro nesta sessão
+com o `envKey` do Qwen.
+
+O que entrou em `src/devices/scsp.rs` é deliberadamente mais simples: **um
+envelope por tempo, não por registrador**. Um slot segura o ganho cheio por
+50 ms depois do key-on (`EG_HOLD_SAMPLES`) e então decai numa taxa fixa
+(`EG_DECAY_PER_SAMPLE`) até o silêncio, em vez de ler AR/D1R/D2R/RR do slot.
+Resolve o sintoma relatado — medido com `--dump-audio` em 620 quadros, o pico
+cai de 2214 em 0,8 s para 36 em 2,0 s e para um piso quase inaudível por volta
+de 2,6 s, em vez de tocar cheio até 8,5 s — mas **não é o envelope real**: o
+tempo de decaimento não vem de KRS/OCT/FNS, e uma nota diferente da do boot
+decairia no mesmo tempo fixo, errado. Fica marcado como simplificação
+declarada no comentário do módulo, ao lado da que ele substitui.
+
+Achado colateral do mesmo despejo: depois que a nota principal decai, sobra um
+piso baixo e constante (pico ~7 de 32767) até por volta de 8,6 s, quando some.
+Isso é consistente com a desconfiança secundária já registrada em
+`docs/current_status.md`: o retorno do reverb, antes mascarado pela nota em
+volume cheio, agora é audível como um evento separado. Não é medição
+conclusiva — é o mesmo tipo de leitura de forma de onda que este arquivo já
+avisa não servir de diagnóstico sozinha — mas é a favor da hipótese do
+"shuuuan" ser o próprio reverb, não uma segunda nota.
 
 ## Como saber que o som saiu certo
 
@@ -306,15 +328,43 @@ Em dois níveis, e nessa ordem:
 1. **Evento — as escritas nos registradores do SCSP.** Se o driver programa os
    mesmos slots com os mesmos valores, na mesma ordem, o som está certo por
    construção, e uma divergência aponta o registrador exato. É o análogo do
-   `--trace-check`.
-2. **Onda — o PCM.** Alinhamento por correlação e erro médio por banda, como o
-   erro de pixel faz no vídeo. Serve de piso no gate, não de diagnóstico:
-   dois emuladores nunca geram amostras idênticas, e um sample de diferença no
-   ataque muda o arquivo inteiro sem dizer o que quebrou.
+   `--trace-check`. Ainda não existe (`tools/trace-capture/` não grava trace de
+   escrita no SCSP nem de PCs do 68000).
+2. **Onda — o PCM.** Alinhamento por correlação e erro médio, como o erro de
+   pixel faz no vídeo. Serve de piso no gate, não de diagnóstico: dois
+   emuladores nunca geram amostras idênticas, e um sample de diferença no
+   ataque muda o arquivo inteiro sem dizer o que quebrou. **Existe desde
+   2026-09-20** — ver a seção seguinte.
 
-Os dois lados vêm do emulador instrumentado (`tools/trace-capture/`), que ainda
-precisa ganhar: despejo do PCM, trace das escritas no SCSP e trace de PCs do
-68000.
+### 2026-09-20: comparação de PCM, e o que ela mostrou
+
+`stubs/captures/audio/boot.wav` é 12 s de PCM real, gravado por loopback da
+saída de áudio do YabaSanshiro instrumentado rodando a BIOS dentro do
+RetroArch — a mesma referência usada para o trace e para o DSP, só que capturada
+por fora (loopback do sistema), não pelo patch de `tools/trace-capture/`. É por
+isso que a captura não é repetível por um script ainda: foi uma gravação manual,
+não um passo documentado como os outros. Isso é dívida declarada, não escondida.
+
+`src/bin/compare_audio.rs` compara qualquer PCM nosso contra ela: baixa os dois
+para mono, calcula RMS em janelas de 50 ms, e busca o deslocamento de tempo que
+melhor alinha as duas curvas de loudness (a gravação não começa no mesmo
+instante que a nossa amostra 0). Reporta a correlação nesse alinhamento, não em
+zero — é o mesmo motivo do `compare` de vídeo procurar o quadro mais parecido em
+vez de comparar por índice.
+
+Rodado contra o estado atual (envelope por tempo, 750 quadros ≈ 12 s):
+**correlação 0,707**. Virou o passo 9 do gate.
+
+A gravação em si já é dado novo, e vale registrar antes de esquecer: ela mostra
+**dois picos**, não um — o primeiro (5,75–8,0 s, pico ~3455) é a nota; depois de
+uma baixa, um segundo pico **mais alto que o primeiro** (8,5–9,75 s, pico 7781),
+e só então a queda limpa até o silêncio por volta de 11,75 s. Isso é evidência a
+favor da hipótese já registrada em `docs/current_status.md` — o "shuuuan" sendo
+o retorno do reverb, atrasado e inicialmente mascarado pela nota — só que agora
+medida, não suposta: o reverb aparece como um evento **mais alto** que a nota
+que o gerou. O nosso envelope atual (espera + decaimento monótono de ~2 s) não
+reproduz essa forma de duas corcovas; é o próximo alvo óbvio, e agora há como
+medir a cada tentativa em vez de julgar de ouvido.
 
 ## O desenho da thread de som
 
@@ -343,12 +393,21 @@ invalidação acontece em série, numa thread só.
 Feito em 2026-09-20: a captura do DSP (programa, estado, RAM, entrada/saída e
 trace por passo) está em `tools/trace-capture/`; os temporizadores e o nível de
 interrupção do SCSP estão certos; a caixa de correio real substituiu o stub; a
-cadeia de mixagem é a do hardware. O que resta:
+cadeia de mixagem é a do hardware; o envelope por tempo substitui o TL estático
+(ver seção acima); a comparação de PCM (`compare_audio`, `stubs/captures/audio/boot.wav`,
+correlação 0,707) virou o passo 9 do gate. O que resta:
 
-1. **Gerador de envelope** — as quatro fases com as taxas de KRS/OCT/FNS, no
-   lugar do TL estático. É o que falta para o toque decair em vez de se arrastar
-   por 8,5 s.
-2. Estender a captura ao PCM e aos PCs do 68000, para medir onda e evento.
+1. **Gerador de envelope de verdade** — decodificar AR/D1R/D2R/RR/KRS dos
+   registradores 0x08/0x0A do slot e trocar o relógio fixo por eles, mirando a
+   forma de duas corcovas que a captura de PCM já mostra (ver seção acima), não
+   só um decaimento monótono. Precisa de uma captura de curva de envelope real
+   por amostra como oráculo antes de tentar decodificar bits, para não repetir
+   o erro de travestir palpite de fato — a comparação de PCM já ajuda a validar
+   a forma geral, mas não aponta o registrador errado do jeito que uma captura
+   por amostra apontaria.
+2. Tornar a captura de PCM repetível por script, em vez de gravação manual por
+   loopback; estender a captura instrumentada aos PCs do 68000 e às escritas do
+   SCSP, para medir evento além de onda.
 3. Mixar em blocos, pulando slot silencioso, se o perfil pedir.
 4. Só então medir se alguma coisa precisa de JIT.
 

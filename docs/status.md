@@ -98,14 +98,16 @@ A cadeia de mixagem passou a ser a do hardware, em inteiros: seco por DISDL, env
 ao DSP por **IMXL/ISEL** (era EFSDL, registrador errado), retorno por EFSDL/EFPAN
 do slot, mestre por MVOL. Pico da saída caiu de **32767 (saturando) para 7528**.
 
-**O que ainda soa errado:** o toque se arrasta 8,5 s em vez de decair, porque não
-há gerador de envelope — só TL estático. É o próximo item de `docs/sound.md`.
+**2026-09-20: envelope por tempo.** O toque não se arrasta mais — um slot segura
+o volume por 50 ms e decai numa taxa fixa (medido com `--dump-audio`: pico
+2214 em 0,8 s, 36 em 2,0 s, piso quase inaudível por volta de 2,6 s). Não é o
+envelope do hardware (não lê AR/D1R/D2R/RR/KRS): é um relógio fixo, não um
+registrador. Ver `docs/sound.md`.
 
-**Gate em 2026-09-20: 7 verdes, 1 vermelho.** O vermelho é cobertura do diff,
-13,4% contra piso de 90%: `main.rs` (92 linhas de CLI e impressão), `machine.rs`
-(21 de fiação) e `renderer.rs` (15 do caminho GL), que não têm teste de unidade.
-`scsp.rs`, `scsp_dsp.rs`, `ram.rs` e `smpc.rs` estão em 100%. Vídeo (1,66/255) e
-trace (92,1%) não regrediram.
+**Gate em 2026-09-20 (depois do envelope por tempo): 8 verdes, 0 vermelhos.**
+76 testes, 28 avisos de clippy (teto), cobertura do diff 100% (7/7 linhas novas
+em `scsp.rs`, cobertas pelo teste do envelope). Vídeo (1,66/255) e trace
+(92,1%) não regrediram.
 
 ## Lacunas conhecidas
 
@@ -124,9 +126,10 @@ trace (92,1%) não regrediram.
   triângulos, exato para paralelogramos e aproximado para distorcidos em geral.
 - **Modos 1 e 2 de RAM de cor do VDP2 e nomes de padrão de 1 palavra** estão
   escritos, mas não testados.
-- **Gerador de envelope do SCSP ausente.** Temos TL estático onde o hardware tem
-  ataque, dois decaimentos e liberação, com taxas de KRS/OCT/FNS. É por isso que
-  o toque de boot se arrasta em vez de decair.
+- **Gerador de envelope do SCSP não é o do hardware.** O toque decai (ver
+  acima), mas por um relógio fixo, não pelas taxas de AR/D1R/D2R/RR/KRS. Falta
+  um oráculo — captura de uma curva de envelope real — antes de decodificar
+  esses registradores; sem ele seria palpite travestido de fato.
 - **28 avisos do clippy** (código morto de andaime). É o teto atual da catraca
   do gate; quando cair, baixe `MIMAS_MAX_WARNINGS`.
 - **Cobertura da árvore inteira em 2,4%** (385 de 16.207 linhas contadas pelo

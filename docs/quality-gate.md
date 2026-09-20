@@ -4,7 +4,7 @@
 bash tools/quality_gate.sh
 ```
 
-Oito passos determinísticos: sem modelo, sem rede, sem aleatoriedade. Roda todos
+Nove passos determinísticos: sem modelo, sem rede, sem aleatoriedade. Roda todos
 e reporta no fim — um vermelho não interrompe os outros, porque saber que três
 coisas quebraram vale mais do que saber qual quebrou primeiro.
 
@@ -27,8 +27,9 @@ nomes afirmavam verificar a troca de framebuffer. `cargo build`, `cargo test`
 | 6 | cobertura do diff | % das linhas que **você** mudou cobertas por teste | escrever o teste. Não `--exclude-files`, não baixar o piso |
 | 7 | vídeo | erro médio de pixel contra as capturas reais | se a imagem piorou, é regressão; se melhorou, baixe o teto |
 | 8 | trace | % dos PCs do trace real que executamos, e opcodes divergentes | se caiu, é regressão; se subiu, suba o piso |
+| 9 | áudio | correlação do envelope de loudness (RMS por janela de 50 ms) contra `stubs/captures/audio/boot.wav`, um PCM de 12 s gravado de um console real via loopback (ver `docs/sound.md`) | se caiu, é regressão; se subiu, suba o piso. Não é diagnóstico — um sample de diferença no ataque muda a correlação inteira sem dizer o que quebrou, igual à ressalva já feita sobre a captura do DSP |
 
-Os passos 7 e 8 são os que medem o projeto de verdade. Os outros seis impedem
+Os passos 7, 8 e 9 são os que medem o projeto de verdade. Os outros seis impedem
 que o caminho até eles apodreça.
 
 ## Limiares
@@ -39,12 +40,14 @@ e o resumo marca que aquele verde saiu sob limiar afrouxado.
 
 | variável | padrão | direção |
 |---|---|---|
-| `MIMAS_MAX_WARNINGS` | 35 | só desce |
+| `MIMAS_MAX_WARNINGS` | 28 | só desce |
 | `MIMAS_MAX_MEAN_ERR` | 1.66 | só desce |
 | `MIMAS_MIN_TRACE_PCT` | 92.1 | só sobe |
 | `MIMAS_MIN_DIFF_COV` | 90 | só sobe |
+| `MIMAS_MIN_AUDIO_CORR` | 0.707 | só sobe |
 | `MIMAS_COVERAGE_COMMITS` | `HEAD` | base do diff de cobertura |
 | `MIMAS_FRAMES` | 620 | quadros gerados na medição de vídeo |
+| `MIMAS_AUDIO_FRAMES` | 750 | quadros gerados na medição de áudio (~12 s, cobre a janela da captura) |
 
 Quando um número melhora, o gate imprime o novo valor e pede para apertar o
 limiar. Apertar é como o ganho deixa de poder se perder em silêncio.
@@ -72,6 +75,6 @@ teste aparece como cobertura do código que ele exercita, nunca dele mesmo.
 
 ## Ao reportar
 
-Diga o que aconteceu. "7 de 8 verdes, formatação vermelha" é útil. "O gate
+Diga o que aconteceu. "8 de 9 verdes, formatação vermelha" é útil. "O gate
 passou", quando um limiar foi afrouxado ou um passo pulado, não é. Um passo
 pulado não é um passo verde, e o resumo do gate diz isso em voz alta.
