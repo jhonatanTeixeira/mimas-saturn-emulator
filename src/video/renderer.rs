@@ -258,7 +258,8 @@ void main() {
 "#;
 
 pub struct GlRenderer {
-    _gl: HeadlessGl,
+    /// None when drawing on a context someone else owns, such as the live window.
+    _gl: Option<HeadlessGl>,
     prog1: u32,
     prog2: u32,
     vao: u32,
@@ -272,6 +273,9 @@ pub struct GlRenderer {
     tex_out: u32,
     fbo_out: u32,
     pub pixels: Vec<u8>,
+    /// Read the finished frame back to the CPU. Off for on-screen drawing, where the
+    /// frame is blitted straight from its FBO and never leaves the GPU.
+    pub read_back: bool,
 }
 
 unsafe fn compile(kind: u32, src: &str) -> Result<u32, String> {
@@ -343,6 +347,16 @@ fn u16_at(m: &[u8], o: usize) -> u16 {
 impl GlRenderer {
     pub fn new() -> Result<Self, String> {
         let egl = HeadlessGl::new()?;
+        Self::build(Some(egl))
+    }
+
+    /// Builds on the GL context that is already current — used by the live window, whose
+    /// context belongs to SDL. Loading the GL entry points is the caller's job.
+    pub fn in_current_context() -> Result<Self, String> {
+        Self::build(None)
+    }
+
+    fn build(egl: Option<HeadlessGl>) -> Result<Self, String> {
         unsafe {
             let prog1 = link(VDP1_VS, VDP1_FS)?;
             let prog2 = link(VDP2_VS, VDP2_FS)?;
@@ -436,12 +450,40 @@ impl GlRenderer {
                 tex_out,
                 fbo_out,
                 pixels: vec![0; WIDTH * HEIGHT * 4],
+                read_back: true,
             })
         }
     }
 
     pub fn gpu(&self) -> String {
-        format!("{} | {}", self._gl.renderer, self._gl.version)
+        match &self._gl {
+            Some(g) => format!("{} | {}", g.renderer, g.version),
+            None => "caller context".into(),
+        }
+    }
+
+    /// Blits the finished frame from its FBO to the window's default framebuffer. Both are
+    /// in GL orientation, so no flip here: the PNG dumper is what writes rows the way the
+    /// reference captures store them. The pixels never touch the CPU.
+    pub fn blit_to_screen(&self, win_w: i32, win_h: i32) {
+        unsafe {
+            gl::BindFramebuffer(gl::READ_FRAMEBUFFER, self.fbo_out);
+            gl::BindFramebuffer(gl::DRAW_FRAMEBUFFER, 0);
+            gl::Viewport(0, 0, win_w, win_h);
+            gl::BlitFramebuffer(
+                0,
+                0,
+                WIDTH as i32,
+                HEIGHT as i32,
+                0,
+                0,
+                win_w,
+                win_h,
+                gl::COLOR_BUFFER_BIT,
+                gl::NEAREST,
+            );
+            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+        }
     }
 
     unsafe fn upload(tex: u32, w: i32, h: i32, data: &[u8]) {
@@ -470,16 +512,18 @@ impl GlRenderer {
             Self::upload(self.tex_cram, 1024, 4, &v2.cram);
             self.draw_vdp1(v1);
             self.compose_vdp2(v2);
-            gl::BindFramebuffer(gl::FRAMEBUFFER, self.fbo_out);
-            gl::ReadPixels(
-                0,
-                0,
-                WIDTH as i32,
-                HEIGHT as i32,
-                gl::RGBA,
-                gl::UNSIGNED_BYTE,
-                self.pixels.as_mut_ptr() as *mut _,
-            );
+            if self.read_back {
+                gl::BindFramebuffer(gl::FRAMEBUFFER, self.fbo_out);
+                gl::ReadPixels(
+                    0,
+                    0,
+                    WIDTH as i32,
+                    HEIGHT as i32,
+                    gl::RGBA,
+                    gl::UNSIGNED_BYTE,
+                    self.pixels.as_mut_ptr() as *mut _,
+                );
+            }
         }
     }
 
