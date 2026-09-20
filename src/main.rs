@@ -149,6 +149,7 @@ fn main() {
     saturn.sound_enabled = !args.no_sound;
     if args.sound_profile {
         saturn.sound_cpu.profile = Some(Default::default());
+        saturn.scsp.borrow_mut().set_diagnostics(true);
     }
     if let Some(dir) = &args.dump {
         match video::dumper::FrameDumper::new(

@@ -4,7 +4,7 @@
 bash tools/quality_gate.sh
 ```
 
-Nove passos determinísticos: sem modelo, sem rede, sem aleatoriedade. Roda todos
+Onze passos determinísticos: sem modelo, sem rede, sem aleatoriedade. Roda todos
 e reporta no fim — um vermelho não interrompe os outros, porque saber que três
 coisas quebraram vale mais do que saber qual quebrou primeiro.
 
@@ -28,9 +28,12 @@ nomes afirmavam verificar a troca de framebuffer. `cargo build`, `cargo test`
 | 7 | vídeo | erro médio de pixel contra as capturas reais | se a imagem piorou, é regressão; se melhorou, baixe o teto |
 | 8 | trace | % dos PCs do trace real que executamos, e opcodes divergentes | se caiu, é regressão; se subiu, suba o piso |
 | 9 | áudio | correlação do envelope de loudness (RMS por janela de 50 ms) contra `stubs/captures/audio/boot.wav`, um PCM de 12 s gravado de um console real via loopback (ver `docs/sound.md`) | se caiu, é regressão; se subiu, suba o piso. Não é diagnóstico — um sample de diferença no ataque muda a correlação inteira sem dizer o que quebrou, igual à ressalva já feita sobre a captura do DSP |
+| 10 | vídeo do jogo atual | quadros de `stubs/captures-game/frames/` contra o que o mimasv2 gera para o mesmo jogo | **pulado hoje**: sem referência gravada, ou o mimasv2 ainda não roda jogo (CD Block é stub). Trabalhamos com um jogo por vez — a pasta não tem nome de jogo no caminho, é sempre "o jogo atual" |
+| 11 | áudio do jogo atual | `stubs/captures-game/audio.wav` contra o que o mimasv2 gera, mesmo método do passo 9 | **pulado hoje**, mesmo motivo do passo 10 |
 
-Os passos 7, 8 e 9 são os que medem o projeto de verdade. Os outros seis impedem
-que o caminho até eles apodreça.
+Os passos 7, 8 e 9 são os que medem o projeto de verdade hoje. Os passos 10 e
+11 vão se juntar a eles quando o mimasv2 rodar um jogo de verdade — a
+infraestrutura já existe, só falta o que comparar do nosso lado.
 
 ## Limiares
 
@@ -75,6 +78,6 @@ teste aparece como cobertura do código que ele exercita, nunca dele mesmo.
 
 ## Ao reportar
 
-Diga o que aconteceu. "8 de 9 verdes, formatação vermelha" é útil. "O gate
-passou", quando um limiar foi afrouxado ou um passo pulado, não é. Um passo
+Diga o que aconteceu. "9 de 11 verdes, 2 pulados, formatação vermelha" é útil.
+"O gate passou", quando um limiar foi afrouxado ou um passo pulado, não é. Um passo
 pulado não é um passo verde, e o resumo do gate diz isso em voz alta.
