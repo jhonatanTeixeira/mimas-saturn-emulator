@@ -55,7 +55,7 @@ check_loosening "MIMAS_MIN_AUDIO_CORR" "$MIN_AUDIO_CORR" 0.707 min
 [ -n "${MIMAS_OVERRIDE_REASON:-}" ] && echo "⚠️  motivo declarado: $MIMAS_OVERRIDE_REASON"
 
 # --- 1. formatação ----------------------------------------------------------
-step "1/9 formatação"
+step "1/11 formatação"
 if cargo fmt --check >/dev/null 2>&1; then
     pass "formatação"
 else
@@ -63,7 +63,7 @@ else
 fi
 
 # --- 2. clippy: catraca de avisos ------------------------------------------
-step "2/9 clippy (teto de $MAX_WARNINGS avisos)"
+step "2/11 clippy (teto de $MAX_WARNINGS avisos)"
 CLIPPY_OUT=$(cargo clippy --all-targets 2>&1)
 if echo "$CLIPPY_OUT" | grep -qE '^error'; then
     fail "clippy: erro de compilação"
@@ -82,7 +82,7 @@ fi
 # neste projeto-irmão enquanto calava o aviso que apontava o problema.
 
 # --- 3. testes --------------------------------------------------------------
-step "3/9 testes"
+step "3/11 testes"
 if TEST_OUT=$(cargo test 2>&1); then
     # `cargo test` imprime uma linha de resultado por alvo (lib, bins, doc);
     # somar é a única contagem que não mente quando um alvo tem zero testes.
@@ -93,7 +93,7 @@ else
 fi
 
 # --- 4. testes que não afirmam nada ----------------------------------------
-step "4/9 testes que não afirmam nada"
+step "4/11 testes que não afirmam nada"
 if python3 tools/assertionless_tests.py; then
     pass "todo teste afirma algo"
 else
@@ -101,7 +101,7 @@ else
 fi
 
 # --- 5. regras do projeto ---------------------------------------------------
-step "5/9 regras do projeto"
+step "5/11 regras do projeto"
 python3 tools/project_rules.py --self-test >/dev/null || { fail "project_rules.py: self-test quebrado (o verificador está errado, não o código)"; }
 if python3 tools/project_rules.py; then
     pass "regras do projeto"
@@ -110,7 +110,7 @@ else
 fi
 
 # --- 6. cobertura das linhas mudadas ---------------------------------------
-step "6/9 cobertura do diff ($COVERAGE_RANGE, piso ${MIN_DIFF_COV}%)"
+step "6/11 cobertura do diff ($COVERAGE_RANGE, piso ${MIN_DIFF_COV}%)"
 if ! command -v cargo-tarpaulin >/dev/null; then
     skip "cobertura: cargo-tarpaulin não instalado (cargo install cargo-tarpaulin)"
 elif [ "${MIMAS_SKIP_COVERAGE:-0}" = "1" ]; then
@@ -132,7 +132,7 @@ else
 fi
 
 # --- 7. vídeo contra as capturas reais -------------------------------------
-step "7/9 vídeo: erro médio contra as capturas (teto $MAX_MEAN_ERR/255)"
+step "7/11 vídeo: erro médio contra as capturas (teto $MAX_MEAN_ERR/255)"
 if [ ! -f saturn_bios.bin ]; then
     fail "vídeo: saturn_bios.bin não está na raiz — sem ele não há medição"
 elif [ ! -d stubs/captures ]; then
@@ -158,7 +158,7 @@ else
 fi
 
 # --- 8. execução contra o trace real ---------------------------------------
-step "8/9 trace: % dos PCs da referência (piso ${MIN_TRACE_PCT}%)"
+step "8/11 trace: % dos PCs da referência (piso ${MIN_TRACE_PCT}%)"
 if [ ! -f bios_trace_no_game.txt ]; then
     fail "trace: bios_trace_no_game.txt não está na raiz"
 else
@@ -183,7 +183,7 @@ fi
 # vídeo. Compara loudness ao longo do tempo (RMS por janela de 50 ms),
 # buscando o deslocamento de tempo que melhor alinha as duas curvas, porque a
 # gravação de referência não começa no mesmo instante que a amostra 0 nossa.
-step "9/9 áudio: correlação do envelope contra a captura real (piso $MIN_AUDIO_CORR)"
+step "9/11 áudio: correlação do envelope contra a captura real (piso $MIN_AUDIO_CORR)"
 if [ ! -f saturn_bios.bin ]; then
     fail "áudio: saturn_bios.bin não está na raiz — sem ele não há medição"
 elif [ ! -f stubs/captures/audio/boot.wav ]; then
@@ -204,6 +204,27 @@ else
     else
         fail "áudio: a execução da BIOS falhou (veja /tmp/mimasv2_audio_run.log)"
     fi
+fi
+
+# --- 10/11. vídeo do jogo atual ----------------------------------------------
+# Trabalhamos com um jogo por vez: a referência sempre mora no mesmo lugar,
+# não tem nome de jogo no caminho. Pula (não falha) enquanto não houver
+# referência, e pula de novo enquanto o mimasv2 não souber rodar um jogo de
+# verdade (o CD Block hoje é stub comportamental — ver AGENTS.md) — os dois
+# lados têm de existir antes disso virar pass/fail.
+step "10/11 vídeo do jogo atual"
+if [ ! -d stubs/captures-game/frames ] || [ -z "$(ls -A stubs/captures-game/frames 2>/dev/null)" ]; then
+    skip "vídeo do jogo: sem captura de referência em stubs/captures-game/frames/"
+else
+    skip "vídeo do jogo: referência existe, mimasv2 ainda não roda jogo — nada nosso para comparar"
+fi
+
+# --- 11/11. áudio do jogo atual -----------------------------------------------
+step "11/11 áudio do jogo atual"
+if [ ! -f stubs/captures-game/audio.wav ]; then
+    skip "áudio do jogo: sem stubs/captures-game/audio.wav"
+else
+    skip "áudio do jogo: referência existe, mimasv2 ainda não roda jogo — nada nosso para comparar"
 fi
 
 # --- resumo -----------------------------------------------------------------
