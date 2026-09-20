@@ -48,25 +48,25 @@ impl Sh2Runtime {
 
 type Rt = Sh2Runtime;
 
-pub extern "C" fn rt_read8(rt: *mut Rt, addr: u32) -> u32 {
+pub(crate) extern "C" fn rt_read8(rt: *mut Rt, addr: u32) -> u32 {
     unsafe { (*(*rt).bus).read8(addr) as u32 }
 }
-pub extern "C" fn rt_read16(rt: *mut Rt, addr: u32) -> u32 {
+pub(crate) extern "C" fn rt_read16(rt: *mut Rt, addr: u32) -> u32 {
     unsafe { (*(*rt).bus).read16(addr) as u32 }
 }
-pub extern "C" fn rt_read32(rt: *mut Rt, addr: u32) -> u32 {
+pub(crate) extern "C" fn rt_read32(rt: *mut Rt, addr: u32) -> u32 {
     unsafe { (*(*rt).bus).read32(addr) }
 }
-pub extern "C" fn rt_write8(rt: *mut Rt, addr: u32, v: u32) {
+pub(crate) extern "C" fn rt_write8(rt: *mut Rt, addr: u32, v: u32) {
     unsafe { (*(*rt).bus).write8(addr, v as u8) }
 }
-pub extern "C" fn rt_write16(rt: *mut Rt, addr: u32, v: u32) {
+pub(crate) extern "C" fn rt_write16(rt: *mut Rt, addr: u32, v: u32) {
     unsafe { (*(*rt).bus).write16(addr, v as u16) }
 }
-pub extern "C" fn rt_write32(rt: *mut Rt, addr: u32, v: u32) {
+pub(crate) extern "C" fn rt_write32(rt: *mut Rt, addr: u32, v: u32) {
     unsafe { (*(*rt).bus).write32(addr, v) }
 }
-pub extern "C" fn rt_trace(st: *const Sh2State, rt: *mut Rt, pc: u32) {
+pub(crate) extern "C" fn rt_trace(st: *const Sh2State, rt: *mut Rt, pc: u32) {
     unsafe {
         if let Some(t) = (*rt).tracer {
             (*t).on_instruction(&*st, pc, &mut *(*rt).bus);

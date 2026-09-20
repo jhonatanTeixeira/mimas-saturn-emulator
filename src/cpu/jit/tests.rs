@@ -606,3 +606,22 @@ fn cycles_are_accumulated() {
     let st = run_regs(&[0x7001, 0x7001, 0x7001], &[]);
     assert!(st.cycles >= 3, "ciclos = {}", st.cycles);
 }
+
+/// A 32-bit store goes out through the JIT's own runtime helper, which is the only path
+/// compiled code has to the bus. Without a test that stores a long, that helper is never
+/// exercised even though every other width is.
+#[test]
+fn a_long_store_reaches_the_bus() {
+    let (st, mut bus) = run(
+        &[
+            rr(0x2002, 1, 2), // mov.l r1,@r2
+            rr(0x6002, 2, 3), // mov.l @r2,r3  -> reads it straight back
+        ],
+        |st, _| {
+            st.r[1] = 0xDEAD_BEEF;
+            st.r[2] = 0x8000;
+        },
+    );
+    assert_eq!(bus.read32(0x8000), 0xDEAD_BEEF, "the long reached memory");
+    assert_eq!(st.r[3], 0xDEAD_BEEF, "and reads back unchanged");
+}

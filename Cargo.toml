@@ -9,6 +9,7 @@ dynasmrt = "5.1.0"
 gl = "0.14"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 m68k = "0.14.0"
+sdl2 = "0.38.0"
 
 [profile.dev]
 opt-level = 1
