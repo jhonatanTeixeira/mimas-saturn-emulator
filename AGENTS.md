@@ -38,7 +38,10 @@ o novo em inglês.
    geral de SH-2/Saturn. Foi essa regra que fez a BIOS bootar em 3 horas depois
    de meses presos ao estilo do Yabause. A única exceção é capturar trace novo,
    que usa a **saída** de um emulador instrumentado, nunca o código dele:
-   `tools/trace-capture/`.
+   `tools/trace-capture/`. "Saída" tem definição estreita e ela está em "A
+   linha: saída, nunca resposta", mais abaixo — leia antes de instrumentar
+   qualquer coisa. Copiar as respostas do vizinho quebra esta regra tanto
+   quanto ler o código dele.
 5. **OOP e SOLID:** a CPU/JIT só conhece a trait `Sh2Bus`; chips implementam
    `MemoryDevice`; um chip novo entra registrando-se no barramento, sem tocar na
    CPU nem nos chips existentes.
@@ -63,8 +66,6 @@ cargo run --release --bin live                               # janela: BIOS em t
 cargo run --release --bin gl_probe                           # sanidade: contexto EGL surfaceless + leitura do FBO
 ./target/release/mimasv2 --frames 300 --dump-sound-ram som.bin   # despeja a RAM de som (o driver que a BIOS carregou)
 cargo run --release --bin m68k_probe -- som.bin              # roda esse driver no núcleo 68000 e mostra o que ele faz
-DSP_STATE=x_dsp_state.txt DSP_RAM=x_dsp_ram.bin DSP_STEPS=x_dsp_steps.txt \
-  ./target/release/dsp_check x_dsp_program.txt x_dsp_io.txt  # DSP de efeitos contra a captura real, passo a passo
 ./target/release/mimasv2 --frames 750 --dump-audio nosso.wav
 ./target/release/compare_audio stubs/captures/audio/boot.wav nosso.wav  # forma do envelope contra a captura real
 bash tools/quality_gate.sh                                   # antes de dar qualquer trabalho por pronto
@@ -107,8 +108,10 @@ composição, o único lugar que conhece tipos concretos) → `cpu` / `bus` /
   indireto), `vdp1.rs`, `vdp2.rs`, `ram.rs`, `scsp.rs` (registradores, 32 slots
   de PCM, temporizadores) e `sound_cpu.rs` (o 68000 que roda o driver de som da
   BIOS, do crate `m68k`). Stubs: `smpc.rs`, `cd_block.rs`, `scu_dsp.rs`,
-  `stub.rs` (`RegisterStub`, `OpenBus`). O `scsp_dsp.rs` (DSP de efeitos) é
-  validado contra a captura real por `src/bin/dsp_check.rs`.
+  `stub.rs` (`RegisterStub`, `OpenBus`). O `scsp_dsp.rs` (DSP de efeitos) tem
+  testes próprios; o comparador passo a passo contra a captura de um emulador
+  foi retirado em 2026-09-21 — era estado interno de chip, do lado errado da
+  linha, e o envelope de áudio contra `boot.wav` é o oráculo que sobrou.
 - **`src/video/`** — `egl.rs` (contexto headless, usado pelo gravador de PNG e
   pelo gate), `renderer.rs` (duas passadas GL; `in_current_context()` desenha no
   contexto de quem chama, que é como a janela funciona),
@@ -183,20 +186,52 @@ regra continua valendo: **o endereço manda**. `0x0580xxxx` é CD Block (rotulad
 `0x05FExxxx` são registradores do SCU (rotulado VDP2), `0x05F0–5F7xxxx` é CRAM
 do VDP2. Escritas `mov.w` nunca são anotadas.
 
+## A linha: saída, nunca resposta
+
+**Uma captura registra o que o Saturn produz. Nunca o que um chip responde.**
+
+| pode | é |
+|---|---|
+| trace de SH-2 | quadro, núcleo, PC, opcode, desmontagem e o **endereço** acessado |
+| quadros PNG | pixels |
+| PCM | amostras |
+
+| não pode | por quê |
+|---|---|
+| log de registradores de um chip (CD Block, SCSP, SMPC, SCU) | é o protocolo do emulador vizinho, entregue pronto para transplante |
+| estado interno de um chip (atenuação por slot, passos do DSP) | idem, um nível mais fundo |
+| o **valor** de uma leitura, em qualquer lugar | é a resposta dele, não a do hardware |
+
+A diferença entre as duas colunas: de uma saída não se lê a implementação; de
+uma resposta se lê. O trace diz **por onde o código passou**; os quadros e o PCM
+dizem **o que deveria sair**. Nenhum dos três diz o que um registrador vale, e é
+por isso que os três são permitidos.
+
+Isto é a regra 4 levada a sério. Ler o código do vizinho e copiar as respostas
+dele dão no mesmo resultado; a segunda só demora mais para aparecer. **Em
+2026-09-21 um agente gravou o protocolo inteiro do CD Block de um emulador,
+ajustou cinco constantes de tempo até a comparação fechar, e chamou isso de
+"dirigido por dados". Era um transplante.** O parágrafo que autorizava isso vivia
+aqui mesmo, e dizia "faça o stub devolver esse valor".
+
 ## O ciclo de trabalho que funciona
 
 1. Rode e veja onde trava: `--profile` acha o laço de espera.
-2. `--break <pc> --break-n <grande>` mostra o que aquele laço consulta.
-3. Ache o mesmo PC no trace de referência (`grep "PC: 0601326"`) para ver **que
-   valor a máquina real leu ali**.
-4. Faça o stub devolver esse valor, e repita. A lista `Report::missing_runs` do
-   `--trace-check` aponta a próxima parada.
-5. Meça de novo. Se o erro médio não caiu e a porcentagem do trace não subiu,
-   não foi a correção.
+2. `--break <pc> --break-n <grande>` mostra **qual endereço** aquele laço
+   consulta e o que ele testa no valor lido (`tst`, `cmp/eq`, a máscara).
+3. Descubra, do **comportamento documentado daquele chip**, o que o hardware
+   devolveria ali. O endereço diz qual registrador é; o teste do laço diz qual
+   bit importa. Se a documentação não cobre, é palpite — escreva que é.
+4. Implemente e meça. A cobertura do `--trace-check` subiu? O erro de vídeo
+   caiu? `Report::missing_runs` aponta a próxima parada.
+5. Se nenhum dos dois melhorou, não foi a correção. Desfaça.
 
-Cada stub existe para devolver o que a referência leu. Ao criar um, escreva de
-onde veio o valor: lido do trace, ou palpite ainda não verificado. Um palpite
-anotado é dívida; um palpite disfarçado de fato é armadilha.
+O trace responde **se** você acertou, nunca **qual** é a resposta. Um stub existe
+para modelar o chip até onde o vídeo depende dele; ao criar um, escreva de onde
+veio o valor: da documentação do chip, ou palpite ainda não verificado. Um
+palpite anotado é dívida; um palpite disfarçado de fato é armadilha; um valor
+copiado da resposta de outro emulador é as duas coisas, e ainda por cima
+prende o projeto no teto de precisão dele.
 
 ## Antes de dar trabalho por pronto
 
