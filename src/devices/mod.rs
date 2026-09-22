@@ -1,4 +1,6 @@
 pub mod cd_block;
+pub mod disc;
+pub mod iso9660;
 pub mod ram;
 pub mod scsp;
 pub mod scsp_dsp;
