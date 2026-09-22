@@ -83,7 +83,9 @@ onde a verdade era 13%. Agora roda com `CARGO_PROFILE_DEV_OPT_LEVEL=0`.
 O DSP de efeitos **bate com a referência bit a bit**: 99,7% de amostras idênticas
 em 60.000, pico 4004 igual, correlação 1,000000, e **0 passos divergentes em
 108** no trace passo a passo das quatro primeiras amostras. Medido por
-`src/bin/dsp_check.rs` contra a captura de `tools/trace-capture/`.
+os testes de `src/devices/scsp_dsp.rs` e, de fora, o envelope de áudio
+contra `stubs/captures/audio/boot.wav`. O comparador passo a passo contra a
+captura de um emulador foi retirado: era estado interno de chip.
 
 Quatro defeitos reais caíram no caminho:
 

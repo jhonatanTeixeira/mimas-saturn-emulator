@@ -211,7 +211,8 @@ importa, porque dois dos achados foram erros de instrumento meus, não do códig
 
 ### O que estava medido errado
 
-A comparação anterior (`dsp_check`) dizia 1,2% de amostras iguais e saída zero.
+A comparação anterior (o comparador passo a passo, desde retirado) dizia 1,2%
+de amostras iguais e saída zero.
 Duas causas, nenhuma no nosso DSP:
 
 1. **Janela curta demais.** O primeiro atraso deste reverb é `MADRS[2] = 11263`
