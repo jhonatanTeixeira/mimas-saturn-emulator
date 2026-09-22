@@ -1,6 +1,9 @@
 //! Registradores do SH7604 em 0xFFFFFE00-0xFFFFFFFF (FRT, WDT, INTC, DIVU, DMAC, BSC, cache).
-//! Só a DIVU e o FRT têm comportamento (afetam o resultado da matemática/temporização da
-//! BIOS); os demais são bancos de registradores que guardam e devolvem o que foi escrito.
+//! DIVU, FRT e DMAC têm comportamento (a matemática e a temporização da BIOS dependem dos
+//! dois primeiros; o DMAC é o que um jogo usa para copiar memória e espera pelo bit TE); os
+//! demais são bancos de registradores que guardam e devolvem o que foi escrito.
+
+use super::dmac::Dmac;
 
 const SIZE: usize = 0x200;
 
@@ -10,6 +13,7 @@ pub struct OnChip {
     pub now: u64,
     frc_base: u16,
     frc_time: u64,
+    pub dmac: Dmac,
 }
 
 impl Default for OnChip {
@@ -25,6 +29,7 @@ impl OnChip {
             now: 0,
             frc_base: 0,
             frc_time: 0,
+            dmac: Dmac::new(),
         };
         // Valores de reset relevantes.
         o.regs[0x11] = 0x00; // FTCSR
@@ -66,6 +71,9 @@ impl OnChip {
 
     fn rd(&mut self, off: u32, size: usize) -> u32 {
         let off = (off & 0x1FF) as usize;
+        if Dmac::owns(off as u32) {
+            return self.dmac.read(off as u32, size);
+        }
         match off {
             0x12 | 0x13 => {
                 let f = self.frc() as u32;
@@ -82,6 +90,10 @@ impl OnChip {
 
     fn wr(&mut self, off: u32, size: usize, val: u32) {
         let off = (off & 0x1FF) as usize;
+        if Dmac::owns(off as u32) {
+            self.dmac.write(off as u32, size, val);
+            return;
+        }
         match off {
             // FRC: reinicia a contagem a partir do valor escrito.
             0x12 | 0x13 => {
@@ -121,6 +133,13 @@ impl OnChip {
                 }
             }
         }
+    }
+
+    /// Interrupt level the INTC gives the DMAC (IPRA bits 11-8), and the pending request's
+    /// vector, if a transfer-end interrupt is waiting.
+    pub fn dmac_irq(&self) -> Option<(u32, u32)> {
+        let (_, vector) = self.dmac.pending_irq()?;
+        Some(((self.regs[0xE2] & 0xF) as u32, vector))
     }
 
     fn divisor(&self) -> i64 {

@@ -2,6 +2,7 @@
 
 pub mod address_space;
 pub mod decode;
+pub mod dmac;
 pub mod jit;
 pub mod onchip;
 pub mod sh2_bus;

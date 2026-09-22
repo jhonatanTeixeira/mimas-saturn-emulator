@@ -75,7 +75,10 @@ macro_rules! write_fn {
                     $size,
                     v as u32,
                 ),
-                7 if addr >= 0xFFFF_FE00 => self.onchip.$dev(addr & 0x1FF, v),
+                7 if addr >= 0xFFFF_FE00 => {
+                    self.onchip.$dev(addr & 0x1FF, v);
+                    self.onchip.dmac.run(&mut self.sys);
+                }
                 7 => self.sys.$sys(addr, v),
                 _ => {}
             }
@@ -99,5 +102,49 @@ impl Sh2Bus for Sh2AddressSpace {
     }
     fn drain_dirty_code(&mut self, out: &mut Vec<(u32, u32)>) {
         self.sys.drain_dirty_code(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::devices::ram::Ram;
+
+    fn space() -> Sh2AddressSpace {
+        let mut bus = SystemBus::new();
+        bus.map(
+            "ram",
+            0x0600_0000,
+            0x0010_0000,
+            0x10_0000,
+            Box::new(Ram::new(0x10_0000)),
+            true,
+        );
+        Sh2AddressSpace::new(bus)
+    }
+
+    #[test]
+    fn writing_the_dmac_registers_through_the_bus_runs_the_transfer() {
+        let mut sp = space();
+        sp.write32(0x0600_0000, 0xCAFE_F00D);
+        sp.write32(0xFFFF_FF80, 0x0600_0000); // SAR0
+        sp.write32(0xFFFF_FF84, 0x0600_0100); // DAR0
+        sp.write32(0xFFFF_FF88, 1); // TCR0
+        sp.write32(0xFFFF_FFB0, 1); // DMAOR: DME
+        // long units, both incrementing, auto request, transfer-end interrupt, enabled
+        sp.write32(
+            0xFFFF_FF8C,
+            (1 << 14) | (1 << 12) | (2 << 10) | (1 << 9) | 4 | 1,
+        );
+        assert_eq!(sp.read32(0x0600_0100), 0xCAFE_F00D);
+        assert_eq!(sp.read32(0xFFFF_FF8C) & 2, 2, "TE reads back set");
+        assert_eq!(sp.read32(0xFFFF_FF88), 0);
+        // IPRA gives the DMAC its level; VCRDMA0 its vector
+        sp.write16(0xFFFF_FEE2, 0x0500);
+        sp.write32(0xFFFF_FFA0, 0x48);
+        assert_eq!(sp.onchip.dmac_irq(), Some((5, 0x48)));
+        // clearing TE (and DE, or the channel would restart) withdraws the request
+        sp.write32(0xFFFF_FF8C, (1 << 9) | 4);
+        assert_eq!(sp.onchip.dmac_irq(), None);
     }
 }
