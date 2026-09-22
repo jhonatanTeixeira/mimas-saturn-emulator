@@ -22,13 +22,19 @@ usa a **saída**. O código do emulador não entra aqui, e nada em `src/` pode
 derivar dele. `tools/project_rules.py` reprova qualquer vocabulário de
 implementação do Yabause dentro de `src/`.
 
+"Saída" é estreito, e o limite está em "A linha: saída, nunca resposta", no
+`AGENTS.md`. Em uma frase: **grave o que o Saturn produz, nunca o que um chip
+responde.** Trace de SH-2 (com o endereço acessado, nunca o valor lido), quadros
+e PCM, e nada mais. Um log de registradores de chip é o protocolo do vizinho
+entregue pronto para transplante — em 2026-09-21 isso aconteceu com o CD Block e
+custou uma sessão inteira. Foi por isso que os ganchos de registradores do SCSP e
+de estado do DSP saíram deste patch.
+
 ## Passo a passo
 
-O patch é contra o YabaSanshiro e toca cinco arquivos:
+O patch é contra o YabaSanshiro e toca quatro arquivos:
 `yabause/src/sh2int.c` (o interpretador de SH-2), `yabause/src/memory.c` (os
-acessos à memória), `yabause/src/scsp.c` (captura do DSP de efeitos e dos
-registradores do SCSP — ver "Capturando os registradores do SCSP" abaixo),
-`yabause/src/libretro/libretro.c` (bandeja vazia e a captura de quadros — ver
+acessos à memória), `yabause/src/libretro/libretro.c` (bandeja vazia e a captura de quadros — ver
 "Capturando quadros" abaixo) e `yabause/src/libretro/Makefile.common` (as
 dependências de PNG/zlib que a captura de quadros usa).
 
@@ -110,38 +116,8 @@ traces bem diferentes.
 | `MIMAS_TRACE_MIN_FRAME` | `0` | primeiro quadro capturado; use para pular o boot |
 | `MIMAS_TRACE_MAX_FRAME` | `740` | último quadro; suba para capturar jogo |
 | `MIMAS_TRACE_NO_DISC` | desligado | `1` força a bandeja vazia (o caminho do CD Player) |
-| `MIMAS_DSP_CAPTURE` | desligado | `1` liga a captura do DSP de efeitos (abaixo) |
-| `MIMAS_DSP_ROWS` | `60000` | quantas amostras de entrada/saída do DSP gravar |
-| `MIMAS_REG_TRACE` | desligado | `1` liga a captura dos registradores do SCSP (abaixo) |
 | `MIMAS_FRAME_CAPTURE` | desligado | `1` liga a captura de quadros em PNG (abaixo) |
 | `MIMAS_FRAME_INTERVAL` | `30` | de quantos em quantos quadros um PNG é gravado |
-
-### Capturando os registradores do SCSP
-
-`MIMAS_DSP_CAPTURE` grava o DSP de efeitos — o *caminho* do som. O que ele não
-grava é o que um jogo manda tocar: volume, tom, key-on, pan, os registradores
-comuns (`MVOL` entre eles). Com `MIMAS_REG_TRACE=1` o patch grava, para dentro
-da mesma janela de quadros que o trace de SH-2 (`MIMAS_TRACE_MIN/MAX_FRAME`),
-uma linha por escrita em `<prefixo>_scsp_regs.txt`:
-
-```
-740 w 010 1800
-741 w 010 0C08
-753 w 016 E000
-```
-
-`quadro tamanho(b/w/l) offset valor` — offset já mascarado do jeito que o
-hardware mascara (`scsp_w_b`/`scsp_w_w`/`scsp_w_d` reais, não a fila de posts
-do worker de som deste fork). Área do DSP (`offset >= 0x700`) fica de fora de
-propósito — isso já é o `MIMAS_DSP_CAPTURE`, e misturar os dois deixaria este
-arquivo do tamanho da captura de amostra a amostra por nenhum motivo.
-
-```bash
-MIMAS_TRACE_PREFIX=mkr MIMAS_TRACE_MIN_FRAME=740 MIMAS_TRACE_MAX_FRAME=4294967295 \
-MIMAS_REG_TRACE=1 \
-  retroarch -L .../yabasanshiro_libretro.so mkr.chd
-# → mkr_trace.txt, mkr_branch_trace.txt, mkr_scsp_regs.txt
-```
 
 ### Capturando quadros
 
@@ -170,9 +146,9 @@ velocidade) e não depende de nada estar sendo mostrado numa janela.
 
 ```bash
 MIMAS_TRACE_PREFIX=mkr MIMAS_TRACE_MIN_FRAME=740 MIMAS_TRACE_MAX_FRAME=4294967295 \
-MIMAS_REG_TRACE=1 MIMAS_FRAME_CAPTURE=1 \
+MIMAS_FRAME_CAPTURE=1 \
   retroarch -L .../yabasanshiro_libretro.so mkr.chd
-# → mkr_trace.txt, mkr_branch_trace.txt, mkr_scsp_regs.txt, mkr_frame_*.png
+# → mkr_trace.txt, mkr_branch_trace.txt, mkr_frame_*.png
 ```
 
 ### Sobre velocidade de captura
@@ -188,48 +164,6 @@ FBO do core direto, não depende do driver de vídeo do RetroArch) tiraram isso
 para ~28 fps — ainda abaixo de tempo real, mas suficiente. Não investiguei a
 causa raiz da lentidão do GL/Wayland; é uma característica deste build, não
 do mimasv2.
-
-### O DSP de efeitos
-
-O som de boot da BIOS sai **só** pelo DSP de efeitos: o slot chega com o envio
-seco em zero, então o que se ouve é o retorno do DSP e nada mais. Com
-`MIMAS_DSP_CAPTURE=1` o patch grava cinco arquivos, **todos do mesmo instante**:
-
-```bash
-MIMAS_DSP_CAPTURE=1 MIMAS_TRACE_PREFIX=mk MIMAS_DSP_ROWS=20000 \
-  retroarch -L .../yabasanshiro_libretro.so jogo.chd
-```
-
-| arquivo | o que traz |
-|---|---|
-| `<prefixo>_dsp_program.txt` | `rbp`/`rbl`, os 64 coeficientes, os 32 atrasos e os 128 passos de microcódigo |
-| `<prefixo>_dsp_state.txt` | `mdec_ct`, `shift_reg`, os 128 TEMP, os 32 MEMS e os registradores de acesso |
-| `<prefixo>_dsp_ram.bin` | 512 KiB de RAM de som — é onde mora o buffer circular do reverb |
-| `<prefixo>_dsp_io.txt` | uma linha por amostra: índice, 16 entradas do mixer, 16 saídas de efeito |
-| `<prefixo>_dsp_steps.txt` | estado passo a passo (`shift_reg`, `io_addr`, `read_value`, `inputs`) das 4 primeiras amostras |
-
-**Por que os cinco juntos, e por que isso importa:** o driver de som recarrega o
-programa do DSP durante o boot. Um dump de programa tirado num momento e um de
-estado tirado em outro não se comparam — foi exatamente assim que uma caçada a
-um bug de matemática se perdeu por horas, quando o programa capturado tinha
-`rbp 11` e o que rodava tinha `rbp 24`.
-
-O estado inicial resolve o outro problema: o primeiro atraso deste reverb é de
-11.263 amostras (255 ms). Começando com o anel vazio, a saída fica em zero por
-um quarto de segundo, e a comparação nessa janela só mede o silêncio. Carregado
-o estado da referência, dá para comparar desde a amostra 0.
-
-Do lado do mimasv2, quem consome isso é `src/bin/dsp_check.rs`:
-
-```bash
-DSP_STATE=mk_dsp_state.txt DSP_RAM=mk_dsp_ram.bin DSP_STEPS=mk_dsp_steps.txt \
-  ./target/release/dsp_check mk_dsp_program.txt mk_dsp_io.txt
-```
-
-Ele carrega o estado, roda o nosso DSP com as entradas da referência e reporta o
-primeiro passo em que os dois discordam. `0 divergentes` por amostra quer dizer
-que o núcleo bate instrução a instrução; o que sobra depois disso é rota de
-sinal, não matemática.
 
 ### Quando a captura morre no meio
 
