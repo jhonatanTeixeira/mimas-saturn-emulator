@@ -24,6 +24,7 @@ struct Args {
     dump_dsp: Option<String>,
     sound_profile: bool,
     no_sound: bool,
+    disc: Option<String>,
     dump: Option<String>,
     dump_from: u32,
     dump_to: u32,
@@ -64,6 +65,7 @@ fn parse_args() -> Args {
         dump_dsp: None,
         sound_profile: false,
         no_sound: false,
+        disc: None,
         dump: None,
         dump_from: 0,
         dump_to: u32::MAX,
@@ -107,6 +109,7 @@ fn parse_args() -> Args {
             "--dump-dsp" => a.dump_dsp = it.next(),
             "--sound-profile" => a.sound_profile = true,
             "--no-sound" => a.no_sound = true,
+            "--disc" => a.disc = it.next(),
             "--vram" => {
                 a.vram = it
                     .next()
@@ -147,6 +150,11 @@ fn main() {
         std::fs::read(&args.bios).unwrap_or_else(|e| panic!("não consegui ler {}: {e}", args.bios));
     let mut saturn = Saturn::new(&bios);
     saturn.sound_enabled = !args.no_sound;
+    if let Some(cue) = &args.disc {
+        saturn
+            .insert_disc(std::path::Path::new(cue))
+            .unwrap_or_else(|e| panic!("--disc {cue}: {e}"));
+    }
     if args.sound_profile {
         saturn.sound_cpu.profile = Some(Default::default());
         saturn.scsp.borrow_mut().set_diagnostics(true);

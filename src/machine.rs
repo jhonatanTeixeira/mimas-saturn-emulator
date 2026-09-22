@@ -31,6 +31,8 @@ pub struct Saturn {
     pub scu: Rc<RefCell<Scu>>,
     pub smpc: Rc<RefCell<Smpc>>,
     pub cd: Rc<RefCell<CdBlock>>,
+    /// The inserted disc, if any. See `insert_disc`.
+    pub disc: Option<crate::devices::disc::DiscImage>,
     pub vdp1: Rc<RefCell<Vdp1>>,
     pub vdp2: Rc<RefCell<Vdp2>>,
     pub scsp_ram: Rc<RefCell<SoundRam>>,
@@ -255,6 +257,7 @@ impl Saturn {
             sink: Box::new(NullSink),
             events: Vec::new(),
             profile: None,
+            disc: None,
             cd_cycle_carry: 0,
         }
     }
@@ -398,8 +401,25 @@ impl Saturn {
             .run_dsp_if_requested(&mut self.space.sys);
     }
 
+    /// Opens the disc image at `cue` and keeps it. Nothing reads it yet: the CD Block is
+    /// still the behavioural stub, and it will only be given the disc once it is rewritten
+    /// from the hardware's documented command set.
+    pub fn insert_disc(&mut self, cue: &std::path::Path) -> Result<(), String> {
+        self.disc = Some(crate::devices::disc::DiscImage::open(cue)?);
+        Ok(())
+    }
+
     fn deliver_interrupt(&mut self) {
         let pending = self.scu.borrow().pending_irq();
+        // The on-chip DMAC's transfer-end request competes with the SCU's: the higher level
+        // wins, and the SCU's on a tie (it was here first).
+        let dmac = self.space.onchip.dmac_irq();
+        if let Some((level, vector)) = dmac
+            && pending.is_none_or(|(l, _, _)| level > l)
+            && self.cpu.try_interrupt(&mut self.space, level, vector)
+        {
+            return;
+        }
         if let Some((level, vector, bit)) = pending {
             if self.cpu.try_interrupt(&mut self.space, level, vector) {
                 self.scu.borrow_mut().acknowledge(bit);
@@ -468,5 +488,49 @@ mod tests {
             s.frame() >= 1,
             "two frames' worth of cycles must have advanced the counter"
         );
+    }
+
+    #[test]
+    fn a_disc_can_be_inserted_and_a_missing_one_is_an_error() {
+        let mut s = saturn();
+        assert!(
+            s.insert_disc(std::path::Path::new("/nonexistent/x.cue"))
+                .is_err()
+        );
+        assert!(s.disc.is_none());
+        let dir = std::env::temp_dir().join(format!("mimas_machine_disc_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("d.bin"), vec![0u8; 2352 * 4]).unwrap();
+        std::fs::write(
+            dir.join("d.cue"),
+            "FILE \"d.bin\" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n",
+        )
+        .unwrap();
+        s.insert_disc(&dir.join("d.cue")).unwrap();
+        assert_eq!(s.disc.as_ref().unwrap().tracks.len(), 1);
+    }
+
+    #[test]
+    fn a_dmac_transfer_end_interrupt_is_delivered_at_the_level_ipra_gives_it() {
+        use crate::cpu::sh2_bus::Sh2Bus;
+        let mut s = saturn();
+        s.cpu.st.sr = 0; // interrupts unmasked
+        s.cpu.st.r[15] = 0x0600_0400;
+        s.space.write32(0x0600_0000, 0x1234);
+        s.space.write32(0xFFFF_FF80, 0x0600_0000);
+        s.space.write32(0xFFFF_FF84, 0x0600_0100);
+        s.space.write32(0xFFFF_FF88, 1);
+        s.space.write32(0xFFFF_FFB0, 1);
+        s.space.write16(0xFFFF_FEE2, 0x0600);
+        s.space.write32(0xFFFF_FFA0, 0x48);
+        s.space.write32(
+            0xFFFF_FF8C,
+            (1 << 14) | (1 << 12) | (2 << 10) | (1 << 9) | 4 | 1,
+        );
+        s.cpu.st.vbr = 0x0600_1000;
+        s.space.write32(0x0600_1000 + 0x48 * 4, 0x0600_2000);
+        s.deliver_interrupt();
+        assert_eq!(s.cpu.st.pc, 0x0600_2000);
+        assert_eq!(s.cpu.st.imask(), 6);
     }
 }
