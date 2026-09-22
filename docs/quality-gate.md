@@ -43,7 +43,7 @@ e o resumo marca que aquele verde saiu sob limiar afrouxado.
 
 | variável | padrão | direção |
 |---|---|---|
-| `MIMAS_MAX_WARNINGS` | 28 | só desce |
+| `MIMAS_MAX_WARNINGS` | 25 | só desce |
 | `MIMAS_MAX_MEAN_ERR` | 1.66 | só desce |
 | `MIMAS_MIN_TRACE_PCT` | 92.1 | só sobe |
 | `MIMAS_MIN_DIFF_COV` | 90 | só sobe |

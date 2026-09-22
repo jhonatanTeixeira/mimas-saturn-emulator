@@ -20,7 +20,7 @@ step() { echo; echo "── $1"; }
 # --- limiares ---------------------------------------------------------------
 # Medidos neste repositório em 2026-09-20. Só descem (erro, avisos) ou sobem
 # (cobertura, trace) — nunca o contrário sem justificativa.
-MAX_WARNINGS="${MIMAS_MAX_WARNINGS:-28}"        # avisos do clippy
+MAX_WARNINGS="${MIMAS_MAX_WARNINGS:-25}"        # avisos do clippy
 MAX_MEAN_ERR="${MIMAS_MAX_MEAN_ERR:-1.66}"      # erro médio contra as capturas
 MIN_TRACE_PCT="${MIMAS_MIN_TRACE_PCT:-92.1}"    # % do trace de referência
 MIN_DIFF_COV="${MIMAS_MIN_DIFF_COV:-90}"        # cobertura das linhas mudadas
@@ -47,7 +47,7 @@ check_loosening() { # nome, valor_atual, padrão, direção(min|max)
         fi
     fi
 }
-check_loosening "MIMAS_MAX_WARNINGS"  "$MAX_WARNINGS"  28    max
+check_loosening "MIMAS_MAX_WARNINGS"  "$MAX_WARNINGS"  25    max
 check_loosening "MIMAS_MAX_MEAN_ERR"  "$MAX_MEAN_ERR"  1.66  max
 check_loosening "MIMAS_MIN_TRACE_PCT" "$MIN_TRACE_PCT" 92.1  min
 check_loosening "MIMAS_MIN_DIFF_COV"  "$MIN_DIFF_COV"  90    min
